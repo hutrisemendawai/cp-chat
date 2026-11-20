@@ -11,6 +11,9 @@
 # Backend build artifacts
 backend/bin/
 backend/tmp/
+backend/dist/
+backend/node_modules/
+backend/.env.local
 
 # Flutter/Dart (mobile/ has its own .gitignore, kept here as a safety net)
 mobile/.dart_tool/

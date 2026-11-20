@@ -329,23 +329,32 @@ Follow these phases sequentially. **By the end of Phase 1, you will have a worki
 **Goal:** End-to-end usable 1:1 text messaging on Android with offline sync and push notifications.
 
 #### Backend Tasks
-- [ ] **Auth Service:** Implement user registration, login, and JWT issuance (access + refresh tokens).
-- [ ] **Chat Gateway (WebSocket):** Authenticate WebSocket upgrades via JWT; register `user_id -> gateway_node` in Redis upon connect and remove on disconnect.
-- [ ] **Message Service:**
+- [x] **Auth Service:** Implement user registration, login, and JWT issuance (access + refresh tokens).
+- [x] **Chat Gateway (WebSocket):** Authenticate WebSocket upgrades via JWT; register `user_id -> gateway_node` in Redis upon connect and remove on disconnect.
+- [x] **Message Service:**
   - Validate conversation membership.
   - Generate per-conversation `seq` atomically (e.g., PostgreSQL transaction/counter or Redis `INCR` backed by DB).
   - Persist message with `client_msg_id` deduplication.
   - Return `sent` ACK to sender.
   - Route message via Redis Pub/Sub to the recipient's Chat Gateway node.
-- [ ] **Offline Sync API:** Implement `GET /conversations/{id}/sync?after_seq=...`.
-- [ ] **Notification Service:** Integrate Firebase Admin SDK to push FCM alerts when recipient has no active gateway mapping in Redis.
+- [x] **Offline Sync API:** Implement `GET /conversations/{id}/sync?after_seq=...`.
+- [x] **Notification Service:** Integrate Firebase Admin SDK to push FCM alerts when recipient has no active gateway mapping in Redis.
 
 #### Flutter Android Tasks
-- [ ] Build Login/Register screens and persist JWT in `flutter_secure_storage`.
-- [ ] Set up Drift (SQLite) local tables mirroring `conversations` and `messages` (including local `pending`/`failed` status for outbox retries).
-- [ ] Implement resilient WebSocket client with auto-reconnect (exponential backoff) and automatic `sync` call on reconnect.
-- [ ] Build Chat List screen and 1:1 Chat screen with optimistic UI (show message immediately with clock icon -> single check on `sent` ACK -> double check on `delivered`).
-- [ ] Integrate `firebase_messaging` for Android background/terminated notification handling and deep-linking into the specific chat screen.
+- [x] Build Login/Register screens and persist JWT in `flutter_secure_storage`.
+- [x] Set up Drift (SQLite) local tables mirroring `conversations` and `messages` (including local `pending`/`failed` status for outbox retries).
+- [x] Implement resilient WebSocket client with auto-reconnect (exponential backoff) and automatic `sync` call on reconnect.
+- [x] Build Chat List screen and 1:1 Chat screen with optimistic UI (show message immediately with clock icon -> single check on `sent` ACK -> double check on `delivered`).
+- [x] Integrate `firebase_messaging` for Android background/terminated notification handling and deep-linking into the specific chat screen.
+
+> **Implementation notes:** the backend is TypeScript (`backend/`, Fastify REST on
+> `:8080` + `ws` gateway on `:8081`). 1:1 conversations are canonicalised by a
+> `direct_key` unique index so creating the same chat twice returns the existing
+> row. `seq` is allocated from `conversations.last_seq` inside the insert
+> transaction, which keeps it gap-free even when a retried `client_msg_id`
+> dedupes. Refresh tokens are opaque, hashed at rest, and rotated with reuse
+> detection. `mobile/test` covers the Drift outbox and cursor logic; backend
+> tests are in `backend/test`.
 
 > **Milestone 1 (Usable App):** Two Android devices can register, start a 1:1 chat, exchange messages in real time (< 200 ms), receive FCM push notifications when offline, and sync missed messages upon reopening the app.
 

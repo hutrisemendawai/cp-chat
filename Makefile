@@ -15,6 +15,30 @@ help: ## Show available targets
 up: .env ## Start PostgreSQL, Redis and MinIO
 	$(COMPOSE) up -d postgres redis minio minio-init
 
+.PHONY: up-all
+up-all: .env migrate-up ## Start the full stack: infrastructure + API + chat gateway
+	$(COMPOSE) up -d --build postgres redis minio minio-init api gateway
+
+.PHONY: backend-install
+backend-install: ## Install backend dependencies
+	cd backend && npm ci --include=dev
+
+.PHONY: backend-typecheck
+backend-typecheck: ## Typecheck the backend
+	cd backend && npm run typecheck
+
+.PHONY: backend-test
+backend-test: ## Run backend unit and integration tests
+	cd backend && npm test
+
+.PHONY: backend-build
+backend-build: ## Compile the backend to backend/dist
+	cd backend && npm run build
+
+.PHONY: smoke
+smoke: ## Run the live end-to-end REST + WebSocket smoke test
+	cd backend && node scripts/smoke.mjs $${REST_BASE_URL:-http://localhost:8080} $${WS_BASE_URL:-ws://localhost:8081}
+
 .PHONY: down
 down: ## Stop local infrastructure (keeps volumes)
 	$(COMPOSE) down

@@ -78,6 +78,58 @@ services:
     environment:
       DATABASE_URL: ${MIGRATE_DATABASE_URL:-postgres://cpchat:cpchat@postgres:5432/cpchat?sslmode=disable}
 
+  # Stateless REST API (auth, users, conversations, history, sync).
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${SERVICE_DATABASE_URL:-postgres://cpchat:cpchat@postgres:5432/cpchat?sslmode=disable}
+      REDIS_URL: ${SERVICE_REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
+      REST_PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Stateful realtime gateway (WebSocket termination + routing).
+  gateway:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["node", "dist/gateway.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${SERVICE_DATABASE_URL:-postgres://cpchat:cpchat@postgres:5432/cpchat?sslmode=disable}
+      REDIS_URL: ${SERVICE_REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
+      GATEWAY_PORT: 8081
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      FCM_CREDENTIALS_FILE: ${FCM_CREDENTIALS_FILE:-}
+    ports:
+      - "${GATEWAY_PUBLISHED_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres-data:
   redis-data:

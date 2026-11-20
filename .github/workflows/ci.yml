@@ -71,6 +71,67 @@ jobs:
       - name: Validate OpenAPI spec
         run: npx --yes @apidevtools/swagger-cli@4 validate docs/api-spec.yaml
 
+  backend-tests:
+    name: Backend (typecheck + tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cpchat
+          POSTGRES_PASSWORD: cpchat
+          POSTGRES_DB: cpchat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cpchat -d cpchat"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://cpchat:cpchat@localhost:5432/cpchat?sslmode=disable
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-secret-that-is-long-enough
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci --include=dev
+
+      - name: Install golang-migrate
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL https://github.com/golang-migrate/migrate/releases/download/v4.17.1/migrate.linux-amd64.tar.gz \
+            | tar xz -C "$HOME/.local/bin" migrate
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Apply migrations
+        run: migrate -path backend/migrations -database "$DATABASE_URL" up
+
+      - name: Typecheck
+        working-directory: backend
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: backend
+        run: npm test
+
   mobile:
     name: Mobile (Flutter)
     runs-on: ubuntu-latest

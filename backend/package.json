@@ -1,0 +1,39 @@
+{
+  "name": "cp-chat-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CP Chat REST API and realtime WebSocket gateway",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "start:rest": "node dist/rest.js",
+    "start:gateway": "node dist/gateway.js",
+    "dev:rest": "tsx watch src/rest.ts",
+    "dev:gateway": "tsx watch src/gateway.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "fastify": "^5.12.8",
+    "firebase-admin": "^14.5.1",
+    "ioredis": "^5.11.1",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0",
+    "ws": "^8.23.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.1"
+  }
+}

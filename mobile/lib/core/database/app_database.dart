@@ -7,6 +7,11 @@ class LocalConversations extends Table {
   TextColumn get id => text()();
   TextColumn get type => text()();
   TextColumn get name => text().nullable()();
+
+  /// Display name for a direct conversation: the other participant.
+  TextColumn get peerName => text().nullable()();
+  TextColumn get lastMessagePreview => text().nullable()();
+
   IntColumn get lastSeq => integer().withDefault(const Constant(0))();
   IntColumn get lastReadSeq => integer().withDefault(const Constant(0))();
   IntColumn get unreadCount => integer().withDefault(const Constant(0))();
@@ -30,6 +35,8 @@ class LocalMessages extends Table {
   @override
   Set<Column<Object>> get primaryKey => {clientMsgId};
 
+  /// Server `seq` is unique per conversation. Rows still in the outbox have a
+  /// NULL `seq`, and SQLite treats NULLs as distinct, so they never collide.
   @override
   List<String> get customConstraints => [
         'UNIQUE (conversation_id, seq)',
@@ -56,5 +63,24 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (migrator) => migrator.createAll(),
+        onUpgrade: (migrator, from, to) async {
+          if (from < 2) {
+            await migrator.addColumn(localConversations, localConversations.peerName);
+            await migrator.addColumn(
+              localConversations,
+              localConversations.lastMessagePreview,
+            );
+          }
+        },
+        beforeOpen: (details) async {
+          // The outbox is the source of truth for unsent work; foreign keys and
+          // WAL keep reads fast while a send is in flight.
+          await customStatement('PRAGMA foreign_keys = ON');
+        },
+      );
 }

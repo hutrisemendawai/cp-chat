@@ -11,31 +11,57 @@ For detailed architecture, technology stack, and development phases, see [AGENTS
 | Path | Contents |
 | --- | --- |
 | `mobile/` | Flutter Android client (Riverpod, Drift, secure storage, WebSocket client) |
+| `backend/src/` | TypeScript REST API and realtime WebSocket gateway |
+| `backend/test/` | Backend unit and integration tests (Vitest) |
 | `backend/migrations/` | SQL schema managed with golang-migrate |
-| `backend/scripts/` | Migration wrapper used by Compose |
+| `backend/scripts/` | Migration wrapper and live end-to-end smoke test |
 | `docs/` | [OpenAPI spec](./docs/api-spec.yaml), [WebSocket protocol](./docs/ws-protocol.md), [architecture](./docs/architecture.md) |
-| `docker-compose.yml` | PostgreSQL 16, Redis 7, MinIO, migration runner |
-| `.github/workflows/ci.yml` | Migration, contract, and Flutter checks |
+| `docker-compose.yml` | PostgreSQL 16, Redis 7, MinIO, API, chat gateway, migration runner |
+| `.github/workflows/ci.yml` | Migrations, backend tests, contract, and Flutter checks |
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-make up            # start PostgreSQL, Redis, MinIO
-make migrate-up    # create the schema
-cd mobile
-flutter pub get
-dart run build_runner build
-flutter run -d android
+make up-all         # infrastructure + migrations + API + gateway
 ```
 
-`make help` lists every target. Backend services are added in Phase 1; the
-contracts they implement are already frozen in `docs/`.
+Then, for the Android client:
+
+```bash
+make mobile-get
+make mobile-gen
+make mobile-run
+```
+
+To run the backend on the host instead of in Docker:
+
+```bash
+make up                  # PostgreSQL, Redis, MinIO only
+make migrate-up
+make backend-install
+cd backend && npm run dev:rest      # REST on :8080
+cd backend && npm run dev:gateway   # WebSocket gateway on :8081
+```
+
+`make smoke` drives a full REST + WebSocket flow (register, chat, ack, sync)
+against a running stack. `make help` lists every target.
+
+## Testing
+
+```bash
+make backend-test    # Vitest: auth, conversations, seq allocation, gateway
+make mobile-test     # Drift outbox/cursors, models, auth widgets
+make mobile-analyze
+```
+
+Backend integration tests need a reachable PostgreSQL and Redis; CI provisions
+both as service containers and applies migrations first.
 
 ## Status
 
 - [x] **Phase 0** — monorepo, Docker stack, core schema, Flutter foundation, API/WS contracts, CI
-- [ ] **Phase 1** — 1:1 chat MVP with offline sync and push notifications
+- [x] **Phase 1** — 1:1 chat MVP with offline sync and push notifications
 - [ ] **Phase 2** — groups, read receipts, media sharing
 - [ ] **Phase 3** — presence, search, multi-device sync
 - [ ] **Phase 4** — scale, reliability, security hardening

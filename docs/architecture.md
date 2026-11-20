@@ -5,15 +5,26 @@ services, the database migrations, and the shared API/WebSocket contracts.
 
 ```
 .
-├── docker-compose.yml        # PostgreSQL 16, Redis 7, MinIO + migration runner
+├── docker-compose.yml        # PostgreSQL 16, Redis 7, MinIO, API, gateway
 ├── backend/
+│   ├── src/
+│   │   ├── rest.ts           # REST entry point (:8080)
+│   │   ├── gateway.ts        # WebSocket entry point (:8081)
+│   │   ├── http/             # Fastify routes, auth guard, error mapping
+│   │   ├── gateway/          # Chat gateway + Redis connection registry
+│   │   ├── domain/           # Repositories (users, conversations, messages)
+│   │   └── lib/              # DB, Redis, JWT, password, FCM helpers
+│   ├── test/                 # Vitest unit + integration suites
 │   ├── migrations/           # golang-migrate SQL migrations
-│   ├── scripts/              # Tooling (migration wrapper)
-│   ├── services/             # Service folders (implemented in Phases 1–4)
-│   └── shared/               # Shared DTOs, JWT middleware, Redis helpers
+│   └── scripts/              # Migration wrapper, live smoke test
 ├── docs/                     # OpenAPI + WebSocket contracts
 └── mobile/                   # Flutter Android app
 ```
+
+The REST API and the chat gateway are separate processes built from the same
+TypeScript sources. They share the database, Redis, and configuration, and are
+deployed and scaled independently: the REST API is stateless, while each gateway
+node holds a subset of live sockets.
 
 ## Components
 
@@ -48,10 +59,16 @@ services, the database migrations, and the shared API/WebSocket contracts.
 
 | Key | Type | Purpose |
 | --- | --- | --- |
-| `conn:{user_id}:{device_id}` | string | Gateway node holding the connection |
+| `conn:{user_id}:{device_id}` | string + TTL | Gateway node holding that device's socket |
+| `conns:{user_id}` | set + TTL | Device ids with a socket, for fan-out without `SCAN` |
 | `presence:{user_id}` | string + TTL 45 s | Online status (refreshed by heartbeat) |
-| `members:{conversation_id}` | set | Cached group membership for fan-out |
-| `ratelimit:{user_id}` | counter | Token-bucket message rate limiting |
+| `gw:{node_id}` | pub/sub channel | Fan-out to sockets owned by another gateway node |
+| `members:{conversation_id}` | set | Reserved for Phase 2 group membership caching |
+| `ratelimit:{user_id}` | counter | Reserved for Phase 4 rate limiting |
+
+Both `conn:` keys carry a TTL refreshed by the heartbeat, so a crashed node
+stops receiving fan-out within `CONNECTION_TTL_SECONDS` instead of black-holing
+messages forever.
 
 ## Storage
 

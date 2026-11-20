@@ -1,0 +1,28 @@
+import { Redis } from 'ioredis';
+
+export type Cache = Redis;
+
+export function createRedis(url: string): Redis {
+  const redis = new Redis(url, {
+    maxRetriesPerRequest: null,
+    lazyConnect: false,
+  });
+  redis.on('error', (error) => {
+    console.error('Redis error', error.message);
+  });
+  return redis;
+}
+
+export const redisKeys = {
+  connection: (userId: string, deviceId: string) => `conn:${userId}:${deviceId}`,
+  connectionsPattern: (userId: string) => `conn:${userId}:*`,
+  presenceKey: (userId: string) => `presence:${userId}`,
+  conversationMembers: (conversationId: string) => `members:${conversationId}`,
+  directConversation: (userA: string, userB: string) => {
+    const [low, high] = [userA, userB].sort();
+    return `direct:${low}:${high}`;
+  },
+  rateLimit: (userId: string) => `ratelimit:${userId}`,
+  channelForNode: (nodeId: string) => `gw:${nodeId}`,
+  allNodesChannel: 'gw:all',
+};

@@ -36,6 +36,28 @@ class $LocalConversationsTable extends LocalConversations
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _peerNameMeta = const VerificationMeta(
+    'peerName',
+  );
+  @override
+  late final GeneratedColumn<String> peerName = GeneratedColumn<String>(
+    'peer_name',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _lastMessagePreviewMeta =
+      const VerificationMeta('lastMessagePreview');
+  @override
+  late final GeneratedColumn<String> lastMessagePreview =
+      GeneratedColumn<String>(
+        'last_message_preview',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+      );
   static const VerificationMeta _lastSeqMeta = const VerificationMeta(
     'lastSeq',
   );
@@ -88,6 +110,8 @@ class $LocalConversationsTable extends LocalConversations
     id,
     type,
     name,
+    peerName,
+    lastMessagePreview,
     lastSeq,
     lastReadSeq,
     unreadCount,
@@ -122,6 +146,21 @@ class $LocalConversationsTable extends LocalConversations
       context.handle(
         _nameMeta,
         name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    }
+    if (data.containsKey('peer_name')) {
+      context.handle(
+        _peerNameMeta,
+        peerName.isAcceptableOrUnknown(data['peer_name']!, _peerNameMeta),
+      );
+    }
+    if (data.containsKey('last_message_preview')) {
+      context.handle(
+        _lastMessagePreviewMeta,
+        lastMessagePreview.isAcceptableOrUnknown(
+          data['last_message_preview']!,
+          _lastMessagePreviewMeta,
+        ),
       );
     }
     if (data.containsKey('last_seq')) {
@@ -177,6 +216,14 @@ class $LocalConversationsTable extends LocalConversations
         DriftSqlType.string,
         data['${effectivePrefix}name'],
       ),
+      peerName: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}peer_name'],
+      ),
+      lastMessagePreview: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}last_message_preview'],
+      ),
       lastSeq: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}last_seq'],
@@ -207,6 +254,10 @@ class LocalConversation extends DataClass
   final String id;
   final String type;
   final String? name;
+
+  /// Display name for a direct conversation: the other participant.
+  final String? peerName;
+  final String? lastMessagePreview;
   final int lastSeq;
   final int lastReadSeq;
   final int unreadCount;
@@ -215,6 +266,8 @@ class LocalConversation extends DataClass
     required this.id,
     required this.type,
     this.name,
+    this.peerName,
+    this.lastMessagePreview,
     required this.lastSeq,
     required this.lastReadSeq,
     required this.unreadCount,
@@ -228,6 +281,12 @@ class LocalConversation extends DataClass
     if (!nullToAbsent || name != null) {
       map['name'] = Variable<String>(name);
     }
+    if (!nullToAbsent || peerName != null) {
+      map['peer_name'] = Variable<String>(peerName);
+    }
+    if (!nullToAbsent || lastMessagePreview != null) {
+      map['last_message_preview'] = Variable<String>(lastMessagePreview);
+    }
     map['last_seq'] = Variable<int>(lastSeq);
     map['last_read_seq'] = Variable<int>(lastReadSeq);
     map['unread_count'] = Variable<int>(unreadCount);
@@ -240,6 +299,12 @@ class LocalConversation extends DataClass
       id: Value(id),
       type: Value(type),
       name: name == null && nullToAbsent ? const Value.absent() : Value(name),
+      peerName: peerName == null && nullToAbsent
+          ? const Value.absent()
+          : Value(peerName),
+      lastMessagePreview: lastMessagePreview == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastMessagePreview),
       lastSeq: Value(lastSeq),
       lastReadSeq: Value(lastReadSeq),
       unreadCount: Value(unreadCount),
@@ -256,6 +321,10 @@ class LocalConversation extends DataClass
       id: serializer.fromJson<String>(json['id']),
       type: serializer.fromJson<String>(json['type']),
       name: serializer.fromJson<String?>(json['name']),
+      peerName: serializer.fromJson<String?>(json['peerName']),
+      lastMessagePreview: serializer.fromJson<String?>(
+        json['lastMessagePreview'],
+      ),
       lastSeq: serializer.fromJson<int>(json['lastSeq']),
       lastReadSeq: serializer.fromJson<int>(json['lastReadSeq']),
       unreadCount: serializer.fromJson<int>(json['unreadCount']),
@@ -269,6 +338,8 @@ class LocalConversation extends DataClass
       'id': serializer.toJson<String>(id),
       'type': serializer.toJson<String>(type),
       'name': serializer.toJson<String?>(name),
+      'peerName': serializer.toJson<String?>(peerName),
+      'lastMessagePreview': serializer.toJson<String?>(lastMessagePreview),
       'lastSeq': serializer.toJson<int>(lastSeq),
       'lastReadSeq': serializer.toJson<int>(lastReadSeq),
       'unreadCount': serializer.toJson<int>(unreadCount),
@@ -280,6 +351,8 @@ class LocalConversation extends DataClass
     String? id,
     String? type,
     Value<String?> name = const Value.absent(),
+    Value<String?> peerName = const Value.absent(),
+    Value<String?> lastMessagePreview = const Value.absent(),
     int? lastSeq,
     int? lastReadSeq,
     int? unreadCount,
@@ -288,6 +361,10 @@ class LocalConversation extends DataClass
     id: id ?? this.id,
     type: type ?? this.type,
     name: name.present ? name.value : this.name,
+    peerName: peerName.present ? peerName.value : this.peerName,
+    lastMessagePreview: lastMessagePreview.present
+        ? lastMessagePreview.value
+        : this.lastMessagePreview,
     lastSeq: lastSeq ?? this.lastSeq,
     lastReadSeq: lastReadSeq ?? this.lastReadSeq,
     unreadCount: unreadCount ?? this.unreadCount,
@@ -298,6 +375,10 @@ class LocalConversation extends DataClass
       id: data.id.present ? data.id.value : this.id,
       type: data.type.present ? data.type.value : this.type,
       name: data.name.present ? data.name.value : this.name,
+      peerName: data.peerName.present ? data.peerName.value : this.peerName,
+      lastMessagePreview: data.lastMessagePreview.present
+          ? data.lastMessagePreview.value
+          : this.lastMessagePreview,
       lastSeq: data.lastSeq.present ? data.lastSeq.value : this.lastSeq,
       lastReadSeq: data.lastReadSeq.present
           ? data.lastReadSeq.value
@@ -315,6 +396,8 @@ class LocalConversation extends DataClass
           ..write('id: $id, ')
           ..write('type: $type, ')
           ..write('name: $name, ')
+          ..write('peerName: $peerName, ')
+          ..write('lastMessagePreview: $lastMessagePreview, ')
           ..write('lastSeq: $lastSeq, ')
           ..write('lastReadSeq: $lastReadSeq, ')
           ..write('unreadCount: $unreadCount, ')
@@ -324,8 +407,17 @@ class LocalConversation extends DataClass
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, type, name, lastSeq, lastReadSeq, unreadCount, updatedAt);
+  int get hashCode => Object.hash(
+    id,
+    type,
+    name,
+    peerName,
+    lastMessagePreview,
+    lastSeq,
+    lastReadSeq,
+    unreadCount,
+    updatedAt,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -333,6 +425,8 @@ class LocalConversation extends DataClass
           other.id == this.id &&
           other.type == this.type &&
           other.name == this.name &&
+          other.peerName == this.peerName &&
+          other.lastMessagePreview == this.lastMessagePreview &&
           other.lastSeq == this.lastSeq &&
           other.lastReadSeq == this.lastReadSeq &&
           other.unreadCount == this.unreadCount &&
@@ -343,6 +437,8 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
   final Value<String> id;
   final Value<String> type;
   final Value<String?> name;
+  final Value<String?> peerName;
+  final Value<String?> lastMessagePreview;
   final Value<int> lastSeq;
   final Value<int> lastReadSeq;
   final Value<int> unreadCount;
@@ -352,6 +448,8 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     this.id = const Value.absent(),
     this.type = const Value.absent(),
     this.name = const Value.absent(),
+    this.peerName = const Value.absent(),
+    this.lastMessagePreview = const Value.absent(),
     this.lastSeq = const Value.absent(),
     this.lastReadSeq = const Value.absent(),
     this.unreadCount = const Value.absent(),
@@ -362,6 +460,8 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     required String id,
     required String type,
     this.name = const Value.absent(),
+    this.peerName = const Value.absent(),
+    this.lastMessagePreview = const Value.absent(),
     this.lastSeq = const Value.absent(),
     this.lastReadSeq = const Value.absent(),
     this.unreadCount = const Value.absent(),
@@ -374,6 +474,8 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     Expression<String>? id,
     Expression<String>? type,
     Expression<String>? name,
+    Expression<String>? peerName,
+    Expression<String>? lastMessagePreview,
     Expression<int>? lastSeq,
     Expression<int>? lastReadSeq,
     Expression<int>? unreadCount,
@@ -384,6 +486,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
       if (id != null) 'id': id,
       if (type != null) 'type': type,
       if (name != null) 'name': name,
+      if (peerName != null) 'peer_name': peerName,
+      if (lastMessagePreview != null)
+        'last_message_preview': lastMessagePreview,
       if (lastSeq != null) 'last_seq': lastSeq,
       if (lastReadSeq != null) 'last_read_seq': lastReadSeq,
       if (unreadCount != null) 'unread_count': unreadCount,
@@ -396,6 +501,8 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     Value<String>? id,
     Value<String>? type,
     Value<String?>? name,
+    Value<String?>? peerName,
+    Value<String?>? lastMessagePreview,
     Value<int>? lastSeq,
     Value<int>? lastReadSeq,
     Value<int>? unreadCount,
@@ -406,6 +513,8 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
       id: id ?? this.id,
       type: type ?? this.type,
       name: name ?? this.name,
+      peerName: peerName ?? this.peerName,
+      lastMessagePreview: lastMessagePreview ?? this.lastMessagePreview,
       lastSeq: lastSeq ?? this.lastSeq,
       lastReadSeq: lastReadSeq ?? this.lastReadSeq,
       unreadCount: unreadCount ?? this.unreadCount,
@@ -425,6 +534,12 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     }
     if (name.present) {
       map['name'] = Variable<String>(name.value);
+    }
+    if (peerName.present) {
+      map['peer_name'] = Variable<String>(peerName.value);
+    }
+    if (lastMessagePreview.present) {
+      map['last_message_preview'] = Variable<String>(lastMessagePreview.value);
     }
     if (lastSeq.present) {
       map['last_seq'] = Variable<int>(lastSeq.value);
@@ -450,6 +565,8 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
           ..write('id: $id, ')
           ..write('type: $type, ')
           ..write('name: $name, ')
+          ..write('peerName: $peerName, ')
+          ..write('lastMessagePreview: $lastMessagePreview, ')
           ..write('lastSeq: $lastSeq, ')
           ..write('lastReadSeq: $lastReadSeq, ')
           ..write('unreadCount: $unreadCount, ')
@@ -1527,6 +1644,8 @@ typedef $$LocalConversationsTableCreateCompanionBuilder =
       required String id,
       required String type,
       Value<String?> name,
+      Value<String?> peerName,
+      Value<String?> lastMessagePreview,
       Value<int> lastSeq,
       Value<int> lastReadSeq,
       Value<int> unreadCount,
@@ -1538,6 +1657,8 @@ typedef $$LocalConversationsTableUpdateCompanionBuilder =
       Value<String> id,
       Value<String> type,
       Value<String?> name,
+      Value<String?> peerName,
+      Value<String?> lastMessagePreview,
       Value<int> lastSeq,
       Value<int> lastReadSeq,
       Value<int> unreadCount,
@@ -1566,6 +1687,16 @@ class $$LocalConversationsTableFilterComposer
 
   ColumnFilters<String> get name => $composableBuilder(
     column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get peerName => $composableBuilder(
+    column: $table.peerName,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lastMessagePreview => $composableBuilder(
+    column: $table.lastMessagePreview,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1614,6 +1745,16 @@ class $$LocalConversationsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get peerName => $composableBuilder(
+    column: $table.peerName,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lastMessagePreview => $composableBuilder(
+    column: $table.lastMessagePreview,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get lastSeq => $composableBuilder(
     column: $table.lastSeq,
     builder: (column) => ColumnOrderings(column),
@@ -1652,6 +1793,14 @@ class $$LocalConversationsTableAnnotationComposer
 
   GeneratedColumn<String> get name =>
       $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<String> get peerName =>
+      $composableBuilder(column: $table.peerName, builder: (column) => column);
+
+  GeneratedColumn<String> get lastMessagePreview => $composableBuilder(
+    column: $table.lastMessagePreview,
+    builder: (column) => column,
+  );
 
   GeneratedColumn<int> get lastSeq =>
       $composableBuilder(column: $table.lastSeq, builder: (column) => column);
@@ -1713,6 +1862,8 @@ class $$LocalConversationsTableTableManager
                 Value<String> id = const Value.absent(),
                 Value<String> type = const Value.absent(),
                 Value<String?> name = const Value.absent(),
+                Value<String?> peerName = const Value.absent(),
+                Value<String?> lastMessagePreview = const Value.absent(),
                 Value<int> lastSeq = const Value.absent(),
                 Value<int> lastReadSeq = const Value.absent(),
                 Value<int> unreadCount = const Value.absent(),
@@ -1722,6 +1873,8 @@ class $$LocalConversationsTableTableManager
                 id: id,
                 type: type,
                 name: name,
+                peerName: peerName,
+                lastMessagePreview: lastMessagePreview,
                 lastSeq: lastSeq,
                 lastReadSeq: lastReadSeq,
                 unreadCount: unreadCount,
@@ -1733,6 +1886,8 @@ class $$LocalConversationsTableTableManager
                 required String id,
                 required String type,
                 Value<String?> name = const Value.absent(),
+                Value<String?> peerName = const Value.absent(),
+                Value<String?> lastMessagePreview = const Value.absent(),
                 Value<int> lastSeq = const Value.absent(),
                 Value<int> lastReadSeq = const Value.absent(),
                 Value<int> unreadCount = const Value.absent(),
@@ -1742,6 +1897,8 @@ class $$LocalConversationsTableTableManager
                 id: id,
                 type: type,
                 name: name,
+                peerName: peerName,
+                lastMessagePreview: lastMessagePreview,
                 lastSeq: lastSeq,
                 lastReadSeq: lastReadSeq,
                 unreadCount: unreadCount,
