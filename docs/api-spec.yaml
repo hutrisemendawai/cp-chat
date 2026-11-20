@@ -1,0 +1,641 @@
+openapi: 3.0.3
+info:
+  title: CP Chat REST API
+  version: 0.1.0
+  description: |
+    REST contract for the CP Chat Android client and backend services.
+
+    Realtime traffic (message send/receive, delivery and read receipts, presence)
+    is handled by the WebSocket gateway — see `docs/ws-protocol.md`.
+
+    All endpoints are versioned under `/api/v1`. Authenticated endpoints require
+    `Authorization: Bearer <access_token>`.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.cpchat.example.com
+    description: Production
+
+tags:
+  - name: Auth
+  - name: Users
+  - name: Conversations
+  - name: Messages
+  - name: Devices
+  - name: Media
+
+paths:
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: User created and tokens issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with phone/email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authentication succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Exchange a refresh token for a new token pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: New token pair (refresh tokens are rotated)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '204':
+          description: Token revoked
+
+  /api/v1/users/me:
+    get:
+      tags: [Users]
+      summary: Get the authenticated user's profile
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/devices/fcm-token:
+    post:
+      tags: [Devices]
+      summary: Register or refresh the Android FCM device token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fcm_token]
+              properties:
+                fcm_token:
+                  type: string
+                device_id:
+                  type: string
+                  description: Stable per-install identifier
+      responses:
+        '204':
+          description: Token stored
+
+  /api/v1/conversations:
+    get:
+      tags: [Conversations]
+      summary: List conversations with unread counts
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: before
+          in: query
+          description: Cursor (conversation `id`) for pagination
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Conversation list ordered by last activity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversations]
+                properties:
+                  conversations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Conversation'
+                  next_cursor:
+                    type: string
+                    nullable: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Conversations]
+      summary: Create a direct or group conversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConversationRequest'
+      responses:
+        '201':
+          description: Conversation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/conversations/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Conversations]
+      summary: Get a conversation with members
+      responses:
+        '200':
+          description: Conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/conversations/{id}/members:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [Conversations]
+      summary: Add members to a group (admin only, max 500 members)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        '200':
+          description: Updated member list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Member'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/conversations/{id}/members/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [Conversations]
+      summary: Remove a member or leave the group
+      responses:
+        '204':
+          description: Member removed
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/conversations/{id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Messages]
+      summary: Fetch message history (newest first, backwards pagination)
+      parameters:
+        - name: before_seq
+          in: query
+          description: Return messages with `seq` strictly lower than this value
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Message page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagePage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/conversations/{id}/sync:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Messages]
+      summary: Offline catch-up — all messages after the local cursor
+      parameters:
+        - name: after_seq
+          in: query
+          description: Return messages with `seq` greater than this value, ascending
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        '200':
+          description: Missed messages in ascending seq order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/media/presign:
+    post:
+      tags: [Media]
+      summary: Get a pre-signed upload URL for images and files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename, content_type, size_bytes]
+              properties:
+                filename:
+                  type: string
+                content_type:
+                  type: string
+                  example: image/jpeg
+                size_bytes:
+                  type: integer
+                  format: int64
+                  maximum: 26214400
+      responses:
+        '201':
+          description: Pre-signed upload target
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [media_id, upload_url, file_url, expires_at]
+                properties:
+                  media_id:
+                    type: string
+                  upload_url:
+                    type: string
+                    format: uri
+                  file_url:
+                    type: string
+                    format: uri
+                  expires_at:
+                    type: string
+                    format: date-time
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ConversationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Unauthorized:
+      description: Missing, expired or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Caller is not a member of this conversation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Request failed validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: invalid_credentials
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+
+    User:
+      type: object
+      required: [id, name, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone_or_email:
+          type: string
+          description: Only returned for the authenticated user
+        name:
+          type: string
+        avatar_url:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, expires_in]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+          description: Access token lifetime in seconds
+
+    AuthResponse:
+      type: object
+      required: [user, access_token, refresh_token, expires_in]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+
+    RegisterRequest:
+      type: object
+      required: [phone_or_email, name, password]
+      properties:
+        phone_or_email:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        password:
+          type: string
+          minLength: 8
+
+    LoginRequest:
+      type: object
+      required: [phone_or_email, password]
+      properties:
+        phone_or_email:
+          type: string
+        password:
+          type: string
+
+    Member:
+      type: object
+      required: [user, role]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        role:
+          type: string
+          enum: [admin, member]
+        last_read_seq:
+          type: integer
+          format: int64
+        joined_at:
+          type: string
+          format: date-time
+
+    Conversation:
+      type: object
+      required: [id, type, members, unread_count, last_read_seq, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [direct, group]
+        name:
+          type: string
+          nullable: true
+        created_by:
+          type: string
+          format: uuid
+          nullable: true
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/Member'
+        last_message:
+          allOf:
+            - $ref: '#/components/schemas/Message'
+          nullable: true
+        last_read_seq:
+          type: integer
+          format: int64
+        unread_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    CreateConversationRequest:
+      type: object
+      required: [type, member_ids]
+      properties:
+        type:
+          type: string
+          enum: [direct, group]
+        name:
+          type: string
+          description: Required for groups
+          maxLength: 100
+        member_ids:
+          type: array
+          minItems: 1
+          maxItems: 499
+          items:
+            type: string
+            format: uuid
+
+    Message:
+      type: object
+      required: [id, conversation_id, seq, sender_id, client_msg_id, type, content, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        conversation_id:
+          type: string
+          format: uuid
+        seq:
+          type: integer
+          format: int64
+        sender_id:
+          type: string
+          format: uuid
+        client_msg_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [text, image, file]
+        content:
+          type: string
+          description: Text body, or the media URL/ID for image and file messages
+        created_at:
+          type: string
+          format: date-time
+
+    MessagePage:
+      type: object
+      required: [messages, has_more]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        has_more:
+          type: boolean
+
+    SyncResponse:
+      type: object
+      required: [messages, latest_seq]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+          description: Ascending by seq
+        latest_seq:
+          type: integer
+          format: int64
+          description: Highest seq in the conversation; repeat sync when it exceeds the last returned message
+
+security:
+  - bearerAuth: []

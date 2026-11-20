@@ -1,0 +1,84 @@
+name: cp-chat
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cpchat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cpchat}
+      POSTGRES_DB: ${POSTGRES_DB:-cpchat}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cpchat} -d ${POSTGRES_DB:-cpchat}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: elestio/minio@sha256:25348a257f1ece1b192f25f6cd9854618fa86422ac87b494b5d4e629c556d4bd
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cpchat}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cpchat-secret}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: elestio/minio@sha256:25348a257f1ece1b192f25f6cd9854618fa86422ac87b494b5d4e629c556d4bd
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-cpchat} ${MINIO_ROOT_PASSWORD:-cpchat-secret} &&
+        mc mb --ignore-existing local/${MINIO_BUCKET:-cp-chat-media} &&
+        mc anonymous set none local/${MINIO_BUCKET:-cp-chat-media}
+
+  # One-shot migration runner. Use `make migrate-up` / `make migrate-down`.
+  # Not started by `docker compose up`; runs via the `tools` profile.
+  migrate:
+    image: migrate/migrate:v4.17.1
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/migrations:/migrations
+      - ./backend/scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/migrate.sh"]
+    command: ["up"]
+    environment:
+      DATABASE_URL: ${MIGRATE_DATABASE_URL:-postgres://cpchat:cpchat@postgres:5432/cpchat?sslmode=disable}
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:

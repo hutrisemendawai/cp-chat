@@ -1,0 +1,158 @@
+# WebSocket Protocol
+
+The Chat Gateway exposes a single WebSocket endpoint:
+
+```
+wss://<host>/ws?token=<access_token>
+```
+
+The JWT access token may be passed as the `token` query parameter (Flutter's
+`web_socket_channel` cannot set arbitrary headers reliably on Android) or as an
+`Authorization: Bearer <token>` header. The gateway rejects the upgrade with
+`401` when the token is missing, expired, or invalid.
+
+All frames are UTF-8 JSON text frames. Binary frames are never used; media
+travels through pre-signed object-storage URLs.
+
+## Envelope
+
+Every frame has a `type` field. Server responses may include an `error` object
+instead of the expected payload:
+
+```json
+{ "type": "error", "code": "not_a_member", "message": "You are not a member of c1" }
+```
+
+Unknown `type` values are ignored by clients. Unknown server event types must be
+ignored by clients as well, so fields can be added without breaking older app
+versions.
+
+## Connection lifecycle
+
+1. Client opens the socket with a valid access token.
+2. Gateway registers the connection: `conn:{user_id}:{device_id} -> node_id` in
+   Redis, plus presence key `presence:{user_id}` with a 45 s TTL.
+3. Client flushes its local outbox (Phase 1) and calls the REST sync endpoint for
+   each conversation where `server_seq > local_seq`.
+4. Client sends `ping` every 25 s; the gateway replies with `pong`. Two missed
+   pongs (or a failed heartbeat) triggers a reconnect with exponential backoff
+   (1 s, 2 s, 4 s, ... capped at 30 s, with jitter).
+5. On reconnect the client re-runs step 3 before accepting live messages.
+
+Messages delivered while a client is offline are not replayed on the socket;
+they are recovered through `GET /api/v1/conversations/{id}/sync?after_seq=`.
+
+## Client -> Server events
+
+### `send` — publish a message
+
+```json
+{
+  "type": "send",
+  "conversation_id": "c1",
+  "client_msg_id": "550e8400-e29b-41d4-a716-446655440000",
+  "msg_type": "text",
+  "content": "Hello!"
+}
+```
+
+- `client_msg_id` is a UUIDv4 generated on the device and persisted in the local
+  outbox before the frame is written. Retries reuse the same value, so
+  `UNIQUE (sender_id, client_msg_id)` makes delivery idempotent.
+- `msg_type` is one of `text`, `image`, `file`. For media, `content` is the
+  object URL returned by `POST /api/v1/media/presign`.
+- The gateway acknowledges with a `status` event carrying `status: "sent"` and
+  the assigned `seq`. If no ACK arrives before the client timeout, the outbox
+  entry is retried with backoff.
+
+### `ack` — update a delivery/read cursor
+
+```json
+{
+  "type": "ack",
+  "conversation_id": "c1",
+  "seq": 42,
+  "status": "delivered"
+}
+```
+
+- `status` is `delivered` or `read`.
+- `read` updates `conversation_members.last_read_seq` to the largest acknowledged
+  `seq` (never moves backwards).
+- `delivered` is sent automatically by the client when a `message` event is
+  persisted locally, including for messages received while the chat is closed.
+
+### `ping` — heartbeat
+
+```json
+{ "type": "ping" }
+```
+
+The server replies with `{ "type": "pong" }`.
+
+## Server -> Client events
+
+### `message` — incoming message
+
+```json
+{
+  "type": "message",
+  "conversation_id": "c1",
+  "message_id": "9f5a...",
+  "seq": 42,
+  "sender_id": "u1",
+  "client_msg_id": "550e8400-e29b-41d4-a716-446655440000",
+  "msg_type": "text",
+  "content": "Hello!",
+  "created_at": "2026-11-20T08:00:00Z"
+}
+```
+
+- Ordering is guaranteed by `seq`, never by `created_at`. If a gap is detected
+  (`seq > local_latest_seq + 1`) the client calls the REST sync endpoint before
+  appending further messages.
+- A message echoed to its own sender carries the same `client_msg_id`, which the
+  client reconciles with the optimistic local row instead of duplicating it.
+
+### `status` — message lifecycle update
+
+```json
+{
+  "type": "status",
+  "conversation_id": "c1",
+  "client_msg_id": "550e8400-e29b-41d4-a716-446655440000",
+  "seq": 42,
+  "status": "delivered"
+}
+```
+
+- `status` is one of `sent`, `delivered`, `read`.
+- `sent` is sent only to the originating socket, `delivered` once the recipient
+  device persists the message, `read` when the recipient acknowledges it.
+- In groups, `read` is aggregated: the client receives an updated read count
+  instead of per-member events (Phase 2).
+
+### `presence` — online state change
+
+```json
+{
+  "type": "presence",
+  "user_id": "u1",
+  "online": true,
+  "last_seen_at": "2026-11-20T08:00:00Z"
+}
+```
+
+Delivered to members of shared conversations (Phase 3).
+
+## Delivery guarantees
+
+| Property | Mechanism |
+| --- | --- |
+| No loss | Client outbox + `client_msg_id` dedupe + REST sync on reconnect |
+| No duplicates | `UNIQUE (sender_id, client_msg_id)` on the server, `client_msg_id` primary key locally |
+| Strict ordering | Monotonic per-conversation `seq` assigned inside the storage transaction |
+| At-least-once | Unacknowledged `send` frames are retried until a `sent` status arrives |
+
+Per-conversation `seq` is authoritative. The server never trusts client clocks;
+`created_at` is display-only metadata.

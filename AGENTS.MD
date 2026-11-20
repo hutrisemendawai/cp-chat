@@ -317,11 +317,11 @@ Follow these phases sequentially. **By the end of Phase 1, you will have a worki
 
 ### Phase 0: Repository Setup & Foundations (Week 1)
 **Goal:** Establish a clean development environment, CI checks, and shared contracts.
-- [ ] Initialize monorepo structure (`mobile/`, `backend/`, `docs/`).
-- [ ] Configure `docker-compose.yml` (PostgreSQL, Redis, MinIO).
-- [ ] Set up initial SQL migration runner and create core tables (`users`, `conversations`, `conversation_members`, `messages`).
-- [ ] Scaffold Flutter Android project with Riverpod, Drift local DB, and Android Studio emulator workflow.
-- [ ] Define OpenAPI & WebSocket JSON contract docs in `/docs`.
+- [x] Initialize monorepo structure (`mobile/`, `backend/`, `docs/`).
+- [x] Configure `docker-compose.yml` (PostgreSQL, Redis, MinIO).
+- [x] Set up initial SQL migration runner and create core tables (`users`, `conversations`, `conversation_members`, `messages`).
+- [x] Scaffold Flutter Android project with Riverpod, Drift local DB, and Android Studio emulator workflow.
+- [x] Define OpenAPI & WebSocket JSON contract docs in `/docs`.
 
 ---
 

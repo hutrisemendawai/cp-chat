@@ -1,0 +1,24 @@
+# Environment / local secrets
+.env
+*.local
+
+# Tooling
+.commandcode/
+.idea/
+.vscode/
+.DS_Store
+
+# Backend build artifacts
+backend/bin/
+backend/tmp/
+
+# Flutter/Dart (mobile/ has its own .gitignore, kept here as a safety net)
+mobile/.dart_tool/
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/android/google-services.json
+mobile/android/local.properties
+mobile/android/key.properties
+*.jks
+*.keystore
