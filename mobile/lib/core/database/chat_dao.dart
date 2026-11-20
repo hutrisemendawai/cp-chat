@@ -54,6 +54,19 @@ class ChatDao {
     return row.read(db.localMessages.seq.max()) ?? 0;
   }
 
+  /// Highest `seq` received from anyone other than `selfId`. The read cursor is
+  /// built from this so reading your own messages never generates an ack.
+  Future<int> latestSeqFromOthers(String conversationId, String selfId) async {
+    final row = await (db.selectOnly(db.localMessages)
+          ..addColumns([db.localMessages.seq.max()])
+          ..where(
+            db.localMessages.conversationId.equals(conversationId) &
+                db.localMessages.senderId.equals(selfId).not(),
+          ))
+        .getSingle();
+    return row.read(db.localMessages.seq.max()) ?? 0;
+  }
+
   /// Replaces the conversation list from a fresh server response. Direct
   /// conversations have no server-side name, so the peer's name is cached for
   /// display and cheap sorting without refetching members.
@@ -67,6 +80,7 @@ class ChatDao {
             type: conversation.type,
             name: Value(conversation.name),
             peerName: Value(_peerName(conversation, selfId)),
+            avatarUrl: Value(conversation.avatarUrl),
             lastMessagePreview: Value(_preview(conversation.lastMessage)),
             lastSeq: Value(conversation.lastSeq),
             lastReadSeq: Value(conversation.lastReadSeq),
@@ -96,6 +110,7 @@ class ChatDao {
             type: conversation.type,
             name: Value(conversation.name),
             peerName: Value(_peerName(conversation, selfId) ?? existing?.peerName),
+            avatarUrl: Value(conversation.avatarUrl),
             lastMessagePreview: Value(_preview(conversation.lastMessage)),
             lastSeq: Value(lastSeq),
             lastReadSeq: Value(conversation.lastReadSeq),
@@ -107,6 +122,9 @@ class ChatDao {
 
   String? _peerName(Conversation conversation, String? selfId) {
     if (selfId == null) return null;
+    // Groups display their own name; caching a member as the "peer" would
+    // shadow it in the chat header.
+    if (conversation.type == 'group') return null;
     return conversation.otherMember(selfId)?.user.name;
   }
 
@@ -195,6 +213,49 @@ class ChatDao {
         .write(LocalMessagesCompanion(status: Value(_maxStatus(existing.status, status))));
   }
 
+  /// Stores the aggregated group read tally. Reading up to `upToSeq` means every
+  /// message this user sent with `seq <= upToSeq` was seen by that many members.
+  /// The count only grows, so replayed or out-of-order frames cannot lower it.
+  Future<void> applyReadReceipt({
+    required String conversationId,
+    required String selfId,
+    required int upToSeq,
+    required int readCount,
+    required int memberCount,
+  }) async {
+    final rows = await (db.select(db.localMessages)
+          ..where(
+            (table) =>
+                table.conversationId.equals(conversationId) &
+                table.senderId.equals(selfId) &
+                table.seq.isNotNull() &
+                table.seq.isSmallerOrEqualValue(upToSeq),
+          ))
+        .get();
+    if (rows.isEmpty) return;
+
+    await db.batch((batch) {
+      for (final row in rows) {
+        final current = row.readCount ?? 0;
+        if (current >= readCount && row.memberCount == memberCount) continue;
+        batch.update(
+          db.localMessages,
+          LocalMessagesCompanion(
+            readCount: Value(current > readCount ? current : readCount),
+            memberCount: Value(memberCount),
+          ),
+          where: (table) => table.clientMsgId.equals(row.clientMsgId),
+        );
+      }
+    });
+  }
+
+  /// The conversation type, or `null` if it is not cached yet.
+  Future<String?> conversationType(String conversationId) async {
+    final row = await conversation(conversationId);
+    return row?.type;
+  }
+
   Future<void> markFailed(String clientMsgId) async {
     await (db.update(db.localMessages)..where((table) => table.clientMsgId.equals(clientMsgId)))
         .write(const LocalMessagesCompanion(status: Value('failed')));
@@ -247,6 +308,20 @@ class ChatDao {
   Future<void> clearUnread(String conversationId) async {
     await (db.update(db.localConversations)..where((table) => table.id.equals(conversationId)))
         .write(const LocalConversationsCompanion(unreadCount: Value(0)));
+  }
+
+  /// Drops a conversation and its messages locally, e.g. after leaving a group.
+  Future<void> deleteConversation(String conversationId) async {
+    await db.transaction(() async {
+      await (db.delete(db.outboxEntries)
+            ..where((table) => table.conversationId.equals(conversationId)))
+          .go();
+      await (db.delete(db.localMessages)
+            ..where((table) => table.conversationId.equals(conversationId)))
+          .go();
+      await (db.delete(db.localConversations)..where((table) => table.id.equals(conversationId)))
+          .go();
+    });
   }
 
   Future<void> clearAll() async {

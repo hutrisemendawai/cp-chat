@@ -37,10 +37,14 @@ Conversation conversation(
   int unreadCount = 0,
   Message? lastMessage,
   String type = 'direct',
+  String? name,
+  String? avatarKey,
 }) {
   return Conversation(
     id: id,
     type: type,
+    name: name,
+    avatarUrl: avatarKey,
     members: [
       ConversationMember(user: user(selfId), role: 'member', lastReadSeq: lastReadSeq),
       ConversationMember(user: user(peerId, name: peerName), role: 'member', lastReadSeq: 0),

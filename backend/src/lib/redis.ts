@@ -26,3 +26,20 @@ export const redisKeys = {
   channelForNode: (nodeId: string) => `gw:${nodeId}`,
   allNodesChannel: 'gw:all',
 };
+
+/**
+ * Sends a frame to every gateway node, which delivers it to whichever of the
+ * listed users has a local socket. Used for conversation changes (group
+ * created, renamed, member added/removed) that are not tied to one recipient.
+ */
+export async function publishBroadcast(
+  redis: Cache,
+  userIds: string[],
+  frame: Record<string, unknown>,
+): Promise<void> {
+  if (userIds.length === 0) return;
+  await redis.publish(
+    redisKeys.allNodesChannel,
+    JSON.stringify({ user_ids: userIds, frame }),
+  );
+}

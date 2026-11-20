@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import 'database/app_database.dart';
 import 'database/chat_dao.dart';
+import 'media/media_service.dart';
 import 'models/models.dart';
 import 'network/api_client.dart';
 import 'network/ws_client.dart';
@@ -41,6 +42,17 @@ final apiClientProvider = Provider<ApiClient>((ref) {
     ref.watch(tokenStoreProvider),
     deviceId: ref.watch(deviceIdProvider),
   );
+});
+
+final mediaServiceProvider = Provider<MediaService>((ref) {
+  return MediaService(ref.watch(apiClientProvider));
+});
+
+/// The stored access token, exposed for widgets that fetch private media.
+/// Rebuilds when the session changes so a rotated token is picked up.
+final accessTokenProvider = FutureProvider<String?>((ref) async {
+  ref.watch(authControllerProvider);
+  return ref.watch(tokenStoreProvider).readAccessToken();
 });
 
 final chatSocketProvider = Provider<ChatSocket>((ref) {

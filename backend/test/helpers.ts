@@ -8,6 +8,7 @@ import { buildServer } from '../src/http/server.js';
 import { createDb, type Db } from '../src/lib/db.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createRedis, type Cache } from '../src/lib/redis.js';
+import { signAccessToken } from '../src/lib/tokens.js';
 
 export const TEST_CONFIG = loadConfig({
   NODE_ENV: 'test',
@@ -106,9 +107,55 @@ export async function createDirect(
   return response.json().id;
 }
 
+export async function createGroup(
+  harness: TestHarness,
+  creator: TestUser,
+  members: TestUser[],
+  name = 'Test Group',
+): Promise<string> {
+  const response = await harness.app.inject({
+    method: 'POST',
+    url: '/api/v1/conversations',
+    headers: auth(creator),
+    payload: { type: 'group', name, member_ids: members.map((member) => member.id) },
+  });
+  if (response.statusCode !== 201) {
+    throw new Error(`group failed: ${response.statusCode} ${response.body}`);
+  }
+  return response.json().id;
+}
+
 export async function truncateAll(db: Db): Promise<void> {
   await db.query(
-    `TRUNCATE message_receipts, messages, conversation_members, conversations,
+    `TRUNCATE media_objects, message_receipts, messages, conversation_members, conversations,
               device_tokens, refresh_tokens, users RESTART IDENTITY CASCADE`,
   );
+}
+
+/**
+ * Inserts users straight into the table. Bulk fixtures (e.g. filling a group to
+ * its 500-member limit) should not pay the scrypt cost of a real registration.
+ */
+export async function seedUsers(harness: TestHarness, count: number): Promise<TestUser[]> {
+  const rows = Array.from({ length: count }, (_, index) => ({
+    email: `seed-${index}-${randomUUID()}@example.com`,
+    name: `Seed ${index}`,
+    deviceId: `seed-device-${index}`,
+  }));
+
+  const { rows: inserted } = await harness.db.query<{ id: string; phone_or_email: string }>(
+    `INSERT INTO users (phone_or_email, name, password_hash)
+     SELECT email, name, 'scrypt$16$8$1$deadbeef$deadbeef'
+       FROM unnest($1::text[], $2::text[]) AS t(email, name)
+     RETURNING id, phone_or_email`,
+    [rows.map((row) => row.email), rows.map((row) => row.name)],
+  );
+
+  return inserted.map((row, index) => ({
+    id: row.id,
+    email: row.phone_or_email,
+    accessToken: signAccessToken(row.id, rows[index]!.deviceId, TEST_CONFIG),
+    refreshToken: '',
+    deviceId: rows[index]!.deviceId,
+  }));
 }

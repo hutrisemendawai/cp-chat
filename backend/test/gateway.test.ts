@@ -11,6 +11,7 @@ import { createLogger } from '../src/lib/logger.js';
 import {
   TEST_CONFIG,
   createDirect,
+  createGroup,
   createHarness,
   registerUser,
   truncateAll,
@@ -339,5 +340,125 @@ describe('chat gateway', () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(await harness.redis.get(`conn:${alice.id}:${alice.deviceId}`)).toBeNull();
+  });
+
+  it('fans a group message out to every other member exactly once', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    const carol = await registerUser(harness, 'Carol');
+    const groupId = await createGroup(harness, alice, [bob, carol], 'Team');
+
+    const sender = await connect(alice);
+    const bobSocket = await connect(bob);
+    const carolSocket = await connect(carol);
+    const clientMsgId = randomUUID();
+
+    sender.send({
+      type: 'send',
+      conversation_id: groupId,
+      client_msg_id: clientMsgId,
+      msg_type: 'text',
+      content: 'hello team',
+    });
+
+    const ack = await sender.wait((frame) => frame.type === 'status' && frame.status === 'sent');
+    const bobFrame = await bobSocket.wait(
+      (frame) => frame.type === 'message' && frame.client_msg_id === clientMsgId,
+    );
+    const carolFrame = await carolSocket.wait(
+      (frame) => frame.type === 'message' && frame.client_msg_id === clientMsgId,
+    );
+
+    expect(ack.seq).toBe(1);
+    expect(bobFrame).toMatchObject({ conversation_id: groupId, sender_id: alice.id, seq: 1 });
+    expect(carolFrame).toMatchObject({ conversation_id: groupId, sender_id: alice.id, seq: 1 });
+
+    sender.close();
+    bobSocket.close();
+    carolSocket.close();
+  });
+
+  it('broadcasts an aggregated read receipt in a group', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    const carol = await registerUser(harness, 'Carol');
+    const groupId = await createGroup(harness, alice, [bob, carol], 'Team');
+
+    const sender = await connect(alice);
+    const bobSocket = await connect(bob);
+    const carolSocket = await connect(carol);
+    const clientMsgId = randomUUID();
+
+    sender.send({
+      type: 'send',
+      conversation_id: groupId,
+      client_msg_id: clientMsgId,
+      msg_type: 'text',
+      content: 'read me',
+    });
+    await sender.wait((frame) => frame.type === 'status' && frame.status === 'sent');
+    await bobSocket.wait((frame) => frame.type === 'message');
+    await carolSocket.wait((frame) => frame.type === 'message');
+
+    bobSocket.send({ type: 'ack', conversation_id: groupId, seq: 1, status: 'read' });
+    const first = await sender.wait(
+      (frame) => frame.type === 'read_receipt' && frame.reader_id === bob.id,
+    );
+
+    expect(first).toMatchObject({
+      conversation_id: groupId,
+      seq: 1,
+      sender_id: alice.id,
+      client_msg_id: clientMsgId,
+      read_count: 1,
+      member_count: 2,
+    });
+
+    carolSocket.send({ type: 'ack', conversation_id: groupId, seq: 1, status: 'read' });
+    const second = await sender.wait(
+      (frame) => frame.type === 'read_receipt' && frame.reader_id === carol.id,
+    );
+    expect(second.read_count).toBe(2);
+
+    sender.close();
+    bobSocket.close();
+    carolSocket.close();
+  });
+
+  it('stops delivering to a member removed from the group', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    const carol = await registerUser(harness, 'Carol');
+    const groupId = await createGroup(harness, alice, [bob, carol], 'Team');
+
+    const sender = await connect(alice);
+    const bobSocket = await connect(bob);
+    const carolSocket = await connect(carol);
+
+    const removed = await harness.app.inject({
+      method: 'DELETE',
+      url: `/api/v1/conversations/${groupId}/members/${carol.id}`,
+      headers: { authorization: `Bearer ${alice.accessToken}` },
+    });
+    expect(removed.statusCode).toBe(204);
+
+    // The removed member is told so their client can drop the group locally.
+    const notice = await carolSocket.wait((frame) => frame.type === 'conversation_updated');
+    expect(notice.conversation_id).toBe(groupId);
+
+    const clientMsgId = randomUUID();
+    sender.send({
+      type: 'send',
+      conversation_id: groupId,
+      client_msg_id: clientMsgId,
+      msg_type: 'text',
+      content: 'after removal',
+    });
+    await bobSocket.wait((frame) => frame.type === 'message' && frame.client_msg_id === clientMsgId);
+    await expect(carolSocket.wait((frame) => frame.type === 'message', 400)).rejects.toThrow();
+
+    sender.close();
+    bobSocket.close();
+    carolSocket.close();
   });
 });

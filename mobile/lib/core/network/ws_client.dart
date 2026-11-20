@@ -231,6 +231,10 @@ class ChatSocket {
         unawaited(_handleMessage(decoded));
       case 'status':
         unawaited(_handleStatus(decoded));
+      case 'read_receipt':
+        unawaited(_handleReadReceipt(decoded));
+      case 'conversation_updated':
+        unawaited(_handleConversationUpdated(decoded));
       case 'error':
         debugPrint('ChatSocket server error: ${decoded['code']}');
       default:
@@ -276,6 +280,52 @@ class ChatSocket {
       _sendTimers.remove(clientMsgId)?.cancel();
     }
     await _dao.applyStatus(clientMsgId, status);
+  }
+
+  /// A [ReadReceipt] means every message this user sent up to `seq` has been
+  /// read by that many members, not only the message at `seq`.
+  Future<void> _handleReadReceipt(Map<String, dynamic> frame) async {
+    final conversationId = frame['conversation_id'];
+    final seq = frame['seq'];
+    final readCount = frame['read_count'];
+    final memberCount = frame['member_count'];
+    if (conversationId is! String || seq is! num || readCount is! num || memberCount is! num) {
+      return;
+    }
+
+    final selfId = await _tokenStore.readUserId();
+    if (selfId == null) return;
+    await _dao.applyReadReceipt(
+      conversationId: conversationId,
+      selfId: selfId,
+      upToSeq: seq.toInt(),
+      readCount: readCount.toInt(),
+      memberCount: memberCount.toInt(),
+    );
+  }
+
+  /// A membership/name/avatar change happened elsewhere; refresh the metadata
+  /// and catch up on any messages, or drop the conversation if this user was
+  /// removed.
+  Future<void> _handleConversationUpdated(Map<String, dynamic> frame) async {
+    final conversationId = frame['conversation_id'];
+    if (conversationId is! String) return;
+
+    final selfId = await _tokenStore.readUserId();
+    try {
+      final conversation = await _api.conversation(conversationId);
+      await _dao.upsertConversation(conversation, selfId: selfId);
+      final cursor = await _dao.localMaxSeq(conversationId);
+      if (conversation.lastSeq > cursor) {
+        await _syncConversation(conversationId, cursor);
+      }
+    } on ApiException catch (error) {
+      if (error.statusCode == 403 || error.statusCode == 404) {
+        await _dao.deleteConversation(conversationId);
+      }
+    } catch (error) {
+      debugPrint('ChatSocket refresh conversation failed: $error');
+    }
   }
 
   void _startHeartbeat() {

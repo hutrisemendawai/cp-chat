@@ -10,6 +10,11 @@ export type ErrorCode =
   | 'unsupported_conversation_type'
   | 'invalid_token'
   | 'rate_limited'
+  | 'not_an_admin'
+  | 'group_full'
+  | 'last_admin'
+  | 'media_too_large'
+  | 'unsupported_media_type'
   | 'internal_error';
 
 const STATUS: Record<ErrorCode, number> = {
@@ -24,6 +29,11 @@ const STATUS: Record<ErrorCode, number> = {
   unsupported_conversation_type: 422,
   invalid_token: 401,
   rate_limited: 429,
+  not_an_admin: 403,
+  group_full: 409,
+  last_admin: 409,
+  media_too_large: 413,
+  unsupported_media_type: 415,
   internal_error: 500,
 };
 

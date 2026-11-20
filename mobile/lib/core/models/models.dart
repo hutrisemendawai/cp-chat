@@ -124,6 +124,7 @@ class Conversation {
     required this.unreadCount,
     required this.createdAt,
     this.name,
+    this.avatarUrl,
     this.lastMessage,
   });
 
@@ -131,6 +132,7 @@ class Conversation {
         id: json['id'] as String,
         type: json['type'] as String,
         name: json['name'] as String?,
+        avatarUrl: json['avatar_url'] as String?,
         members: (json['members'] as List<dynamic>)
             .map((member) => ConversationMember.fromJson(member as Map<String, dynamic>))
             .toList(),
@@ -146,12 +148,15 @@ class Conversation {
   final String id;
   final String type;
   final String? name;
+  final String? avatarUrl;
   final List<ConversationMember> members;
   final int lastSeq;
   final int lastReadSeq;
   final int unreadCount;
   final DateTime createdAt;
   final Message? lastMessage;
+
+  bool get isGroup => type == 'group';
 
   /// The other participant of a direct conversation, `null` for groups.
   ConversationMember? otherMember(String selfId) {
@@ -160,6 +165,15 @@ class Conversation {
     }
     return null;
   }
+
+  ConversationMember? memberOf(String userId) {
+    for (final member in members) {
+      if (member.user.id == userId) return member;
+    }
+    return null;
+  }
+
+  bool isAdmin(String userId) => memberOf(userId)?.role == 'admin';
 
   String displayName(String selfId) {
     if (type == 'group') return name ?? 'Group';
@@ -193,6 +207,57 @@ class SyncResult {
 
   final List<Message> messages;
   final int latestSeq;
+}
+
+/// Result of `POST /api/v1/media/presign`: upload the bytes to [uploadUrl],
+/// then send a message whose `content` is [objectKey].
+class MediaUpload {
+  const MediaUpload({
+    required this.mediaId,
+    required this.objectKey,
+    required this.uploadUrl,
+    required this.contentType,
+    required this.sizeBytes,
+    required this.expiresAt,
+  });
+
+  factory MediaUpload.fromJson(Map<String, dynamic> json) => MediaUpload(
+        mediaId: json['media_id'] as String,
+        objectKey: json['object_key'] as String,
+        uploadUrl: json['upload_url'] as String,
+        contentType: json['content_type'] as String? ?? 'application/octet-stream',
+        sizeBytes: (json['size_bytes'] as num?)?.toInt() ?? 0,
+        expiresAt: DateTime.parse(json['expires_at'] as String).toUtc(),
+      );
+
+  final String mediaId;
+  final String objectKey;
+  final String uploadUrl;
+  final String contentType;
+  final int sizeBytes;
+  final DateTime expiresAt;
+}
+
+/// Aggregated group read state for a message the current user sent.
+class ReadReceipt {
+  const ReadReceipt({
+    required this.conversationId,
+    required this.seq,
+    required this.readCount,
+    required this.memberCount,
+  });
+
+  factory ReadReceipt.fromJson(Map<String, dynamic> json) => ReadReceipt(
+        conversationId: json['conversation_id'] as String,
+        seq: (json['seq'] as num).toInt(),
+        readCount: (json['read_count'] as num?)?.toInt() ?? 0,
+        memberCount: (json['member_count'] as num?)?.toInt() ?? 0,
+      );
+
+  final String conversationId;
+  final int seq;
+  final int readCount;
+  final int memberCount;
 }
 
 class ApiException implements Exception {

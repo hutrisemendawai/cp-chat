@@ -364,23 +364,36 @@ Follow these phases sequentially. **By the end of Phase 1, you will have a worki
 **Goal:** Upgrade from MVP to a full-featured daily-driver messenger supporting groups up to 500 members and rich media.
 
 #### Backend Tasks
-- [ ] **Group Management APIs:** Create group, update name/avatar, add/remove members (enforce max 500 member limit), leave group, admin role validation.
-- [ ] **Fan-out on Write:** Cache group member lists in Redis. When a message hits a group conversation, store the message once, then fan-out to all online members via their respective gateways and dispatch FCM to offline members.
-- [ ] **Read Receipts:** Update `last_read_seq` in `conversation_members` on `read` events; broadcast read status updates (individual status for 1:1, aggregated read count for groups).
-- [ ] **Media Service:** Implement `POST /media/presign` returning short-lived S3/MinIO PUT URLs and public/signed GET URLs. Enforce MIME type and file size limits.
+- [x] **Group Management APIs:** Create group, update name/avatar, add/remove members (enforce max 500 member limit), leave group, admin role validation.
+- [x] **Fan-out on Write:** Cache group member lists in Redis. When a message hits a group conversation, store the message once, then fan-out to all online members via their respective gateways and dispatch FCM to offline members.
+- [x] **Read Receipts:** Update `last_read_seq` in `conversation_members` on `read` events; broadcast read status updates (individual status for 1:1, aggregated read count for groups).
+- [x] **Media Service:** Implement `POST /media/presign` returning short-lived S3/MinIO PUT URLs and public/signed GET URLs. Enforce MIME type and file size limits.
 
 #### Flutter Android Tasks
-- [ ] Build Create Group & Group Info/Member Management screens.
-- [ ] Implement read receipt triggers when the user scrolls to the bottom of an open chat (`last_read_seq`).
-- [ ] Display "Read by N" counter in group chats and colored double-ticks in 1:1 chats.
-- [ ] Integrate `image_picker`, `file_picker`, and `flutter_image_compress`:
+- [x] Build Create Group & Group Info/Member Management screens.
+- [x] Implement read receipt triggers when the user scrolls to the bottom of an open chat (`last_read_seq`).
+- [x] Display "Read by N" counter in group chats and colored double-ticks in 1:1 chats.
+- [x] Integrate `image_picker`, `file_picker`, and `flutter_image_compress`:
   1. Compress image locally on Android.
   2. Request pre-signed URL from Media Service.
   3. Upload binary directly to S3/MinIO with progress bar.
   4. Send WebSocket message with `msg_type: "image" | "file"` and media URL.
-- [ ] Render image thumbnails (`cached_network_image`) and downloadable file attachments.
+- [x] Render image thumbnails (`cached_network_image`) and downloadable file attachments.
 
 > **Milestone 2 (Feature Complete):** Users can chat in groups (up to 500 members), share images/files reliably, and see accurate read receipts.
+
+> **Implementation notes:** groups share the `conversations` table with a
+> `direct_key`-free row and the creator as the sole `admin`. Membership changes
+> lock the conversation row (`SELECT ... FOR UPDATE`) so the 500-member cap can
+> never be overshot by concurrent adds, and the last admin cannot leave a
+> non-empty group. Member ids are cached in Redis (`members:{id}`) and
+> invalidated on every change; the gateway fans out in parallel and only pushes
+> FCM to members with no live device. Group read receipts are aggregated into a
+> `read_receipt` frame (`read_count` / `member_count`) instead of per-member
+> events. Media goes straight from the app to MinIO/S3 via a presigned PUT bound
+> to a server-generated key and a `media_objects` row; the private bucket is read
+> back through `GET /api/v1/media/{key}`, which authorizes the caller and
+> redirects to a short-lived presigned GET.
 
 ---
 

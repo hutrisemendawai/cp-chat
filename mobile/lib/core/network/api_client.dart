@@ -172,6 +172,133 @@ class ApiClient {
     return Conversation.fromJson(_ok(response, expected: 201));
   }
 
+  /// Creates a group. The caller becomes the sole admin.
+  Future<Conversation> createGroupConversation({
+    required String name,
+    required List<String> memberIds,
+    String? avatarKey,
+  }) async {
+    final response = await dio.post<dynamic>(
+      '/api/v1/conversations',
+      data: {
+        'type': 'group',
+        'name': name,
+        'member_ids': memberIds,
+        'avatar_url': ?avatarKey,
+      },
+    );
+    return Conversation.fromJson(_ok(response, expected: 201));
+  }
+
+  /// Updates a group's name or avatar. Omit a field to leave it unchanged; pass
+  /// [clearAvatar] to remove the current avatar.
+  Future<Conversation> updateGroup(
+    String conversationId, {
+    String? name,
+    String? avatarKey,
+    bool clearAvatar = false,
+  }) async {
+    final payload = <String, dynamic>{};
+    if (name != null) payload['name'] = name;
+    if (clearAvatar) {
+      payload['avatar_url'] = null;
+    } else if (avatarKey != null) {
+      payload['avatar_url'] = avatarKey;
+    }
+
+    final response = await dio.patch<dynamic>(
+      '/api/v1/conversations/$conversationId',
+      data: payload,
+    );
+    return Conversation.fromJson(_ok(response));
+  }
+
+  Future<List<ConversationMember>> addGroupMembers(
+    String conversationId,
+    List<String> userIds,
+  ) async {
+    final response = await dio.post<dynamic>(
+      '/api/v1/conversations/$conversationId/members',
+      data: {'user_ids': userIds},
+    );
+    final status = response.statusCode ?? 0;
+    if (status < 200 || status >= 300) {
+      throw ApiException.fromResponse(status, _body(response.data));
+    }
+    final list = response.data is List<dynamic> ? response.data as List<dynamic> : <dynamic>[];
+    return list
+        .map((member) => ConversationMember.fromJson(member as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Removes a member. Calling with the current user's id leaves the group.
+  Future<void> removeGroupMember(String conversationId, String userId) async {
+    final response = await dio.delete<dynamic>(
+      '/api/v1/conversations/$conversationId/members/$userId',
+      options: Options(validateStatus: (status) => status != null && status < 500),
+    );
+    final status = response.statusCode ?? 0;
+    if (status != 204) {
+      throw ApiException.fromResponse(status, _body(response.data));
+    }
+  }
+
+  /// Requests a presigned upload slot for a media object.
+  Future<MediaUpload> presignUpload({
+    required String filename,
+    required String contentType,
+    required int sizeBytes,
+  }) async {
+    final response = await dio.post<dynamic>(
+      '/api/v1/media/presign',
+      data: {
+        'filename': filename,
+        'content_type': contentType,
+        'size_bytes': sizeBytes,
+      },
+    );
+    return MediaUpload.fromJson(_ok(response, expected: 201));
+  }
+
+  /// Uploads bytes straight to object storage using the presigned PUT. The
+  /// `Content-Type` must match what was declared when presigning or the
+  /// signature is rejected.
+  Future<void> uploadToPresignedUrl({
+    required String uploadUrl,
+    required List<int> bytes,
+    required String contentType,
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final uploader = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(seconds: 60),
+        sendTimeout: const Duration(seconds: 120),
+      ),
+    );
+    final response = await uploader.put<void>(
+      uploadUrl,
+      data: Stream.fromIterable([bytes]),
+      options: Options(
+        headers: {
+          Headers.contentTypeHeader: contentType,
+          Headers.contentLengthHeader: bytes.length,
+        },
+        // Presigned S3 URLs must not carry the API bearer token.
+        followRedirects: false,
+        validateStatus: (status) => status != null && status < 500,
+      ),
+      onSendProgress: onProgress,
+    );
+    if ((response.statusCode ?? 0) >= 300) {
+      throw ApiException('upload_failed', 'Upload failed (${response.statusCode})');
+    }
+  }
+
+  /// Absolute URL the client can load the media from. The API authorizes the
+  /// caller and redirects to a short-lived presigned download.
+  String mediaUrl(String objectKey) => '${dio.options.baseUrl}/api/v1/media/$objectKey';
+
   Future<MessagePage> messages(
     String conversationId, {
     int? beforeSeq,

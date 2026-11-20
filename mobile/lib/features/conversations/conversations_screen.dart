@@ -6,6 +6,7 @@ import '../../core/database/app_database.dart';
 import '../../core/models/models.dart';
 
 import '../../core/providers.dart';
+import '../chat/media_message.dart';
 
 class ConversationsScreen extends ConsumerStatefulWidget {
   const ConversationsScreen({super.key});
@@ -39,6 +40,21 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
   }
 
   Future<void> _startNewChat() async {
+    final choice = await showModalBottomSheet<_ComposeChoice>(
+      context: context,
+      builder: (_) => const _ComposeSheet(),
+    );
+    if (choice == null || !mounted) return;
+
+    switch (choice) {
+      case _ComposeChoice.direct:
+        await _startDirectChat();
+      case _ComposeChoice.group:
+        if (mounted) context.push('/conversations/new-group');
+    }
+  }
+
+  Future<void> _startDirectChat() async {
     final userId = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
@@ -148,18 +164,26 @@ class _ConversationTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final title = conversation.peerName ?? conversation.name ?? 'Chat';
+    final isGroup = conversation.type == 'group';
+    final title = isGroup
+        ? (conversation.name ?? 'Group')
+        : (conversation.peerName ?? conversation.name ?? 'Chat');
     final unread = conversation.unreadCount;
 
     return ListTile(
       onTap: onTap,
-      leading: CircleAvatar(
-        backgroundColor: theme.colorScheme.primaryContainer,
-        foregroundColor: theme.colorScheme.onPrimaryContainer,
-        child: Text(
-          title.isEmpty ? '?' : title.characters.first.toUpperCase(),
-        ),
-      ),
+      leading: isGroup
+          ? MediaAvatar(
+              objectKey: conversation.avatarUrl,
+              fallback: Icon(Icons.groups, color: theme.colorScheme.onPrimaryContainer),
+            )
+          : CircleAvatar(
+              backgroundColor: theme.colorScheme.primaryContainer,
+              foregroundColor: theme.colorScheme.onPrimaryContainer,
+              child: Text(
+                title.isEmpty ? '?' : title.characters.first.toUpperCase(),
+              ),
+            ),
       title: Text(
         title,
         maxLines: 1,
@@ -352,6 +376,36 @@ class _EmptyState extends StatelessWidget {
           Text(message, textAlign: TextAlign.center, style: theme.textTheme.bodyMedium),
           const SizedBox(height: 20),
           FilledButton.tonal(onPressed: onAction, child: Text(actionLabel)),
+        ],
+      ),
+    );
+  }
+}
+
+enum _ComposeChoice { direct, group }
+
+/// Lets the user choose between starting a 1:1 chat and creating a group.
+class _ComposeSheet extends StatelessWidget {
+  const _ComposeSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.person_outline),
+            title: const Text('New chat'),
+            subtitle: const Text('Message one person'),
+            onTap: () => Navigator.of(context).pop(_ComposeChoice.direct),
+          ),
+          ListTile(
+            leading: const Icon(Icons.groups_outlined),
+            title: const Text('New group'),
+            subtitle: const Text('Up to 500 members'),
+            onTap: () => Navigator.of(context).pop(_ComposeChoice.group),
+          ),
         ],
       ),
     );

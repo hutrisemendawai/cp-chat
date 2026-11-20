@@ -47,6 +47,17 @@ class $LocalConversationsTable extends LocalConversations
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _avatarUrlMeta = const VerificationMeta(
+    'avatarUrl',
+  );
+  @override
+  late final GeneratedColumn<String> avatarUrl = GeneratedColumn<String>(
+    'avatar_url',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _lastMessagePreviewMeta =
       const VerificationMeta('lastMessagePreview');
   @override
@@ -111,6 +122,7 @@ class $LocalConversationsTable extends LocalConversations
     type,
     name,
     peerName,
+    avatarUrl,
     lastMessagePreview,
     lastSeq,
     lastReadSeq,
@@ -152,6 +164,12 @@ class $LocalConversationsTable extends LocalConversations
       context.handle(
         _peerNameMeta,
         peerName.isAcceptableOrUnknown(data['peer_name']!, _peerNameMeta),
+      );
+    }
+    if (data.containsKey('avatar_url')) {
+      context.handle(
+        _avatarUrlMeta,
+        avatarUrl.isAcceptableOrUnknown(data['avatar_url']!, _avatarUrlMeta),
       );
     }
     if (data.containsKey('last_message_preview')) {
@@ -220,6 +238,10 @@ class $LocalConversationsTable extends LocalConversations
         DriftSqlType.string,
         data['${effectivePrefix}peer_name'],
       ),
+      avatarUrl: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}avatar_url'],
+      ),
       lastMessagePreview: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}last_message_preview'],
@@ -257,6 +279,9 @@ class LocalConversation extends DataClass
 
   /// Display name for a direct conversation: the other participant.
   final String? peerName;
+
+  /// Group avatar object key, resolved through the media endpoint.
+  final String? avatarUrl;
   final String? lastMessagePreview;
   final int lastSeq;
   final int lastReadSeq;
@@ -267,6 +292,7 @@ class LocalConversation extends DataClass
     required this.type,
     this.name,
     this.peerName,
+    this.avatarUrl,
     this.lastMessagePreview,
     required this.lastSeq,
     required this.lastReadSeq,
@@ -283,6 +309,9 @@ class LocalConversation extends DataClass
     }
     if (!nullToAbsent || peerName != null) {
       map['peer_name'] = Variable<String>(peerName);
+    }
+    if (!nullToAbsent || avatarUrl != null) {
+      map['avatar_url'] = Variable<String>(avatarUrl);
     }
     if (!nullToAbsent || lastMessagePreview != null) {
       map['last_message_preview'] = Variable<String>(lastMessagePreview);
@@ -302,6 +331,9 @@ class LocalConversation extends DataClass
       peerName: peerName == null && nullToAbsent
           ? const Value.absent()
           : Value(peerName),
+      avatarUrl: avatarUrl == null && nullToAbsent
+          ? const Value.absent()
+          : Value(avatarUrl),
       lastMessagePreview: lastMessagePreview == null && nullToAbsent
           ? const Value.absent()
           : Value(lastMessagePreview),
@@ -322,6 +354,7 @@ class LocalConversation extends DataClass
       type: serializer.fromJson<String>(json['type']),
       name: serializer.fromJson<String?>(json['name']),
       peerName: serializer.fromJson<String?>(json['peerName']),
+      avatarUrl: serializer.fromJson<String?>(json['avatarUrl']),
       lastMessagePreview: serializer.fromJson<String?>(
         json['lastMessagePreview'],
       ),
@@ -339,6 +372,7 @@ class LocalConversation extends DataClass
       'type': serializer.toJson<String>(type),
       'name': serializer.toJson<String?>(name),
       'peerName': serializer.toJson<String?>(peerName),
+      'avatarUrl': serializer.toJson<String?>(avatarUrl),
       'lastMessagePreview': serializer.toJson<String?>(lastMessagePreview),
       'lastSeq': serializer.toJson<int>(lastSeq),
       'lastReadSeq': serializer.toJson<int>(lastReadSeq),
@@ -352,6 +386,7 @@ class LocalConversation extends DataClass
     String? type,
     Value<String?> name = const Value.absent(),
     Value<String?> peerName = const Value.absent(),
+    Value<String?> avatarUrl = const Value.absent(),
     Value<String?> lastMessagePreview = const Value.absent(),
     int? lastSeq,
     int? lastReadSeq,
@@ -362,6 +397,7 @@ class LocalConversation extends DataClass
     type: type ?? this.type,
     name: name.present ? name.value : this.name,
     peerName: peerName.present ? peerName.value : this.peerName,
+    avatarUrl: avatarUrl.present ? avatarUrl.value : this.avatarUrl,
     lastMessagePreview: lastMessagePreview.present
         ? lastMessagePreview.value
         : this.lastMessagePreview,
@@ -376,6 +412,7 @@ class LocalConversation extends DataClass
       type: data.type.present ? data.type.value : this.type,
       name: data.name.present ? data.name.value : this.name,
       peerName: data.peerName.present ? data.peerName.value : this.peerName,
+      avatarUrl: data.avatarUrl.present ? data.avatarUrl.value : this.avatarUrl,
       lastMessagePreview: data.lastMessagePreview.present
           ? data.lastMessagePreview.value
           : this.lastMessagePreview,
@@ -397,6 +434,7 @@ class LocalConversation extends DataClass
           ..write('type: $type, ')
           ..write('name: $name, ')
           ..write('peerName: $peerName, ')
+          ..write('avatarUrl: $avatarUrl, ')
           ..write('lastMessagePreview: $lastMessagePreview, ')
           ..write('lastSeq: $lastSeq, ')
           ..write('lastReadSeq: $lastReadSeq, ')
@@ -412,6 +450,7 @@ class LocalConversation extends DataClass
     type,
     name,
     peerName,
+    avatarUrl,
     lastMessagePreview,
     lastSeq,
     lastReadSeq,
@@ -426,6 +465,7 @@ class LocalConversation extends DataClass
           other.type == this.type &&
           other.name == this.name &&
           other.peerName == this.peerName &&
+          other.avatarUrl == this.avatarUrl &&
           other.lastMessagePreview == this.lastMessagePreview &&
           other.lastSeq == this.lastSeq &&
           other.lastReadSeq == this.lastReadSeq &&
@@ -438,6 +478,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
   final Value<String> type;
   final Value<String?> name;
   final Value<String?> peerName;
+  final Value<String?> avatarUrl;
   final Value<String?> lastMessagePreview;
   final Value<int> lastSeq;
   final Value<int> lastReadSeq;
@@ -449,6 +490,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     this.type = const Value.absent(),
     this.name = const Value.absent(),
     this.peerName = const Value.absent(),
+    this.avatarUrl = const Value.absent(),
     this.lastMessagePreview = const Value.absent(),
     this.lastSeq = const Value.absent(),
     this.lastReadSeq = const Value.absent(),
@@ -461,6 +503,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     required String type,
     this.name = const Value.absent(),
     this.peerName = const Value.absent(),
+    this.avatarUrl = const Value.absent(),
     this.lastMessagePreview = const Value.absent(),
     this.lastSeq = const Value.absent(),
     this.lastReadSeq = const Value.absent(),
@@ -475,6 +518,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     Expression<String>? type,
     Expression<String>? name,
     Expression<String>? peerName,
+    Expression<String>? avatarUrl,
     Expression<String>? lastMessagePreview,
     Expression<int>? lastSeq,
     Expression<int>? lastReadSeq,
@@ -487,6 +531,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
       if (type != null) 'type': type,
       if (name != null) 'name': name,
       if (peerName != null) 'peer_name': peerName,
+      if (avatarUrl != null) 'avatar_url': avatarUrl,
       if (lastMessagePreview != null)
         'last_message_preview': lastMessagePreview,
       if (lastSeq != null) 'last_seq': lastSeq,
@@ -502,6 +547,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     Value<String>? type,
     Value<String?>? name,
     Value<String?>? peerName,
+    Value<String?>? avatarUrl,
     Value<String?>? lastMessagePreview,
     Value<int>? lastSeq,
     Value<int>? lastReadSeq,
@@ -514,6 +560,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
       type: type ?? this.type,
       name: name ?? this.name,
       peerName: peerName ?? this.peerName,
+      avatarUrl: avatarUrl ?? this.avatarUrl,
       lastMessagePreview: lastMessagePreview ?? this.lastMessagePreview,
       lastSeq: lastSeq ?? this.lastSeq,
       lastReadSeq: lastReadSeq ?? this.lastReadSeq,
@@ -537,6 +584,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     }
     if (peerName.present) {
       map['peer_name'] = Variable<String>(peerName.value);
+    }
+    if (avatarUrl.present) {
+      map['avatar_url'] = Variable<String>(avatarUrl.value);
     }
     if (lastMessagePreview.present) {
       map['last_message_preview'] = Variable<String>(lastMessagePreview.value);
@@ -566,6 +616,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
           ..write('type: $type, ')
           ..write('name: $name, ')
           ..write('peerName: $peerName, ')
+          ..write('avatarUrl: $avatarUrl, ')
           ..write('lastMessagePreview: $lastMessagePreview, ')
           ..write('lastSeq: $lastSeq, ')
           ..write('lastReadSeq: $lastReadSeq, ')
@@ -675,6 +726,28 @@ class $LocalMessagesTable extends LocalMessages
     requiredDuringInsert: false,
     defaultValue: const Constant('pending'),
   );
+  static const VerificationMeta _readCountMeta = const VerificationMeta(
+    'readCount',
+  );
+  @override
+  late final GeneratedColumn<int> readCount = GeneratedColumn<int>(
+    'read_count',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _memberCountMeta = const VerificationMeta(
+    'memberCount',
+  );
+  @override
+  late final GeneratedColumn<int> memberCount = GeneratedColumn<int>(
+    'member_count',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     clientMsgId,
@@ -686,6 +759,8 @@ class $LocalMessagesTable extends LocalMessages
     content,
     createdAt,
     status,
+    readCount,
+    memberCount,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -768,6 +843,21 @@ class $LocalMessagesTable extends LocalMessages
         status.isAcceptableOrUnknown(data['status']!, _statusMeta),
       );
     }
+    if (data.containsKey('read_count')) {
+      context.handle(
+        _readCountMeta,
+        readCount.isAcceptableOrUnknown(data['read_count']!, _readCountMeta),
+      );
+    }
+    if (data.containsKey('member_count')) {
+      context.handle(
+        _memberCountMeta,
+        memberCount.isAcceptableOrUnknown(
+          data['member_count']!,
+          _memberCountMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -813,6 +903,14 @@ class $LocalMessagesTable extends LocalMessages
         DriftSqlType.string,
         data['${effectivePrefix}status'],
       )!,
+      readCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}read_count'],
+      ),
+      memberCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}member_count'],
+      ),
     );
   }
 
@@ -832,6 +930,11 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
   final String content;
   final DateTime createdAt;
   final String status;
+
+  /// Aggregated group read state for messages this user sent. `null` until a
+  /// `read_receipt` frame arrives.
+  final int? readCount;
+  final int? memberCount;
   const LocalMessage({
     required this.clientMsgId,
     this.id,
@@ -842,6 +945,8 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
     required this.content,
     required this.createdAt,
     required this.status,
+    this.readCount,
+    this.memberCount,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -859,6 +964,12 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
     map['content'] = Variable<String>(content);
     map['created_at'] = Variable<DateTime>(createdAt);
     map['status'] = Variable<String>(status);
+    if (!nullToAbsent || readCount != null) {
+      map['read_count'] = Variable<int>(readCount);
+    }
+    if (!nullToAbsent || memberCount != null) {
+      map['member_count'] = Variable<int>(memberCount);
+    }
     return map;
   }
 
@@ -873,6 +984,12 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
       content: Value(content),
       createdAt: Value(createdAt),
       status: Value(status),
+      readCount: readCount == null && nullToAbsent
+          ? const Value.absent()
+          : Value(readCount),
+      memberCount: memberCount == null && nullToAbsent
+          ? const Value.absent()
+          : Value(memberCount),
     );
   }
 
@@ -891,6 +1008,8 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
       content: serializer.fromJson<String>(json['content']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       status: serializer.fromJson<String>(json['status']),
+      readCount: serializer.fromJson<int?>(json['readCount']),
+      memberCount: serializer.fromJson<int?>(json['memberCount']),
     );
   }
   @override
@@ -906,6 +1025,8 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
       'content': serializer.toJson<String>(content),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'status': serializer.toJson<String>(status),
+      'readCount': serializer.toJson<int?>(readCount),
+      'memberCount': serializer.toJson<int?>(memberCount),
     };
   }
 
@@ -919,6 +1040,8 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
     String? content,
     DateTime? createdAt,
     String? status,
+    Value<int?> readCount = const Value.absent(),
+    Value<int?> memberCount = const Value.absent(),
   }) => LocalMessage(
     clientMsgId: clientMsgId ?? this.clientMsgId,
     id: id.present ? id.value : this.id,
@@ -929,6 +1052,8 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
     content: content ?? this.content,
     createdAt: createdAt ?? this.createdAt,
     status: status ?? this.status,
+    readCount: readCount.present ? readCount.value : this.readCount,
+    memberCount: memberCount.present ? memberCount.value : this.memberCount,
   );
   LocalMessage copyWithCompanion(LocalMessagesCompanion data) {
     return LocalMessage(
@@ -945,6 +1070,10 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
       content: data.content.present ? data.content.value : this.content,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       status: data.status.present ? data.status.value : this.status,
+      readCount: data.readCount.present ? data.readCount.value : this.readCount,
+      memberCount: data.memberCount.present
+          ? data.memberCount.value
+          : this.memberCount,
     );
   }
 
@@ -959,7 +1088,9 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
           ..write('type: $type, ')
           ..write('content: $content, ')
           ..write('createdAt: $createdAt, ')
-          ..write('status: $status')
+          ..write('status: $status, ')
+          ..write('readCount: $readCount, ')
+          ..write('memberCount: $memberCount')
           ..write(')'))
         .toString();
   }
@@ -975,6 +1106,8 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
     content,
     createdAt,
     status,
+    readCount,
+    memberCount,
   );
   @override
   bool operator ==(Object other) =>
@@ -988,7 +1121,9 @@ class LocalMessage extends DataClass implements Insertable<LocalMessage> {
           other.type == this.type &&
           other.content == this.content &&
           other.createdAt == this.createdAt &&
-          other.status == this.status);
+          other.status == this.status &&
+          other.readCount == this.readCount &&
+          other.memberCount == this.memberCount);
 }
 
 class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
@@ -1001,6 +1136,8 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
   final Value<String> content;
   final Value<DateTime> createdAt;
   final Value<String> status;
+  final Value<int?> readCount;
+  final Value<int?> memberCount;
   final Value<int> rowid;
   const LocalMessagesCompanion({
     this.clientMsgId = const Value.absent(),
@@ -1012,6 +1149,8 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
     this.content = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.status = const Value.absent(),
+    this.readCount = const Value.absent(),
+    this.memberCount = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   LocalMessagesCompanion.insert({
@@ -1024,6 +1163,8 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
     required String content,
     required DateTime createdAt,
     this.status = const Value.absent(),
+    this.readCount = const Value.absent(),
+    this.memberCount = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : clientMsgId = Value(clientMsgId),
        conversationId = Value(conversationId),
@@ -1041,6 +1182,8 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
     Expression<String>? content,
     Expression<DateTime>? createdAt,
     Expression<String>? status,
+    Expression<int>? readCount,
+    Expression<int>? memberCount,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1053,6 +1196,8 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
       if (content != null) 'content': content,
       if (createdAt != null) 'created_at': createdAt,
       if (status != null) 'status': status,
+      if (readCount != null) 'read_count': readCount,
+      if (memberCount != null) 'member_count': memberCount,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1067,6 +1212,8 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
     Value<String>? content,
     Value<DateTime>? createdAt,
     Value<String>? status,
+    Value<int?>? readCount,
+    Value<int?>? memberCount,
     Value<int>? rowid,
   }) {
     return LocalMessagesCompanion(
@@ -1079,6 +1226,8 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
       content: content ?? this.content,
       createdAt: createdAt ?? this.createdAt,
       status: status ?? this.status,
+      readCount: readCount ?? this.readCount,
+      memberCount: memberCount ?? this.memberCount,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1113,6 +1262,12 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
     if (status.present) {
       map['status'] = Variable<String>(status.value);
     }
+    if (readCount.present) {
+      map['read_count'] = Variable<int>(readCount.value);
+    }
+    if (memberCount.present) {
+      map['member_count'] = Variable<int>(memberCount.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1131,6 +1286,8 @@ class LocalMessagesCompanion extends UpdateCompanion<LocalMessage> {
           ..write('content: $content, ')
           ..write('createdAt: $createdAt, ')
           ..write('status: $status, ')
+          ..write('readCount: $readCount, ')
+          ..write('memberCount: $memberCount, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1645,6 +1802,7 @@ typedef $$LocalConversationsTableCreateCompanionBuilder =
       required String type,
       Value<String?> name,
       Value<String?> peerName,
+      Value<String?> avatarUrl,
       Value<String?> lastMessagePreview,
       Value<int> lastSeq,
       Value<int> lastReadSeq,
@@ -1658,6 +1816,7 @@ typedef $$LocalConversationsTableUpdateCompanionBuilder =
       Value<String> type,
       Value<String?> name,
       Value<String?> peerName,
+      Value<String?> avatarUrl,
       Value<String?> lastMessagePreview,
       Value<int> lastSeq,
       Value<int> lastReadSeq,
@@ -1692,6 +1851,11 @@ class $$LocalConversationsTableFilterComposer
 
   ColumnFilters<String> get peerName => $composableBuilder(
     column: $table.peerName,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get avatarUrl => $composableBuilder(
+    column: $table.avatarUrl,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1750,6 +1914,11 @@ class $$LocalConversationsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get avatarUrl => $composableBuilder(
+    column: $table.avatarUrl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get lastMessagePreview => $composableBuilder(
     column: $table.lastMessagePreview,
     builder: (column) => ColumnOrderings(column),
@@ -1796,6 +1965,9 @@ class $$LocalConversationsTableAnnotationComposer
 
   GeneratedColumn<String> get peerName =>
       $composableBuilder(column: $table.peerName, builder: (column) => column);
+
+  GeneratedColumn<String> get avatarUrl =>
+      $composableBuilder(column: $table.avatarUrl, builder: (column) => column);
 
   GeneratedColumn<String> get lastMessagePreview => $composableBuilder(
     column: $table.lastMessagePreview,
@@ -1863,6 +2035,7 @@ class $$LocalConversationsTableTableManager
                 Value<String> type = const Value.absent(),
                 Value<String?> name = const Value.absent(),
                 Value<String?> peerName = const Value.absent(),
+                Value<String?> avatarUrl = const Value.absent(),
                 Value<String?> lastMessagePreview = const Value.absent(),
                 Value<int> lastSeq = const Value.absent(),
                 Value<int> lastReadSeq = const Value.absent(),
@@ -1874,6 +2047,7 @@ class $$LocalConversationsTableTableManager
                 type: type,
                 name: name,
                 peerName: peerName,
+                avatarUrl: avatarUrl,
                 lastMessagePreview: lastMessagePreview,
                 lastSeq: lastSeq,
                 lastReadSeq: lastReadSeq,
@@ -1887,6 +2061,7 @@ class $$LocalConversationsTableTableManager
                 required String type,
                 Value<String?> name = const Value.absent(),
                 Value<String?> peerName = const Value.absent(),
+                Value<String?> avatarUrl = const Value.absent(),
                 Value<String?> lastMessagePreview = const Value.absent(),
                 Value<int> lastSeq = const Value.absent(),
                 Value<int> lastReadSeq = const Value.absent(),
@@ -1898,6 +2073,7 @@ class $$LocalConversationsTableTableManager
                 type: type,
                 name: name,
                 peerName: peerName,
+                avatarUrl: avatarUrl,
                 lastMessagePreview: lastMessagePreview,
                 lastSeq: lastSeq,
                 lastReadSeq: lastReadSeq,
@@ -1956,6 +2132,8 @@ typedef $$LocalMessagesTableCreateCompanionBuilder =
       required String content,
       required DateTime createdAt,
       Value<String> status,
+      Value<int?> readCount,
+      Value<int?> memberCount,
       Value<int> rowid,
     });
 typedef $$LocalMessagesTableUpdateCompanionBuilder =
@@ -1969,6 +2147,8 @@ typedef $$LocalMessagesTableUpdateCompanionBuilder =
       Value<String> content,
       Value<DateTime> createdAt,
       Value<String> status,
+      Value<int?> readCount,
+      Value<int?> memberCount,
       Value<int> rowid,
     });
 
@@ -2023,6 +2203,16 @@ class $$LocalMessagesTableFilterComposer
 
   ColumnFilters<String> get status => $composableBuilder(
     column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get readCount => $composableBuilder(
+    column: $table.readCount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get memberCount => $composableBuilder(
+    column: $table.memberCount,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -2080,6 +2270,16 @@ class $$LocalMessagesTableOrderingComposer
     column: $table.status,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<int> get readCount => $composableBuilder(
+    column: $table.readCount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get memberCount => $composableBuilder(
+    column: $table.memberCount,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$LocalMessagesTableAnnotationComposer
@@ -2121,6 +2321,14 @@ class $$LocalMessagesTableAnnotationComposer
 
   GeneratedColumn<String> get status =>
       $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<int> get readCount =>
+      $composableBuilder(column: $table.readCount, builder: (column) => column);
+
+  GeneratedColumn<int> get memberCount => $composableBuilder(
+    column: $table.memberCount,
+    builder: (column) => column,
+  );
 }
 
 class $$LocalMessagesTableTableManager
@@ -2163,6 +2371,8 @@ class $$LocalMessagesTableTableManager
                 Value<String> content = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<String> status = const Value.absent(),
+                Value<int?> readCount = const Value.absent(),
+                Value<int?> memberCount = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => LocalMessagesCompanion(
                 clientMsgId: clientMsgId,
@@ -2174,6 +2384,8 @@ class $$LocalMessagesTableTableManager
                 content: content,
                 createdAt: createdAt,
                 status: status,
+                readCount: readCount,
+                memberCount: memberCount,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -2187,6 +2399,8 @@ class $$LocalMessagesTableTableManager
                 required String content,
                 required DateTime createdAt,
                 Value<String> status = const Value.absent(),
+                Value<int?> readCount = const Value.absent(),
+                Value<int?> memberCount = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => LocalMessagesCompanion.insert(
                 clientMsgId: clientMsgId,
@@ -2198,6 +2412,8 @@ class $$LocalMessagesTableTableManager
                 content: content,
                 createdAt: createdAt,
                 status: status,
+                readCount: readCount,
+                memberCount: memberCount,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

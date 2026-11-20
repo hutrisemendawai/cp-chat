@@ -7,6 +7,7 @@ export type ConversationRow = {
   id: string;
   type: 'direct' | 'group';
   name: string | null;
+  avatar_url: string | null;
   created_by: string | null;
   created_at: Date;
   last_seq: number;
@@ -48,8 +49,14 @@ type MessageJoinRow = {
 
 const MESSAGE_COLUMNS = `id, conversation_id, seq, sender_id, client_msg_id, type, content, created_at`;
 
+const CONVERSATION_COLUMNS = `id, type, name, avatar_url, created_by, created_at, last_seq`;
+
 function mapMessage(row: MessageJoinRow) {
   return { ...row, seq: Number(row.seq) };
+}
+
+function mapConversation(row: ConversationRow & { last_seq: string | number }): ConversationRow {
+  return { ...row, last_seq: Number(row.last_seq) };
 }
 
 export class ConversationRepository {
@@ -80,12 +87,11 @@ export class ConversationRepository {
 
   async getRow(conversationId: string): Promise<ConversationRow | null> {
     const { rows } = await this.db.query<ConversationRow & { last_seq: string }>(
-      `SELECT id, type, name, created_by, created_at, last_seq
-         FROM conversations WHERE id = $1`,
+      `SELECT ${CONVERSATION_COLUMNS} FROM conversations WHERE id = $1`,
       [conversationId],
     );
     const row = rows[0];
-    return row ? { ...row, last_seq: Number(row.last_seq) } : null;
+    return row ? mapConversation(row) : null;
   }
 
   async findDirectId(userA: string, userB: string): Promise<string | null> {
@@ -114,15 +120,14 @@ export class ConversationRepository {
         `INSERT INTO conversations (type, created_by, direct_key)
          VALUES ('direct', $1, $2)
          ON CONFLICT (direct_key) WHERE direct_key IS NOT NULL DO NOTHING
-         RETURNING id, type, name, created_by, created_at, last_seq`,
+         RETURNING ${CONVERSATION_COLUMNS}`,
         [currentUserId, key],
       );
 
       let conversation = insert.rows[0];
       if (!conversation) {
         const existing = await client.query<ConversationRow & { last_seq: string }>(
-          `SELECT id, type, name, created_by, created_at, last_seq
-             FROM conversations WHERE direct_key = $1`,
+          `SELECT ${CONVERSATION_COLUMNS} FROM conversations WHERE direct_key = $1`,
           [key],
         );
         conversation = existing.rows[0]!;
@@ -135,13 +140,199 @@ export class ConversationRepository {
       }
 
       await client.query('COMMIT');
-      return { ...conversation, last_seq: Number(conversation.last_seq) };
+      return mapConversation(conversation);
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
     } finally {
       client.release();
     }
+  }
+
+  /** Creates a group; the creator is the first admin. */
+  async createGroup(input: {
+    creatorId: string;
+    name: string;
+    memberIds: string[];
+    avatarUrl?: string | null;
+    maxMembers: number;
+  }): Promise<ConversationRow> {
+    const others = [...new Set(input.memberIds)].filter((id) => id !== input.creatorId);
+    if (others.length === 0) {
+      throw new ApiError('validation_error', 'A group needs at least one other member');
+    }
+    if (1 + others.length > input.maxMembers) {
+      throw new ApiError(
+        'group_full',
+        `Groups are limited to ${input.maxMembers} members`,
+      );
+    }
+
+    return this.transaction(async (client) => {
+      const created = await client.query<ConversationRow & { last_seq: string }>(
+        `INSERT INTO conversations (type, name, avatar_url, created_by)
+         VALUES ('group', $1, $2, $3)
+         RETURNING ${CONVERSATION_COLUMNS}`,
+        [input.name, input.avatarUrl ?? null, input.creatorId],
+      );
+      const conversation = created.rows[0]!;
+
+      const ids = [input.creatorId, ...others];
+      await client.query(
+        `INSERT INTO conversation_members (conversation_id, user_id, role)
+         SELECT $1, member_id, CASE WHEN member_id = $2 THEN 'admin' ELSE 'member' END
+           FROM unnest($3::uuid[]) AS member_id`,
+        [conversation.id, input.creatorId, ids],
+      );
+
+      return mapConversation(conversation);
+    });
+  }
+
+  /** Updates a group's mutable metadata. Caller must already be an admin. */
+  async updateGroup(
+    conversationId: string,
+    patch: { name?: string; avatarUrl?: string | null },
+  ): Promise<ConversationRow> {
+    const { rows } = await this.db.query<ConversationRow & { last_seq: string }>(
+      `UPDATE conversations
+          SET name = COALESCE($2, name),
+              avatar_url = CASE WHEN $3 THEN $4 ELSE avatar_url END
+        WHERE id = $1 AND type = 'group'
+        RETURNING ${CONVERSATION_COLUMNS}`,
+      [conversationId, patch.name ?? null, patch.avatarUrl !== undefined, patch.avatarUrl ?? null],
+    );
+    if (!rows[0]) {
+      throw new ApiError('conversation_not_found', 'Group not found');
+    }
+    return mapConversation(rows[0]);
+  }
+
+  /**
+   * Adds members to a group. The conversation row is locked so two concurrent
+   * additions cannot both pass the member-limit check.
+   */
+  async addMembers(input: {
+    conversationId: string;
+    actorId: string;
+    userIds: string[];
+    maxMembers: number;
+  }): Promise<string[]> {
+    return this.transaction(async (client) => {
+      await this.lockConversation(client, input.conversationId, 'group');
+      await this.requireAdminIn(client, input.conversationId, input.actorId);
+
+      const current = await client.query<{ user_id: string }>(
+        `SELECT user_id FROM conversation_members WHERE conversation_id = $1`,
+        [input.conversationId],
+      );
+      const existing = new Set(current.rows.map((row) => row.user_id));
+      const toAdd = [...new Set(input.userIds)].filter((id) => !existing.has(id));
+
+      if (existing.size + toAdd.length > input.maxMembers) {
+        throw new ApiError(
+          'group_full',
+          `Groups are limited to ${input.maxMembers} members`,
+        );
+      }
+
+      if (toAdd.length > 0) {
+        await client.query(
+          `INSERT INTO conversation_members (conversation_id, user_id, role)
+           SELECT $1, member_id, 'member'
+             FROM unnest($2::uuid[]) AS member_id
+           ON CONFLICT (conversation_id, user_id) DO NOTHING`,
+          [input.conversationId, toAdd],
+        );
+      }
+      return toAdd;
+    });
+  }
+
+  /**
+   * Removes a member. Members may remove themselves (leave); removing anyone
+   * else requires admin. The last admin cannot leave a group that still has
+   * other members, so the group always has someone who can manage it.
+   */
+  async removeMember(input: {
+    conversationId: string;
+    actorId: string;
+    targetId: string;
+  }): Promise<{ conversationDeleted: boolean }> {
+    return this.transaction(async (client) => {
+      await this.lockConversation(client, input.conversationId, 'group');
+
+      if (input.actorId !== input.targetId) {
+        await this.requireAdminIn(client, input.conversationId, input.actorId);
+      }
+
+      const members = await client.query<{ user_id: string; role: 'admin' | 'member' }>(
+        `SELECT user_id, role FROM conversation_members WHERE conversation_id = $1`,
+        [input.conversationId],
+      );
+      const target = members.rows.find((row) => row.user_id === input.targetId);
+      if (!target) {
+        throw new ApiError('not_found', 'Member not found');
+      }
+
+      const remainingAdmins = members.rows.filter(
+        (row) => row.role === 'admin' && row.user_id !== input.targetId,
+      );
+      if (target.role === 'admin' && remainingAdmins.length === 0 && members.rows.length > 1) {
+        throw new ApiError(
+          'last_admin',
+          'Promote another member to admin before leaving',
+        );
+      }
+
+      await client.query(
+        `DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`,
+        [input.conversationId, input.targetId],
+      );
+
+      if (members.rows.length === 1) {
+        await client.query(`DELETE FROM conversations WHERE id = $1`, [input.conversationId]);
+        return { conversationDeleted: true };
+      }
+      return { conversationDeleted: false };
+    });
+  }
+
+  async requireAdmin(conversationId: string, userId: string): Promise<void> {
+    await this.requireAdminIn(this.db, conversationId, userId);
+  }
+
+  async requireGroup(conversationId: string): Promise<ConversationRow> {
+    const conversation = await this.getRow(conversationId);
+    if (!conversation) {
+      throw new ApiError('conversation_not_found', 'Conversation not found');
+    }
+    if (conversation.type !== 'group') {
+      throw new ApiError('unsupported_conversation_type', 'This action requires a group');
+    }
+    return conversation;
+  }
+
+  /**
+   * Read tally for an aggregated-read group UI: how many members other than the
+   * sender have read up to and including `seq`.
+   */
+  async readStats(
+    conversationId: string,
+    seq: number,
+    senderId: string,
+  ): Promise<{ readCount: number; memberCount: number }> {
+    const { rows } = await this.db.query<{ read_count: string; member_count: string }>(
+      `SELECT count(*) FILTER (WHERE user_id <> $2 AND last_read_seq >= $3)::text AS read_count,
+              count(*) FILTER (WHERE user_id <> $2)::text AS member_count
+         FROM conversation_members
+        WHERE conversation_id = $1`,
+      [conversationId, senderId, seq],
+    );
+    return {
+      readCount: Number(rows[0]?.read_count ?? 0),
+      memberCount: Number(rows[0]?.member_count ?? 0),
+    };
   }
 
   /** Returns the conversation the caller may access, or throws. */
@@ -194,7 +385,7 @@ export class ConversationRepository {
         lm_created_at: Date | null;
       }
     >(
-      `SELECT c.id, c.type, c.name, c.created_by, c.created_at, c.last_seq,
+      `SELECT c.id, c.type, c.name, c.avatar_url, c.created_by, c.created_at, c.last_seq,
               cm.last_read_seq,
               COALESCE(activity.last_message_at, c.created_at) AS activity_at,
               (SELECT count(*) FROM messages m
@@ -227,6 +418,7 @@ export class ConversationRepository {
         id: row.id,
         type: row.type,
         name: row.name,
+        avatar_url: row.avatar_url,
         created_by: row.created_by,
         created_at: row.created_at,
         last_seq: Number(row.last_seq),
@@ -326,6 +518,55 @@ export class ConversationRepository {
       ...conversation,
       members: byConversation.get(conversation.id) ?? [],
     }));
+  }
+
+  private async lockConversation(
+    client: Pick<Db, 'query'>,
+    conversationId: string,
+    expectedType: 'group',
+  ): Promise<void> {
+    const { rows } = await client.query<{ type: 'direct' | 'group' }>(
+      `SELECT type FROM conversations WHERE id = $1 FOR UPDATE`,
+      [conversationId],
+    );
+    if (!rows[0]) {
+      throw new ApiError('conversation_not_found', 'Conversation not found');
+    }
+    if (rows[0].type !== expectedType) {
+      throw new ApiError('unsupported_conversation_type', 'This action requires a group');
+    }
+  }
+
+  private async requireAdminIn(
+    client: Pick<Db, 'query'>,
+    conversationId: string,
+    userId: string,
+  ): Promise<void> {
+    const { rows } = await client.query<{ role: 'admin' | 'member' }>(
+      `SELECT role FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`,
+      [conversationId, userId],
+    );
+    if (!rows[0]) {
+      throw new ApiError('not_a_member', 'You are not a member of this conversation');
+    }
+    if (rows[0].role !== 'admin') {
+      throw new ApiError('not_an_admin', 'Only group admins can do that');
+    }
+  }
+
+  private async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 

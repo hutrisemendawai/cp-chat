@@ -7,9 +7,12 @@ import type { Cache } from '../lib/redis.js';
 import { verifyAccessToken } from '../lib/tokens.js';
 import { ConversationRepository } from '../domain/conversations.js';
 import { DeviceRepository } from '../domain/devices.js';
+import { MediaRepository } from '../domain/media.js';
+import { MemberCache } from '../domain/member-cache.js';
 import { MessageRepository } from '../domain/messages.js';
 import { RefreshTokenRepository } from '../domain/refresh-tokens.js';
 import { UserRepository } from '../domain/users.js';
+import { StorageService } from '../lib/storage.js';
 
 export type AppContext = {
   config: Config;
@@ -20,18 +23,25 @@ export type AppContext = {
   conversations: ConversationRepository;
   messages: MessageRepository;
   devices: DeviceRepository;
+  media: MediaRepository;
+  members: MemberCache;
+  storage: StorageService;
 };
 
 export function createContext(config: Config, db: Db, redis: Cache): AppContext {
+  const conversations = new ConversationRepository(db);
   return {
     config,
     db,
     redis,
     users: new UserRepository(db),
     refreshTokens: new RefreshTokenRepository(db, config.REFRESH_TOKEN_TTL_SECONDS),
-    conversations: new ConversationRepository(db),
+    conversations,
     messages: new MessageRepository(db),
     devices: new DeviceRepository(db),
+    media: new MediaRepository(db),
+    members: new MemberCache(redis, conversations, config.MEMBERS_CACHE_TTL_SECONDS),
+    storage: new StorageService(config),
   };
 }
 

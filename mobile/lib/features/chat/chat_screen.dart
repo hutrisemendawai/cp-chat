@@ -1,12 +1,17 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../core/database/app_database.dart';
 import '../../core/providers.dart';
 import 'chat_controller.dart';
 import 'conversation_metadata.dart';
+import 'media_message.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key, required this.conversationId});
@@ -21,6 +26,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _composer = TextEditingController();
   final _scrollController = ScrollController();
   bool _sending = false;
+  bool _uploading = false;
+  double _uploadProgress = 0;
   bool _loadingOlder = false;
   bool _hasMoreHistory = true;
 
@@ -28,14 +35,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   void initState() {
     super.initState();
     _composer.addListener(() => setState(() {}));
+    _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _onOpen());
   }
 
   @override
   void dispose() {
     _composer.dispose();
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// Marking read only when the newest message is actually on screen keeps the
+  /// unread badge honest for messages the user has not scrolled to yet.
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    if (position.pixels >= position.maxScrollExtent - 40) {
+      unawaited(ref.read(chatControllerProvider(widget.conversationId)).markRead());
+    }
   }
 
   Future<void> _onOpen() async {
@@ -57,6 +76,66 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       await _scrollToBottom();
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _pickImage() async {
+    if (_uploading) return;
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 2400,
+      imageQuality: 92,
+    );
+    if (picked == null) return;
+
+    await _withUploadProgress(
+      (onProgress) => ref.read(chatControllerProvider(widget.conversationId)).sendImage(
+            File(picked.path),
+            onProgress: onProgress,
+          ),
+    );
+  }
+
+  Future<void> _pickFile() async {
+    if (_uploading) return;
+    final file = await FilePicker.pickFile();
+    if (file == null || file.path == null) return;
+
+    await _withUploadProgress(
+      (onProgress) => ref.read(chatControllerProvider(widget.conversationId)).sendFile(
+            File(file.path!),
+            displayName: file.name,
+            contentType: null,
+            onProgress: onProgress,
+          ),
+    );
+  }
+
+  Future<void> _withUploadProgress(Future<void> Function(void Function(int, int)?) action) async {
+    setState(() {
+      _uploading = true;
+      _uploadProgress = 0;
+    });
+    try {
+      await action((sent, total) {
+        if (!mounted || total <= 0) return;
+        setState(() => _uploadProgress = sent / total);
+      });
+      await _scrollToBottom();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Upload failed: $error')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _uploading = false;
+          _uploadProgress = 0;
+        });
+      }
     }
   }
 
@@ -94,6 +173,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         cached?.name ??
         metadata.value?.displayName(selfId ?? '') ??
         'Chat';
+    final isGroup = cached?.type == 'group' || metadata.value?.isGroup == true;
+
+    // Sender names make a group thread readable; direct chats already imply it.
+    final senderNames = <String, String>{
+      if (metadata.value != null)
+        for (final member in metadata.value!.members) member.user.id: member.user.name,
+    };
 
     ref.listen(messagesProvider(widget.conversationId), (_, _) {
       // Incoming messages while the screen is open are read immediately.
@@ -101,9 +187,34 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
 
     return Scaffold(
-      appBar: AppBar(title: Text(title)),
+      appBar: AppBar(
+        title: Row(
+          children: [
+            if (isGroup)
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: MediaAvatar(
+                  objectKey: cached?.avatarUrl,
+                  radius: 16,
+                  fallback: Icon(isGroup ? Icons.groups : Icons.person),
+                ),
+              ),
+            Flexible(child: Text(title, overflow: TextOverflow.ellipsis)),
+          ],
+        ),
+        actions: [
+          if (isGroup)
+            IconButton(
+              tooltip: 'Group info',
+              icon: const Icon(Icons.info_outline),
+              onPressed: () => context.push('/conversations/${widget.conversationId}/info'),
+            ),
+        ],
+      ),
       body: Column(
         children: [
+          if (_uploading)
+            LinearProgressIndicator(value: _uploadProgress == 0 ? null : _uploadProgress),
           Expanded(
             child: messages.when(
               loading: () => const Center(child: CircularProgressIndicator()),
@@ -134,6 +245,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     return _MessageBubble(
                       message: message,
                       isMine: message.senderId == selfId,
+                      showGroupReceipt: isGroup,
+                      senderName: message.senderId == selfId ? null : senderNames[message.senderId],
                       onRetry: () => ref
                           .read(chatControllerProvider(widget.conversationId))
                           .retry(message.clientMsgId),
@@ -153,6 +266,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
+                  IconButton(
+                    onPressed: _uploading ? null : _pickImage,
+                    tooltip: 'Send photo',
+                    icon: const Icon(Icons.image_outlined),
+                  ),
+                  IconButton(
+                    onPressed: _uploading ? null : _pickFile,
+                    tooltip: 'Send file',
+                    icon: const Icon(Icons.attach_file),
+                  ),
                   Expanded(
                     child: TextField(
                       controller: _composer,
@@ -169,7 +292,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                   ),
                   const SizedBox(width: 8),
                   IconButton.filled(
-                    onPressed: _composer.text.trim().isEmpty || _sending ? null : _send,
+                    onPressed: _composer.text.trim().isEmpty || _sending || _uploading
+                        ? null
+                        : _send,
                     tooltip: 'Send',
                     icon: const Icon(Icons.send),
                   ),
@@ -193,16 +318,22 @@ class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.message,
     required this.isMine,
+    required this.showGroupReceipt,
+    required this.senderName,
     required this.onRetry,
     required this.onDiscard,
   });
 
   final LocalMessage message;
   final bool isMine;
+  final bool showGroupReceipt;
+  final String? senderName;
   final VoidCallback onRetry;
   final VoidCallback onDiscard;
 
   bool get _failed => message.status == 'failed';
+  bool get _isImage => message.type == 'image';
+  bool get _isFile => message.type == 'file';
 
   @override
   Widget build(BuildContext context) {
@@ -236,17 +367,36 @@ class _MessageBubble extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (senderName != null) ...[
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          senderName!,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: foreground.withValues(alpha: 0.75),
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                    ],
                     Align(
                       alignment: Alignment.centerLeft,
-                      child: Text(
-                        message.content,
-                        style: theme.textTheme.bodyLarge?.copyWith(color: foreground),
-                      ),
+                      child: _body(theme, foreground),
                     ),
                     const SizedBox(height: 2),
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (isMine && showGroupReceipt && _groupReceiptLabel() != null) ...[
+                          Text(
+                            _groupReceiptLabel()!,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: foreground.withValues(alpha: 0.7),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                        ],
                         Text(
                           _time(message.createdAt),
                           style: theme.textTheme.labelSmall?.copyWith(
@@ -267,6 +417,26 @@ class _MessageBubble extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// Text, image or file body. Media content stores the object key plus an
+  /// optional caption so the same bubble can render both.
+  Widget _body(ThemeData theme, Color foreground) {
+    if (_isImage) return ImageMessage(content: message.content);
+    if (_isFile) return FileMessage(content: message.content);
+    return Text(
+      message.content,
+      style: theme.textTheme.bodyLarge?.copyWith(color: foreground),
+    );
+  }
+
+  /// "Read by 3" for group messages this user sent, once a receipt arrives.
+  String? _groupReceiptLabel() {
+    final read = message.readCount;
+    final total = message.memberCount;
+    if (read == null || total == null || total == 0) return null;
+    if (read >= total) return 'Read by all';
+    return 'Read by $read';
   }
 
   void _showActions(BuildContext context) {

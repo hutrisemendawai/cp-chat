@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../core/media/media_service.dart';
 import '../../core/models/models.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/ws_client.dart';
@@ -37,19 +39,66 @@ class ChatController {
     );
   }
 
+  /// Sends an image: compress, upload to object storage, then send an
+  /// `image` message whose content is the returned object key.
+  Future<void> sendImage(
+    File file, {
+    String? caption,
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final key = await _ref
+        .read(mediaServiceProvider)
+        .uploadImage(file: file, onProgress: onProgress);
+    await _sendMedia(key, 'image', caption);
+  }
+
+  /// Sends an arbitrary file attachment (no re-encoding).
+  Future<void> sendFile(
+    File file, {
+    required String? displayName,
+    required String? contentType,
+    String? caption,
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final key = await _ref.read(mediaServiceProvider).uploadFile(
+          file: file,
+          displayName: displayName,
+          contentType: contentType,
+          onProgress: onProgress,
+        );
+    await _sendMedia(key, 'file', caption);
+  }
+
+  Future<void> _sendMedia(String objectKey, String type, String? caption) async {
+    final user = _user;
+    if (user == null) return;
+    await _socket.send(
+      conversationId: _conversationId,
+      senderId: user.id,
+      clientMsgId: _uuid.v4(),
+      content: joinMediaContent(objectKey, caption),
+      type: type,
+    );
+  }
+
   Future<void> retry(String clientMsgId) => _socket.retry(_conversationId, clientMsgId);
 
   Future<void> discard(String clientMsgId) => _socket.discard(clientMsgId);
 
-  /// Marks the conversation read up to the newest persisted `seq`.
+  /// Marks the conversation read up to the newest message received from someone
+  /// else. Acking your own messages would bounce a spurious "read" tick back to
+  /// yourself in a direct chat.
   Future<void> markRead() async {
     final dao = _ref.read(chatDaoProvider);
-    final maxSeq = await dao.localMaxSeq(_conversationId);
-    if (maxSeq <= 0) return;
+    final user = _user;
+    if (user == null) return;
+
+    final latest = await dao.latestSeqFromOthers(_conversationId, user.id);
+    if (latest <= 0) return;
 
     final conversation = await dao.conversation(_conversationId);
-    if (conversation != null && conversation.lastReadSeq >= maxSeq) return;
-    await _socket.acknowledgeRead(_conversationId, maxSeq);
+    if (conversation != null && conversation.lastReadSeq >= latest) return;
+    await _socket.acknowledgeRead(_conversationId, latest);
   }
 
   /// Loads older history (backwards pagination) into the local mirror.

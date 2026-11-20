@@ -219,6 +219,37 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Conversations]
+      summary: Update a group name or avatar (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                avatar_url:
+                  type: string
+                  nullable: true
+                  description: Object key returned by the media service
+      responses:
+        '200':
+          description: Updated conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
 
   /api/v1/conversations/{id}/members:
     parameters:
@@ -251,6 +282,14 @@ paths:
                   $ref: '#/components/schemas/Member'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Group is already at the 500-member limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '422':
           $ref: '#/components/responses/ValidationError'
 
@@ -266,6 +305,10 @@ paths:
     delete:
       tags: [Conversations]
       summary: Remove a member or leave the group
+      description: >
+        A member may remove themselves (leave). Removing another member requires
+        admin. The last admin of a group with other members cannot leave until
+        another admin is promoted. Removing the final member deletes the group.
       responses:
         '204':
           description: Member removed
@@ -273,6 +316,12 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: Cannot remove the last admin of a non-empty group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/v1/conversations/{id}/messages:
     parameters:
@@ -365,21 +414,77 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [media_id, upload_url, file_url, expires_at]
+                required: [media_id, object_key, upload_url, file_url, expires_at]
                 properties:
                   media_id:
                     type: string
+                    format: uuid
+                  object_key:
+                    type: string
+                    description: >
+                      Storage key to reference in a message `content` (media
+                      messages) or a group `avatar_url`.
                   upload_url:
                     type: string
                     format: uri
+                    description: >
+                      Short-lived presigned PUT. Upload the bytes with the exact
+                      `Content-Type` and `Content-Length` declared here.
                   file_url:
                     type: string
                     format: uri
+                  content_type:
+                    type: string
+                  size_bytes:
+                    type: integer
+                    format: int64
                   expires_at:
                     type: string
                     format: date-time
+        '413':
+          description: File exceeds the 25 MB limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Content type not permitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '422':
           $ref: '#/components/responses/ValidationError'
+
+  /api/v1/media/{key}:
+    get:
+      tags: [Media]
+      summary: Resolve a media object to a short-lived download URL
+      description: >
+        Redirects (302) to a presigned GET. Allowed for the owner and for users
+        who share a conversation with the owner.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Object key returned by `POST /media/presign`
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >
+            Access token for image/download handlers that cannot set an
+            `Authorization` header. A bearer header is preferred when possible.
+      responses:
+        '302':
+          description: Redirect to the presigned download URL
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
 components:
   securitySchemes:
@@ -543,6 +648,10 @@ components:
         name:
           type: string
           nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+          description: Group avatar object key (null for direct chats)
         created_by:
           type: string
           format: uuid
@@ -575,6 +684,10 @@ components:
           type: string
           description: Required for groups
           maxLength: 100
+        avatar_url:
+          type: string
+          nullable: true
+          description: Optional group avatar object key
         member_ids:
           type: array
           minItems: 1

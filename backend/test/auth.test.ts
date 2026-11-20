@@ -208,7 +208,7 @@ describe('conversations', () => {
     expect(first.json().unread_count).toBe(0);
   });
 
-  it('rejects a self conversation, groups, and unknown members', async () => {
+  it('rejects a self conversation and unknown members', async () => {
     const alice = await registerUser(harness, 'Alice');
     const bob = await registerUser(harness, 'Bob');
 
@@ -232,8 +232,9 @@ describe('conversations', () => {
     });
 
     expect(self.statusCode).toBe(422);
-    expect(group.statusCode).toBe(422);
-    expect(group.json().error.code).toBe('unsupported_conversation_type');
+    // Phase 2 enables groups: the creator is the admin and the payload is valid.
+    expect(group.statusCode).toBe(201);
+    expect(group.json().type).toBe('group');
     expect(unknown.statusCode).toBe(404);
   });
 

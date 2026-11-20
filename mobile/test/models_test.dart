@@ -95,6 +95,64 @@ void main() {
       expect(page.messages, isEmpty);
       expect(sync.latestSeq, 12);
     });
+
+    test('parses a group avatar and admin role', () {
+      final conversation = Conversation.fromJson(
+        jsonDecode('''
+        {
+          "id": "g1", "type": "group", "name": "Team",
+          "avatar_url": "owner/2026/11/avatar.jpg", "created_by": "u1",
+          "last_seq": 0, "last_read_seq": 0, "unread_count": 0,
+          "created_at": "2026-01-01T00:00:00Z",
+          "members": [
+            {"user": {"id": "u1", "name": "Alice", "created_at": "2026-01-01T00:00:00Z"},
+             "role": "admin", "last_read_seq": 0},
+            {"user": {"id": "u2", "name": "Bob", "created_at": "2026-01-01T00:00:00Z"},
+             "role": "member", "last_read_seq": 0}
+          ],
+          "last_message": null
+        }
+        ''') as Map<String, dynamic>,
+      );
+
+      expect(conversation.isGroup, isTrue);
+      expect(conversation.avatarUrl, 'owner/2026/11/avatar.jpg');
+      expect(conversation.isAdmin('u1'), isTrue);
+      expect(conversation.isAdmin('u2'), isFalse);
+      expect(conversation.memberOf('u2')!.user.name, 'Bob');
+    });
+
+    test('parses a media presign response', () {
+      final upload = MediaUpload.fromJson(
+        jsonDecode('''
+        {
+          "media_id": "m1", "object_key": "u1/2026/11/a.jpg",
+          "upload_url": "http://localhost:9000/bucket/u1/2026/11/a.jpg?sig=x",
+          "file_url": "http://localhost:9000/bucket/u1/2026/11/a.jpg",
+          "content_type": "image/jpeg", "size_bytes": 2048,
+          "expires_at": "2026-11-20T09:00:00Z"
+        }
+        ''') as Map<String, dynamic>,
+      );
+
+      expect(upload.objectKey, 'u1/2026/11/a.jpg');
+      expect(upload.uploadUrl, contains('sig=x'));
+      expect(upload.contentType, 'image/jpeg');
+      expect(upload.sizeBytes, 2048);
+      expect(upload.expiresAt.isUtc, isTrue);
+    });
+
+    test('parses an aggregated read receipt', () {
+      final receipt = ReadReceipt.fromJson(
+        jsonDecode('''
+        {"conversation_id": "g1", "seq": 42, "read_count": 3, "member_count": 8}
+        ''') as Map<String, dynamic>,
+      );
+
+      expect(receipt.seq, 42);
+      expect(receipt.readCount, 3);
+      expect(receipt.memberCount, 8);
+    });
   });
 
   group('ApiException', () {

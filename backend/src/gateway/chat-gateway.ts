@@ -56,8 +56,15 @@ export class ChatGateway {
 
   async start(): Promise<void> {
     this.subscriber = this.ctx.redis.duplicate();
-    await this.subscriber.subscribe(redisKeys.channelForNode(this.config.gatewayNodeId));
-    this.subscriber.on('message', (_channel, raw) => {
+    await this.subscriber.subscribe(
+      redisKeys.channelForNode(this.config.gatewayNodeId),
+      redisKeys.allNodesChannel,
+    );
+    this.subscriber.on('message', (channel, raw) => {
+      if (channel === redisKeys.allNodesChannel) {
+        this.handleBroadcast(raw);
+        return;
+      }
       this.handleRoutedEvent(raw);
     });
 
@@ -274,15 +281,26 @@ export class ChatGateway {
     // would deliver it twice.
     if (duplicate) return;
 
-    const members = await this.ctx.conversations.memberIds(conversationId);
-    for (const memberId of members) {
-      if (memberId === context.userId) continue;
-      await this.route(memberId, { kind: 'message', userId: memberId, frame: messageEvent });
-      await this.maybeNotify(memberId, message);
-    }
+    const members = await this.ctx.members.ids(conversationId);
+    const conversation = await this.ctx.conversations.getRow(conversationId);
+
+    // Fan-out on write. Recipients are independent, so deliver in parallel
+    // instead of serializing a round trip per member in a 500-person group.
+    await Promise.all(
+      members
+        .filter((memberId) => memberId !== context.userId)
+        .map(async (memberId) => {
+          await this.route(memberId, { kind: 'message', userId: memberId, frame: messageEvent });
+          await this.maybeNotify(memberId, message, conversation?.type === 'group');
+        }),
+    );
   }
 
-  private async maybeNotify(userId: string, message: MessageRow): Promise<void> {
+  private async maybeNotify(
+    userId: string,
+    message: MessageRow,
+    isGroup: boolean,
+  ): Promise<void> {
     if (!this.notifications.enabled) return;
     const onlineDevices = await this.registry.liveDevices(userId);
     if (onlineDevices.length > 0) return;
@@ -291,11 +309,14 @@ export class ChatGateway {
     if (tokens.length === 0) return;
 
     const sender = await this.ctx.users.findById(message.sender_id);
+    const senderName = sender?.name ?? 'New message';
+    const body = message.type === 'text' ? message.content : 'Sent an attachment';
+
     const stale = await this.notifications.notify(
       tokens.map((token) => token.fcm_token),
       {
-        title: sender?.name ?? 'New message',
-        body: message.type === 'text' ? message.content : 'Sent an attachment',
+        title: isGroup ? `${senderName} (group)` : senderName,
+        body,
         conversationId: message.conversation_id,
         messageId: message.id,
       },
@@ -325,14 +346,30 @@ export class ChatGateway {
       throw new ApiError('not_a_member', 'You are not a member of this conversation');
     }
 
+    const conversation = await this.ctx.conversations.getRow(conversationId);
+
+    // Per-message delivered receipts would write one row per member per message
+    // in a group; groups track read cursors instead.
+    if (status === 'delivered' && conversation?.type === 'group') {
+      return;
+    }
+
     const message =
       status === 'delivered'
         ? await this.ctx.messages.markDeliveredBySeq(conversationId, seq, context.userId)
         : await this.ctx.messages.findBySeq(conversationId, seq);
     if (!message) return;
 
+    let readSeq: number | null = null;
     if (status === 'read') {
-      await this.ctx.messages.markRead(conversationId, context.userId, message.seq);
+      readSeq = await this.ctx.messages.markRead(conversationId, context.userId, message.seq);
+    }
+
+    // In a group the sender needs an aggregate ("read by N"), not one event per
+    // member: broadcasting every reader's cursor would be O(members) noise.
+    if (status === 'read' && conversation?.type === 'group' && readSeq !== null) {
+      await this.broadcastGroupRead(conversationId, context.userId, readSeq);
+      return;
     }
 
     const statusEvent = {
@@ -356,6 +393,55 @@ export class ChatGateway {
         if (deviceId === context.deviceId) continue;
         this.deliverToDevice(context.userId, deviceId, statusEvent);
       }
+    }
+  }
+
+  /**
+   * Emits a `read_receipt` frame to the sender of the latest messages, carrying
+   * the aggregated count of members who have read up to the reader's cursor.
+   */
+  private async broadcastGroupRead(
+    conversationId: string,
+    readerId: string,
+    readSeq: number,
+  ): Promise<void> {
+    const target = await this.ctx.messages.findBySeq(conversationId, readSeq);
+    if (!target) return;
+
+    // Counts members other than the original sender who have read up to the
+    // reader's cursor, so the reader is included in the tally.
+    const stats = await this.ctx.conversations.readStats(
+      conversationId,
+      readSeq,
+      target.sender_id,
+    );
+
+    const frame = {
+      type: 'read_receipt',
+      conversation_id: conversationId,
+      reader_id: readerId,
+      seq: readSeq,
+      sender_id: target.sender_id,
+      client_msg_id: target.client_msg_id,
+      read_count: stats.readCount,
+      member_count: stats.memberCount,
+    };
+
+    await this.route(target.sender_id, {
+      kind: 'status',
+      userId: target.sender_id,
+      frame,
+    });
+
+    // Every other device of the reader keeps its own read cursor in sync.
+    for (const deviceId of await this.registry.liveDevices(readerId)) {
+      this.deliverToDevice(readerId, deviceId, {
+        type: 'status',
+        conversation_id: conversationId,
+        client_msg_id: target.client_msg_id,
+        seq: readSeq,
+        status: 'read',
+      });
     }
   }
 
@@ -391,6 +477,23 @@ export class ChatGateway {
       }
     } catch (error) {
       this.logger.debug({ err: error }, 'dropped malformed routed event');
+    }
+  }
+
+  /** Broadcast frames target a set of users that may be spread over every node. */
+  private handleBroadcast(raw: string): void {
+    try {
+      const parsed = JSON.parse(raw) as {
+        user_ids: string[];
+        frame: Record<string, unknown>;
+      };
+      for (const userId of parsed.user_ids) {
+        for (const ws of this.socketsFor(userId)) {
+          this.send(ws, parsed.frame);
+        }
+      }
+    } catch (error) {
+      this.logger.debug({ err: error }, 'dropped malformed broadcast event');
     }
   }
 

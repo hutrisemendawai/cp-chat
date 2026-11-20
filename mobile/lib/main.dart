@@ -11,6 +11,8 @@ import 'features/auth/auth_screen.dart';
 import 'features/chat/chat_controller.dart';
 import 'features/chat/chat_screen.dart';
 import 'features/conversations/conversations_screen.dart';
+import 'features/groups/create_group_screen.dart';
+import 'features/groups/group_info_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -30,10 +32,22 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const ConversationsScreen(),
         routes: [
           GoRoute(
+            path: 'new-group',
+            builder: (context, state) => const CreateGroupScreen(),
+          ),
+          GoRoute(
             path: ':id',
             builder: (context, state) => ChatScreen(
               conversationId: state.pathParameters['id']!,
             ),
+            routes: [
+              GoRoute(
+                path: 'info',
+                builder: (context, state) => GroupInfoScreen(
+                  conversationId: state.pathParameters['id']!,
+                ),
+              ),
+            ],
           ),
         ],
       ),

@@ -60,10 +60,25 @@ they are recovered through `GET /api/v1/conversations/{id}/sync?after_seq=`.
   outbox before the frame is written. Retries reuse the same value, so
   `UNIQUE (sender_id, client_msg_id)` makes delivery idempotent.
 - `msg_type` is one of `text`, `image`, `file`. For media, `content` is the
-  object URL returned by `POST /api/v1/media/presign`.
+  object key returned by `POST /api/v1/media/presign` (see [Media](#media)). The
+  client uploads the bytes to the presigned PUT URL *before* sending this frame,
+  so recipients can resolve the object immediately.
 - The gateway acknowledges with a `status` event carrying `status: "sent"` and
   the assigned `seq`. If no ACK arrives before the client timeout, the outbox
   entry is retried with backoff.
+
+### Fan-out
+
+A message is stored once. The gateway then fans out on write:
+
+- **Direct conversations** deliver the `message` frame to the other member.
+- **Groups** deliver the same frame to every other member in one pass. Member
+  ids come from a Redis cache (`members:{conversation_id}`) that is invalidated
+  on any membership change, so a removed member stops receiving immediately.
+- Members with no live gateway connection receive an FCM push instead.
+
+Fan-out is best-effort per recipient: a member whose node is unreachable is
+still caught up by the `sync` endpoint on their next connect.
 
 ### `ack` — update a delivery/read cursor
 
@@ -129,8 +144,53 @@ The server replies with `{ "type": "pong" }`.
 - `status` is one of `sent`, `delivered`, `read`.
 - `sent` is sent only to the originating socket, `delivered` once the recipient
   device persists the message, `read` when the recipient acknowledges it.
-- In groups, `read` is aggregated: the client receives an updated read count
-  instead of per-member events (Phase 2).
+- In groups, `read` is aggregated: the sender receives a [`read_receipt`](#read_receipt--aggregated-group-receipt)
+  frame with a member count instead of one `status` event per reader.
+
+### `read_receipt` — aggregated group receipt
+
+```json
+{
+  "type": "read_receipt",
+  "conversation_id": "c1",
+  "reader_id": "u2",
+  "seq": 42,
+  "sender_id": "u1",
+  "client_msg_id": "550e8400-e29b-41d4-a716-446655440000",
+  "read_count": 7,
+  "member_count": 12
+}
+```
+
+- Sent to the original sender when any member of a group reads up to `seq`.
+- `read_count` is the number of members other than the sender whose
+  `last_read_seq >= seq`; `member_count` excludes the sender.
+- Only emitted for `group` conversations. Direct chats keep per-message
+  `status: read`.
+
+### `conversation_updated` — membership or metadata changed
+
+```json
+{
+  "type": "conversation_updated",
+  "conversation_id": "c1"
+}
+```
+
+- Emitted when a group is created, renamed, its avatar changes, or members are
+  added/removed. It carries no payload; the client refetches the conversation.
+- A removed member receives it too, so their client can drop the conversation
+  locally. A refetch returns `403`/`404`, which the client treats as "delete".
+- Clients must ignore it for conversations they do not have locally.
+
+### Media
+
+1. Client compresses the image (if any) and calls `POST /api/v1/media/presign`.
+2. Client `PUT`s the bytes to `upload_url` with the declared `Content-Type`.
+3. Client sends a `send` frame with `msg_type: "image" | "file"` and
+   `content` set to `object_key`.
+4. Recipients render via `GET /api/v1/media/{object_key}`, which authorizes the
+   caller and redirects to a short-lived presigned GET. The bucket is private.
 
 ### `presence` — online state change
 

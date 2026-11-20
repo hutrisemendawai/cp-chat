@@ -60,4 +60,28 @@ export class UserRepository {
     );
     return rows[0]!;
   }
+
+  /** True when both users belong to at least one conversation together. */
+  async sharesConversationWith(userA: string, userB: string): Promise<boolean> {
+    const { rows } = await this.db.query(
+      `SELECT 1
+         FROM conversation_members a
+         JOIN conversation_members b
+           ON b.conversation_id = a.conversation_id AND b.user_id = $2
+        WHERE a.user_id = $1
+        LIMIT 1`,
+      [userA, userB],
+    );
+    return rows.length > 0;
+  }
+
+  /** Ids from `ids` that correspond to an existing user. */
+  async existingIds(ids: string[]): Promise<Set<string>> {
+    if (ids.length === 0) return new Set();
+    const { rows } = await this.db.query<{ id: string }>(
+      `SELECT id FROM users WHERE id = ANY($1::uuid[])`,
+      [ids],
+    );
+    return new Set(rows.map((row) => row.id));
+  }
 }

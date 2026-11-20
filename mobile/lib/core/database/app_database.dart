@@ -10,6 +10,9 @@ class LocalConversations extends Table {
 
   /// Display name for a direct conversation: the other participant.
   TextColumn get peerName => text().nullable()();
+
+  /// Group avatar object key, resolved through the media endpoint.
+  TextColumn get avatarUrl => text().nullable()();
   TextColumn get lastMessagePreview => text().nullable()();
 
   IntColumn get lastSeq => integer().withDefault(const Constant(0))();
@@ -31,6 +34,11 @@ class LocalMessages extends Table {
   TextColumn get content => text()();
   DateTimeColumn get createdAt => dateTime()();
   TextColumn get status => text().withDefault(const Constant('pending'))();
+
+  /// Aggregated group read state for messages this user sent. `null` until a
+  /// `read_receipt` frame arrives.
+  IntColumn get readCount => integer().nullable()();
+  IntColumn get memberCount => integer().nullable()();
 
   @override
   Set<Column<Object>> get primaryKey => {clientMsgId};
@@ -63,7 +71,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -75,6 +83,11 @@ class AppDatabase extends _$AppDatabase {
               localConversations,
               localConversations.lastMessagePreview,
             );
+          }
+          if (from < 3) {
+            await migrator.addColumn(localConversations, localConversations.avatarUrl);
+            await migrator.addColumn(localMessages, localMessages.readCount);
+            await migrator.addColumn(localMessages, localMessages.memberCount);
           }
         },
         beforeOpen: (details) async {

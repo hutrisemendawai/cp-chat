@@ -257,6 +257,85 @@ async function main() {
   });
   check('non-member cannot read history', outsider.status === 403, `status=${outsider.status}`);
 
+  // Phase 2: group fan-out and aggregated read receipt.
+  const carol = await rest('/api/v1/auth/register', {
+    method: 'POST',
+    body: { phone_or_email: `carol+${stamp}@example.com`, name: 'Carol', password: 'password123' },
+  });
+  const carolToken = carol.json.access_token;
+
+  const group = await rest('/api/v1/conversations', {
+    method: 'POST',
+    token: aliceToken,
+    body: {
+      type: 'group',
+      name: 'Smoke Group',
+      member_ids: [bob.json.user.id, carol.json.user.id],
+    },
+  });
+  check('create group', group.status === 201, group.json?.id);
+  const groupId = group.json.id;
+  check(
+    'creator is the only admin',
+    group.json.members.filter((member) => member.role === 'admin').length === 1,
+  );
+
+  const carolSocket = await openSocket(carolToken);
+  const groupMsgId = randomUUID();
+  aliceSocket.send({
+    type: 'send',
+    conversation_id: groupId,
+    client_msg_id: groupMsgId,
+    msg_type: 'text',
+    content: 'Hello group!',
+  });
+  const groupAck = await aliceSocket.wait(
+    (frame) => frame.type === 'status' && frame.client_msg_id === groupMsgId && frame.status === 'sent',
+  );
+  check('group message accepted', groupAck.seq === 1, `seq=${groupAck.seq}`);
+
+  const groupDelivery = await carolSocket.wait(
+    (frame) => frame.type === 'message' && frame.client_msg_id === groupMsgId,
+  );
+  check('group message fans out to every member', groupDelivery.seq === 1);
+
+  carolSocket.send({ type: 'ack', conversation_id: groupId, seq: 1, status: 'read' });
+  const receipt = await aliceSocket.wait((frame) => frame.type === 'read_receipt');
+  check(
+    'aggregated read receipt reaches the sender',
+    receipt.read_count === 1 && receipt.member_count === 2,
+    `read=${receipt.read_count}/${receipt.member_count}`,
+  );
+
+  const added = await rest(`/api/v1/conversations/${groupId}/members`, {
+    method: 'POST',
+    token: aliceToken,
+    body: { user_ids: [bob.json.user.id] },
+  });
+  check(
+    'admin can add members (idempotent)',
+    added.status === 200 &&
+      added.json.some((member) => member.user.id === bob.json.user.id),
+  );
+
+  // Phase 2: media presign + private resolution.
+  const presigned = await rest('/api/v1/media/presign', {
+    method: 'POST',
+    token: aliceToken,
+    body: { filename: 'smoke.png', content_type: 'image/png', size_bytes: 1024 },
+  });
+  check(
+    'media presign returns an upload URL',
+    presigned.status === 201 && typeof presigned.json.upload_url === 'string',
+  );
+  const tooLarge = await rest('/api/v1/media/presign', {
+    method: 'POST',
+    token: aliceToken,
+    body: { filename: 'huge.mp4', content_type: 'video/mp4', size_bytes: 999_999_999 },
+  });
+  check('media size limit is enforced', tooLarge.status === 413, `status=${tooLarge.status}`);
+
+  carolSocket.close();
   aliceSocket.close();
 
   const failures = results.filter((result) => !result.ok);
