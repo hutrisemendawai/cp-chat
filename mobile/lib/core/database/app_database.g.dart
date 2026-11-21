@@ -1342,6 +1342,17 @@ class $OutboxEntriesTable extends OutboxEntries
     type: DriftSqlType.string,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _wireContentMeta = const VerificationMeta(
+    'wireContent',
+  );
+  @override
+  late final GeneratedColumn<String> wireContent = GeneratedColumn<String>(
+    'wire_content',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _createdAtMeta = const VerificationMeta(
     'createdAt',
   );
@@ -1383,6 +1394,7 @@ class $OutboxEntriesTable extends OutboxEntries
     conversationId,
     type,
     content,
+    wireContent,
     createdAt,
     attempts,
     lastAttemptAt,
@@ -1437,6 +1449,15 @@ class $OutboxEntriesTable extends OutboxEntries
     } else if (isInserting) {
       context.missing(_contentMeta);
     }
+    if (data.containsKey('wire_content')) {
+      context.handle(
+        _wireContentMeta,
+        wireContent.isAcceptableOrUnknown(
+          data['wire_content']!,
+          _wireContentMeta,
+        ),
+      );
+    }
     if (data.containsKey('created_at')) {
       context.handle(
         _createdAtMeta,
@@ -1485,6 +1506,10 @@ class $OutboxEntriesTable extends OutboxEntries
         DriftSqlType.string,
         data['${effectivePrefix}content'],
       )!,
+      wireContent: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}wire_content'],
+      ),
       createdAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
@@ -1510,7 +1535,14 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
   final String clientMsgId;
   final String conversationId;
   final String type;
+
+  /// Display content, stored locally as the user typed it.
   final String content;
+
+  /// Body actually written to the socket. For an encrypted direct chat this is
+  /// the ciphertext envelope; a retry must resend the identical bytes because
+  /// re-encrypting would advance the ratchet and the peer could not decrypt it.
+  final String? wireContent;
   final DateTime createdAt;
   final int attempts;
   final DateTime? lastAttemptAt;
@@ -1519,6 +1551,7 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
     required this.conversationId,
     required this.type,
     required this.content,
+    this.wireContent,
     required this.createdAt,
     required this.attempts,
     this.lastAttemptAt,
@@ -1530,6 +1563,9 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
     map['conversation_id'] = Variable<String>(conversationId);
     map['type'] = Variable<String>(type);
     map['content'] = Variable<String>(content);
+    if (!nullToAbsent || wireContent != null) {
+      map['wire_content'] = Variable<String>(wireContent);
+    }
     map['created_at'] = Variable<DateTime>(createdAt);
     map['attempts'] = Variable<int>(attempts);
     if (!nullToAbsent || lastAttemptAt != null) {
@@ -1544,6 +1580,9 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
       conversationId: Value(conversationId),
       type: Value(type),
       content: Value(content),
+      wireContent: wireContent == null && nullToAbsent
+          ? const Value.absent()
+          : Value(wireContent),
       createdAt: Value(createdAt),
       attempts: Value(attempts),
       lastAttemptAt: lastAttemptAt == null && nullToAbsent
@@ -1562,6 +1601,7 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
       conversationId: serializer.fromJson<String>(json['conversationId']),
       type: serializer.fromJson<String>(json['type']),
       content: serializer.fromJson<String>(json['content']),
+      wireContent: serializer.fromJson<String?>(json['wireContent']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       attempts: serializer.fromJson<int>(json['attempts']),
       lastAttemptAt: serializer.fromJson<DateTime?>(json['lastAttemptAt']),
@@ -1575,6 +1615,7 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
       'conversationId': serializer.toJson<String>(conversationId),
       'type': serializer.toJson<String>(type),
       'content': serializer.toJson<String>(content),
+      'wireContent': serializer.toJson<String?>(wireContent),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'attempts': serializer.toJson<int>(attempts),
       'lastAttemptAt': serializer.toJson<DateTime?>(lastAttemptAt),
@@ -1586,6 +1627,7 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
     String? conversationId,
     String? type,
     String? content,
+    Value<String?> wireContent = const Value.absent(),
     DateTime? createdAt,
     int? attempts,
     Value<DateTime?> lastAttemptAt = const Value.absent(),
@@ -1594,6 +1636,7 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
     conversationId: conversationId ?? this.conversationId,
     type: type ?? this.type,
     content: content ?? this.content,
+    wireContent: wireContent.present ? wireContent.value : this.wireContent,
     createdAt: createdAt ?? this.createdAt,
     attempts: attempts ?? this.attempts,
     lastAttemptAt: lastAttemptAt.present
@@ -1610,6 +1653,9 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
           : this.conversationId,
       type: data.type.present ? data.type.value : this.type,
       content: data.content.present ? data.content.value : this.content,
+      wireContent: data.wireContent.present
+          ? data.wireContent.value
+          : this.wireContent,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       attempts: data.attempts.present ? data.attempts.value : this.attempts,
       lastAttemptAt: data.lastAttemptAt.present
@@ -1625,6 +1671,7 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
           ..write('conversationId: $conversationId, ')
           ..write('type: $type, ')
           ..write('content: $content, ')
+          ..write('wireContent: $wireContent, ')
           ..write('createdAt: $createdAt, ')
           ..write('attempts: $attempts, ')
           ..write('lastAttemptAt: $lastAttemptAt')
@@ -1638,6 +1685,7 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
     conversationId,
     type,
     content,
+    wireContent,
     createdAt,
     attempts,
     lastAttemptAt,
@@ -1650,6 +1698,7 @@ class OutboxEntry extends DataClass implements Insertable<OutboxEntry> {
           other.conversationId == this.conversationId &&
           other.type == this.type &&
           other.content == this.content &&
+          other.wireContent == this.wireContent &&
           other.createdAt == this.createdAt &&
           other.attempts == this.attempts &&
           other.lastAttemptAt == this.lastAttemptAt);
@@ -1660,6 +1709,7 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
   final Value<String> conversationId;
   final Value<String> type;
   final Value<String> content;
+  final Value<String?> wireContent;
   final Value<DateTime> createdAt;
   final Value<int> attempts;
   final Value<DateTime?> lastAttemptAt;
@@ -1669,6 +1719,7 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
     this.conversationId = const Value.absent(),
     this.type = const Value.absent(),
     this.content = const Value.absent(),
+    this.wireContent = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.attempts = const Value.absent(),
     this.lastAttemptAt = const Value.absent(),
@@ -1679,6 +1730,7 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
     required String conversationId,
     required String type,
     required String content,
+    this.wireContent = const Value.absent(),
     required DateTime createdAt,
     this.attempts = const Value.absent(),
     this.lastAttemptAt = const Value.absent(),
@@ -1693,6 +1745,7 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
     Expression<String>? conversationId,
     Expression<String>? type,
     Expression<String>? content,
+    Expression<String>? wireContent,
     Expression<DateTime>? createdAt,
     Expression<int>? attempts,
     Expression<DateTime>? lastAttemptAt,
@@ -1703,6 +1756,7 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
       if (conversationId != null) 'conversation_id': conversationId,
       if (type != null) 'type': type,
       if (content != null) 'content': content,
+      if (wireContent != null) 'wire_content': wireContent,
       if (createdAt != null) 'created_at': createdAt,
       if (attempts != null) 'attempts': attempts,
       if (lastAttemptAt != null) 'last_attempt_at': lastAttemptAt,
@@ -1715,6 +1769,7 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
     Value<String>? conversationId,
     Value<String>? type,
     Value<String>? content,
+    Value<String?>? wireContent,
     Value<DateTime>? createdAt,
     Value<int>? attempts,
     Value<DateTime?>? lastAttemptAt,
@@ -1725,6 +1780,7 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
       conversationId: conversationId ?? this.conversationId,
       type: type ?? this.type,
       content: content ?? this.content,
+      wireContent: wireContent ?? this.wireContent,
       createdAt: createdAt ?? this.createdAt,
       attempts: attempts ?? this.attempts,
       lastAttemptAt: lastAttemptAt ?? this.lastAttemptAt,
@@ -1746,6 +1802,9 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
     }
     if (content.present) {
       map['content'] = Variable<String>(content.value);
+    }
+    if (wireContent.present) {
+      map['wire_content'] = Variable<String>(wireContent.value);
     }
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
@@ -1769,6 +1828,7 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
           ..write('conversationId: $conversationId, ')
           ..write('type: $type, ')
           ..write('content: $content, ')
+          ..write('wireContent: $wireContent, ')
           ..write('createdAt: $createdAt, ')
           ..write('attempts: $attempts, ')
           ..write('lastAttemptAt: $lastAttemptAt, ')
@@ -2456,6 +2516,7 @@ typedef $$OutboxEntriesTableCreateCompanionBuilder =
       required String conversationId,
       required String type,
       required String content,
+      Value<String?> wireContent,
       required DateTime createdAt,
       Value<int> attempts,
       Value<DateTime?> lastAttemptAt,
@@ -2467,6 +2528,7 @@ typedef $$OutboxEntriesTableUpdateCompanionBuilder =
       Value<String> conversationId,
       Value<String> type,
       Value<String> content,
+      Value<String?> wireContent,
       Value<DateTime> createdAt,
       Value<int> attempts,
       Value<DateTime?> lastAttemptAt,
@@ -2499,6 +2561,11 @@ class $$OutboxEntriesTableFilterComposer
 
   ColumnFilters<String> get content => $composableBuilder(
     column: $table.content,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get wireContent => $composableBuilder(
+    column: $table.wireContent,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2547,6 +2614,11 @@ class $$OutboxEntriesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get wireContent => $composableBuilder(
+    column: $table.wireContent,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
@@ -2587,6 +2659,11 @@ class $$OutboxEntriesTableAnnotationComposer
 
   GeneratedColumn<String> get content =>
       $composableBuilder(column: $table.content, builder: (column) => column);
+
+  GeneratedColumn<String> get wireContent => $composableBuilder(
+    column: $table.wireContent,
+    builder: (column) => column,
+  );
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
@@ -2635,6 +2712,7 @@ class $$OutboxEntriesTableTableManager
                 Value<String> conversationId = const Value.absent(),
                 Value<String> type = const Value.absent(),
                 Value<String> content = const Value.absent(),
+                Value<String?> wireContent = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<int> attempts = const Value.absent(),
                 Value<DateTime?> lastAttemptAt = const Value.absent(),
@@ -2644,6 +2722,7 @@ class $$OutboxEntriesTableTableManager
                 conversationId: conversationId,
                 type: type,
                 content: content,
+                wireContent: wireContent,
                 createdAt: createdAt,
                 attempts: attempts,
                 lastAttemptAt: lastAttemptAt,
@@ -2655,6 +2734,7 @@ class $$OutboxEntriesTableTableManager
                 required String conversationId,
                 required String type,
                 required String content,
+                Value<String?> wireContent = const Value.absent(),
                 required DateTime createdAt,
                 Value<int> attempts = const Value.absent(),
                 Value<DateTime?> lastAttemptAt = const Value.absent(),
@@ -2664,6 +2744,7 @@ class $$OutboxEntriesTableTableManager
                 conversationId: conversationId,
                 type: type,
                 content: content,
+                wireContent: wireContent,
                 createdAt: createdAt,
                 attempts: attempts,
                 lastAttemptAt: lastAttemptAt,

@@ -45,6 +45,42 @@ const envSchema = z.object({
       'image/jpeg,image/png,image/webp,image/gif,application/pdf,text/plain,' +
         'application/zip,application/octet-stream,video/mp4,audio/mpeg',
     ),
+
+  // ---- Phase 4: broker ----
+  // `redis` keeps the Phase 1-3 Pub/Sub transport; `kafka` switches realtime
+  // fan-out to a durable, partitioned log (see lib/broker.ts).
+  BROKER: z.enum(['redis', 'kafka']).default('redis'),
+  KAFKA_BROKERS: z.string().default('localhost:9092'),
+  KAFKA_CLIENT_ID: z.string().default('cp-chat'),
+  KAFKA_EVENTS_TOPIC: z.string().default('chat.events'),
+  KAFKA_CONSUMER_PREFIX: z.string().default('gateway'),
+  // When true the gateway also ingests `chat.inbound` and publishes accepted
+  // sends to the event topic instead of processing them inline. Requires BROKER=kafka.
+  GATEWAY_ASYNC_INGEST: booleanEnv(false),
+  KAFKA_INBOUND_TOPIC: z.string().default('chat.inbound'),
+  KAFKA_INBOUND_GROUP: z.string().default('message-service'),
+
+  // ---- Phase 4: message storage ----
+  // `postgres` keeps the transactional seq allocator; `scylla` moves the
+  // high-volume message table to Cassandra/ScyllaDB with a Postgres mirror for
+  // idempotency and full-text search (see domain/message-store.ts).
+  MESSAGE_STORE: z.enum(['postgres', 'scylla']).default('postgres'),
+  SCYLLA_CONTACT_POINTS: z.string().default('localhost:9042'),
+  SCYLLA_KEYSPACE: z.string().default('cp_chat'),
+  SCYLLA_LOCAL_DATACENTER: z.string().default('datacenter1'),
+  SCYLLA_USERNAME: z.string().optional(),
+  SCYLLA_PASSWORD: z.string().optional(),
+
+  // ---- Phase 4: gateway scaling ----
+  GATEWAY_DRAIN_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  // Set by an orchestrator on shutdown so /readyz reports draining immediately.
+  GATEWAY_ADVERTISE_HOST: z.string().optional(),
+
+  // ---- Phase 4: observability ----
+  OTEL_ENABLED: booleanEnv(false),
+  OTEL_SERVICE_NAME: z.string().default('cp-chat'),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().default('http://localhost:4318'),
+  OTEL_TRACES_SAMPLER_RATIO: z.coerce.number().min(0).max(1).default(0.1),
 });
 
 export type Config = z.infer<typeof envSchema> & { gatewayNodeId: string };

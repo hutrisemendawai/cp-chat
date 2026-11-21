@@ -177,6 +177,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         'Chat';
     final isGroup = cached?.type == 'group' || metadata.value?.isGroup == true;
 
+    // Register the peer id so outgoing text can be encrypted for this chat.
+    // The local row only caches the peer's name, so the member list is the
+    // authoritative source for the id.
+    if (!isGroup && selfId != null) {
+      final peer = metadata.value?.otherMember(selfId);
+      if (peer != null) {
+        ref
+            .read(e2eeManagerProvider)
+            .rememberConversation(
+              widget.conversationId,
+              selfId: selfId,
+              peerId: peer.user.id,
+            );
+      }
+    }
+
     // For a 1:1 chat the other participant's live presence is the subtitle.
     final peer = selfId == null ? null : metadata.value?.otherMember(selfId);
     final presence = !isGroup && peer != null

@@ -10,13 +10,13 @@ For detailed architecture, technology stack, and development phases, see [AGENTS
 
 | Path | Contents |
 | --- | --- |
-| `mobile/` | Flutter Android client (Riverpod, Drift, secure storage, WebSocket client) |
+| `mobile/` | Flutter Android client (Riverpod, Drift, secure storage, WebSocket client, E2EE) |
 | `backend/src/` | TypeScript REST API and realtime WebSocket gateway |
 | `backend/test/` | Backend unit and integration tests (Vitest) |
-| `backend/migrations/` | SQL schema managed with golang-migrate |
-| `backend/scripts/` | Migration wrapper and live end-to-end smoke test |
-| `docs/` | [OpenAPI spec](./docs/api-spec.yaml), [WebSocket protocol](./docs/ws-protocol.md), [architecture](./docs/architecture.md) |
-| `docker-compose.yml` | PostgreSQL 16, Redis 7, MinIO, API, chat gateway, migration runner |
+| `backend/migrations/` | PostgreSQL schema (golang-migrate) and CQL schema (ScyllaDB) |
+| `backend/scripts/` | Migration wrapper, Scylla backfill, live end-to-end smoke test |
+| `docs/` | [OpenAPI spec](./docs/api-spec.yaml), [WS protocol](./docs/ws-protocol.md), [architecture](./docs/architecture.md), [gateway scaling](./docs/gateway-scaling.md), [Kafka](./docs/kafka.md), [ScyllaDB](./docs/scylla.md), [E2EE](./docs/e2ee.md), [release](./docs/release.md) |
+| `docker-compose.yml` | PostgreSQL 16, Redis 7, MinIO, Kafka, ScyllaDB, API, gateway, migration runner |
 | `.github/workflows/ci.yml` | Migrations, backend tests, contract, and Flutter checks |
 
 ## Quick start
@@ -47,16 +47,33 @@ cd backend && npm run dev:gateway   # WebSocket gateway on :8081
 `make smoke` drives a full REST + WebSocket flow (register, chat, ack, sync)
 against a running stack. `make help` lists every target.
 
+### Phase 4 infrastructure
+
+Kafka and ScyllaDB are opt-in so the default stack stays lightweight:
+
+```bash
+make up-scale                 # adds Kafka and ScyllaDB (CQL schema applied)
+make backfill-scylla          # mirror existing messages into ScyllaDB
+```
+
+Then set `BROKER=kafka` and/or `MESSAGE_STORE=scylla` in `.env` and restart the
+backend. See [docs/kafka.md](./docs/kafka.md) and [docs/scylla.md](./docs/scylla.md).
+
 ## Testing
 
 ```bash
-make backend-test    # Vitest: auth, conversations, seq allocation, gateway
-make mobile-test     # Drift outbox/cursors, models, auth widgets
+make backend-test    # Vitest: auth, conversations, seq allocation, gateway, E2EE, broker
+make mobile-test     # Drift outbox/cursors, E2EE, models, auth widgets
 make mobile-analyze
 ```
 
 Backend integration tests need a reachable PostgreSQL and Redis; CI provisions
-both as service containers and applies migrations first.
+both as service containers and applies migrations first. Kafka and Scylla suites
+skip themselves unless their endpoint is configured:
+
+```bash
+KAFKA_BROKERS=localhost:9092 SCYLLA_TEST=1 make backend-test
+```
 
 ## Status
 
@@ -64,4 +81,4 @@ both as service containers and applies migrations first.
 - [x] **Phase 1** — 1:1 chat MVP with offline sync and push notifications
 - [x] **Phase 2** — groups, read receipts, media sharing
 - [x] **Phase 3** — presence, message search, multi-device sync
-- [ ] **Phase 4** — scale, reliability, security hardening
+- [x] **Phase 4** — Kafka transport, ScyllaDB message store, gateway draining, E2EE, Android release hardening

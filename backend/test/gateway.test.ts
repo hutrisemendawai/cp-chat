@@ -29,7 +29,13 @@ beforeAll(async () => {
   harness = await createHarness();
   const ctx = createContext(TEST_CONFIG, harness.db, harness.redis);
   const notifications = new NotificationService(TEST_CONFIG, createLogger(TEST_CONFIG, 'test'));
-  gateway = new ChatGateway(TEST_CONFIG, ctx, notifications, createLogger(TEST_CONFIG, 'test'));
+  gateway = new ChatGateway(
+    TEST_CONFIG,
+    ctx,
+    ctx.broker,
+    notifications,
+    createLogger(TEST_CONFIG, 'test'),
+  );
   await gateway.start();
 
   server = createServer();

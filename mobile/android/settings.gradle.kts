@@ -21,6 +21,9 @@ plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "9.3.1" apply false
     id("org.jetbrains.kotlin.android") version "2.4.20" apply false
+    // Symbols the release build before upload; version is resolved by the
+    // Firebase BOM the Flutter plugin already applies.
+    id("com.google.firebase.crashlytics") version "3.0.6" apply false
 }
 
 include(":app")

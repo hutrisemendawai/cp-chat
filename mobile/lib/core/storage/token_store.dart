@@ -9,6 +9,8 @@ class TokenStore {
   static const _refreshTokenKey = 'refresh_token';
   static const _userIdKey = 'user_id';
   static const _deviceIdKey = 'device_id';
+  static const _e2eeKeysKey = 'e2ee_keys';
+  static const _e2eeSessionsKey = 'e2ee_sessions';
 
   final FlutterSecureStorage _storage;
 
@@ -41,7 +43,10 @@ class TokenStore {
     await _storage.write(key: _userIdKey, value: userId);
   }
 
-  /// Clears the session but keeps the device id.
+  /// Clears the session but keeps the device id and encryption keys.
+  ///
+  /// E2EE keys are per-device and survive logout: discarding them would make
+  /// every existing session unreadable and would orphan published prekeys.
   Future<void> clear() async {
     await _storage.delete(key: _accessTokenKey);
     await _storage.delete(key: _refreshTokenKey);
@@ -52,5 +57,24 @@ class TokenStore {
     final access = await readAccessToken();
     final refresh = await readRefreshToken();
     return access != null || refresh != null;
+  }
+
+  /// Raw serialised private key material, encrypted at rest by the Android
+  /// Keystore-backed storage. `null` when this device has not yet generated
+  /// keys.
+  Future<String?> readE2eeKeys() => _storage.read(key: _e2eeKeysKey);
+
+  Future<void> writeE2eeKeys(String json) => _storage.write(key: _e2eeKeysKey, value: json);
+
+  /// Serialised per-peer ratchet sessions.
+  Future<String?> readE2eeSessions() => _storage.read(key: _e2eeSessionsKey);
+
+  Future<void> writeE2eeSessions(String json) =>
+      _storage.write(key: _e2eeSessionsKey, value: json);
+
+  /// Removes identity keys and sessions. Only for a deliberate key reset.
+  Future<void> clearE2ee() async {
+    await _storage.delete(key: _e2eeKeysKey);
+    await _storage.delete(key: _e2eeSessionsKey);
   }
 }

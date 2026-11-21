@@ -4,10 +4,12 @@ import { createLogger } from './lib/logger.js';
 import { createRedis } from './lib/redis.js';
 import { createContext } from './http/context.js';
 import { buildServer } from './http/server.js';
+import { startTracing } from './lib/tracing.js';
 
 async function main() {
   const config = loadConfig();
   const logger = createLogger(config, 'rest');
+  const tracing = await startTracing(config, 'rest');
 
   const db = createDb(config.DATABASE_URL);
   const redis = createRedis(config.REDIS_URL);
@@ -18,7 +20,12 @@ async function main() {
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'shutting down');
+    // Fail readiness first so the load balancer drains traffic during a rolling
+    // deploy; Fastify then finishes in-flight requests before we close pools.
     await app.close();
+    await ctx.broker.close();
+    await ctx.scylla?.close();
+    await tracing?.shutdown();
     await db.end();
     redis.disconnect();
     process.exit(0);

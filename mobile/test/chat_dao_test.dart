@@ -219,5 +219,40 @@ void main() {
       expect(await dao.watchMessages('conv-1').first, isEmpty);
       expect(await dao.pendingOutbox(), isEmpty);
     });
+
+    test('keeps display content separate from the encrypted wire body', () async {
+      await dao.enqueueOutgoing(
+        clientMsgId: 'c-e2ee',
+        conversationId: 'conv-1',
+        senderId: 'me',
+        type: 'text',
+        content: 'the secret plan',
+        wireContent: 'e2ee:v1:{"ct":"ciphertext"}',
+        createdAt: DateTime.utc(2026, 1, 1),
+      );
+
+      // The bubble renders the plaintext the user typed...
+      final messages = await dao.watchMessages('conv-1').first;
+      expect(messages.single.content, 'the secret plan');
+
+      // ...while a retry resends the exact ciphertext, never a re-encryption.
+      final pending = await dao.pendingOutbox();
+      expect(pending.single.content, 'the secret plan');
+      expect(pending.single.wireContent, 'e2ee:v1:{"ct":"ciphertext"}');
+    });
+
+    test('wire content is null for an unencrypted send', () async {
+      await dao.enqueueOutgoing(
+        clientMsgId: 'c-plain',
+        conversationId: 'conv-1',
+        senderId: 'me',
+        type: 'text',
+        content: 'plain',
+        createdAt: DateTime.utc(2026, 1, 1),
+      );
+
+      final pending = await dao.pendingOutbox();
+      expect(pending.single.wireContent, isNull);
+    });
   });
 }

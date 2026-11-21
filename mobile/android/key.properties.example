@@ -1,0 +1,22 @@
+# Release signing configuration.
+#
+# Copy to `android/key.properties` and fill in real values. The file is
+# git-ignored, as are `*.jks` / `*.keystore`, so key material never enters the
+# repository.
+#
+#   storeFile=../upload-keystore.jks     (path relative to android/app)
+#   storePassword=...
+#   keyAlias=upload
+#   keyPassword=...
+#
+# Lose this file and the keystore and you cannot publish an update to an app
+# already on Play under the same applicationId. Store both in a secret manager.
+#
+# When this file is absent, `flutter build appbundle` still succeeds using the
+# debug keystore. That artifact is for local verification only and must never be
+# uploaded to a Play track.
+
+storeFile=../upload-keystore.jks
+storePassword=change-me
+keyAlias=upload
+keyPassword=change-me

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
+import '../crypto/e2ee_service.dart' show PublicKeyBundle, PublicPrekey, RemotePrekeyBundle;
 import '../config/app_config.dart';
 import '../models/models.dart';
 import '../storage/token_store.dart';
@@ -365,6 +366,71 @@ class ApiClient {
     return (body['messages'] as List<dynamic>)
         .map((item) => SearchHit.fromJson(item as Map<String, dynamic>))
         .toList();
+  }
+
+  /// Publishes this device's public encryption keys. The server stores only
+  /// public halves; private keys stay in secure storage on the device.
+  Future<int> publishKeys(PublicKeyBundle bundle) async {
+    final response = await dio.post<dynamic>(
+      '/api/v1/keys',
+      data: {
+        'identity_key': bundle.identityKey,
+        'signing_key': bundle.signingKey,
+        'signed_prekey': {
+          'key_id': bundle.signedPrekeyId,
+          'public_key': bundle.signedPrekey,
+          'signature': bundle.signedPrekeySignature,
+        },
+        'one_time_prekeys': [
+          for (final prekey in bundle.prekeys)
+            {'key_id': prekey.keyId, 'public_key': prekey.publicKey},
+        ],
+      },
+    );
+    final body = _ok(response, expected: 201);
+    return (body['one_time_prekeys'] as num?)?.toInt() ?? 0;
+  }
+
+  /// Tops up one-time prekeys without re-publishing the identity keys.
+  Future<int> addPrekeys(List<PublicPrekey> prekeys) async {
+    final response = await dio.post<dynamic>(
+      '/api/v1/keys/prekeys',
+      data: {
+        'one_time_prekeys': [
+          for (final prekey in prekeys)
+            {'key_id': prekey.keyId, 'public_key': prekey.publicKey},
+        ],
+      },
+    );
+    final body = _ok(response);
+    return (body['one_time_prekeys'] as num?)?.toInt() ?? 0;
+  }
+
+  /// Fetches a peer's prekey bundle. The server consumes one one-time prekey
+  /// per call, so callers must initiate a session rather than retry blindly.
+  Future<RemotePrekeyBundle> prekeyBundle(String userId) async {
+    final response = await dio.get<dynamic>('/api/v1/keys/$userId');
+    final body = _ok(response);
+    final signed = body['signed_prekey'] as Map<String, dynamic>;
+    final oneTime = body['one_time_prekey'] as Map<String, dynamic>?;
+    return RemotePrekeyBundle(
+      userId: body['user_id'] as String,
+      identityKey: body['identity_key'] as String,
+      signingKey: body['signing_key'] as String,
+      signedPrekeyId: (signed['key_id'] as num).toInt(),
+      signedPrekey: signed['public_key'] as String,
+      signedPrekeySignature: signed['signature'] as String,
+      oneTimePrekeyId: (oneTime?['key_id'] as num?)?.toInt(),
+      oneTimePrekey: oneTime?['public_key'] as String?,
+    );
+  }
+
+  /// The caller's own published key status, including how many one-time
+  /// prekeys the server still holds. Used to decide when to top up.
+  Future<int> myPrekeyCount() async {
+    final response = await dio.get<dynamic>('/api/v1/keys/me');
+    final body = _ok(response);
+    return (body['one_time_prekeys'] as num?)?.toInt() ?? 0;
   }
 
   /// Registers the Firebase Installation ID for push delivery.

@@ -4,6 +4,7 @@ import type { AppContext } from './context.js';
 import { sendError } from './context.js';
 import { registerAuthRoutes } from './auth-routes.js';
 import { registerConversationRoutes } from './conversation-routes.js';
+import { registerKeyRoutes } from './key-routes.js';
 import { registerMediaRoutes } from './media-routes.js';
 import { registerMessageRoutes } from './message-routes.js';
 import { registerPresenceRoutes } from './presence-routes.js';
@@ -55,6 +56,7 @@ export function buildServer(ctx: AppContext, logger: Logger): FastifyInstance {
   registerMediaRoutes(app, ctx);
   registerSearchRoutes(app, ctx);
   registerPresenceRoutes(app, ctx);
+  registerKeyRoutes(app, ctx);
 
   return app;
 }

@@ -7,11 +7,15 @@ import type { Config } from '../config.js';
 import type { Logger } from '../lib/logger.js';
 import { ApiError } from '../lib/errors.js';
 import { isUuidV4 } from '../lib/ids.js';
-import { publishBroadcast, redisKeys, type Cache } from '../lib/redis.js';
+import { parseMessageContent } from '../lib/e2ee.js';
+import { withSpan } from '../lib/tracing.js';
+import { redisKeys, type Cache } from '../lib/redis.js';
 import { verifyAccessToken } from '../lib/tokens.js';
 import type { NotificationService } from '../lib/fcm.js';
 import type { AppContext } from '../http/context.js';
 import type { MessageRow } from '../domain/messages.js';
+import type { Broker, BroadcastPayload, RoutedPayload } from '../lib/broker.js';
+import { InboundConsumer, InboundProducer, type InboundSend } from './inbound.js';
 import { ConnectionRegistry } from './connection-registry.js';
 
 type ClientFrame =
@@ -25,13 +29,12 @@ type SocketContext = {
   alive: boolean;
 };
 
-type RoutedEvent =
-  | { kind: 'message'; userId: string; frame: Record<string, unknown> }
-  | { kind: 'status'; userId: string; frame: Record<string, unknown> };
-
 const MAX_CONTENT_LENGTH = 16_384;
 const MAX_BUFFERED_BYTES = 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 25_000;
+// A drained gateway reconnects clients with this code; the Flutter client
+// treats any close as a reconnect and backs off, so drains are seamless.
+const DRAIN_CLOSE_CODE = 1001;
 
 export class ChatGateway {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
@@ -39,11 +42,22 @@ export class ChatGateway {
   private readonly context = new WeakMap<WebSocket, SocketContext>();
   private readonly registry: ConnectionRegistry;
   private heartbeat: NodeJS.Timeout | null = null;
-  private subscriber: Cache | null = null;
+  private draining = false;
+  private ready = false;
+  // Async ingest (Phase 4): accepted sends go to `chat.inbound` and the
+  // consumer does the persistence + fan-out. Off by default; the synchronous
+  // path stays the default so single-node deployments keep working.
+  private inboundProducer: InboundProducer | null = null;
+  private inboundConsumer: InboundConsumer | null = null;
+  // Close/connect handlers keep doing database work (unregistering presence,
+  // persisting last-seen) after the socket is gone. Shutdown awaits these so
+  // the pools are not closed underneath a half-finished write.
+  private readonly pending = new Set<Promise<unknown>>();
 
   constructor(
     private readonly config: Config,
     private readonly ctx: AppContext,
+    private readonly broker: Broker,
     private readonly notifications: NotificationService,
     private readonly logger: Logger,
   ) {
@@ -55,32 +69,59 @@ export class ChatGateway {
   }
 
   async start(): Promise<void> {
-    this.subscriber = this.ctx.redis.duplicate();
-    await this.subscriber.subscribe(
-      redisKeys.channelForNode(this.config.gatewayNodeId),
-      redisKeys.allNodesChannel,
-    );
-    this.subscriber.on('message', (channel, raw) => {
-      if (channel === redisKeys.allNodesChannel) {
-        this.handleBroadcast(raw);
-        return;
-      }
-      this.handleRoutedEvent(raw);
+    // Attach the transport handlers before consuming, so a frame that arrives
+    // immediately after the first subscribe is not processed against an empty
+    // socket map.
+    await this.broker.start({
+      onRouted: (payload) => this.handleRoutedEvent(payload),
+      onBroadcast: (payload) => this.handleBroadcast(payload),
     });
 
     this.heartbeat = setInterval(() => {
       void this.sweep();
     }, HEARTBEAT_INTERVAL_MS);
 
-    this.logger.info({ node: this.config.gatewayNodeId }, 'chat gateway started');
+    if (this.config.GATEWAY_ASYNC_INGEST) {
+      if (this.broker.kind !== 'kafka') {
+        throw new Error('GATEWAY_ASYNC_INGEST requires BROKER=kafka');
+      }
+      this.inboundProducer = new InboundProducer(this.config);
+      this.inboundConsumer = new InboundConsumer(this.config, this.logger, (outcome) =>
+        this.deliverStored(outcome.message, outcome.duplicate, outcome.send),
+      );
+      await this.inboundConsumer.start(this.ctx);
+    }
+
+    this.ready = true;
+    this.logger.info(
+      { node: this.config.gatewayNodeId, broker: this.broker.kind },
+      'chat gateway started',
+    );
+  }
+
+  /** Readiness is false while starting and once a drain has begun. */
+  isReady(): boolean {
+    return this.ready && !this.draining;
+  }
+
+  isDraining(): boolean {
+    return this.draining;
   }
 
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    if (this.draining) {
+      // 503 tells the load balancer to send the client to a healthy replica on
+      // the retry instead of reconnecting it to a node that is going away.
+      socket.write('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
     try {
       const token = this.tokenFrom(request);
       const payload = verifyAccessToken(token, this.config);
       this.wss.handleUpgrade(request, socket, head, (ws) => {
-        void this.onConnection(ws, payload.sub, payload.device_id);
+        this.track(this.onConnection(ws, payload.sub, payload.device_id));
       });
     } catch (error) {
       const status = error instanceof ApiError ? error.status : 401;
@@ -89,15 +130,67 @@ export class ChatGateway {
     }
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Graceful drain for rolling deploys and scale-in.
+   *
+   * New upgrades are refused (503) so the load balancer reroutes them, live
+   * clients are closed with `1001 (going away)` which the Flutter client turns
+   * into an exponential-backoff reconnect against another replica, and the
+   * process waits for the sockets to acknowledge the close. Waiting instead of
+   * tearing down avoids losing a frame that was already in flight.
+   */
+  async drain(timeoutMs = this.config.GATEWAY_DRAIN_TIMEOUT_MS): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    this.ready = false;
+    this.logger.info({ node: this.config.gatewayNodeId }, 'gateway draining');
+
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
 
-    for (const sockets of this.sockets.values()) {
-      for (const ws of sockets) ws.close(1001, 'server shutting down');
+    const closed = new Promise<void>((resolve) => {
+      let remaining = [...this.sockets.values()].reduce((sum, set) => sum + set.size, 0);
+      if (remaining === 0) {
+        resolve();
+        return;
+      }
+      for (const set of this.sockets.values()) {
+        for (const ws of set) {
+          ws.once('close', () => {
+            remaining -= 1;
+            if (remaining === 0) resolve();
+          });
+          ws.close(DRAIN_CLOSE_CODE, 'server draining');
+        }
+      }
+    });
+
+    const timedOut = await Promise.race([
+      closed.then(() => false),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), timeoutMs)),
+    ]);
+    if (timedOut) {
+      this.logger.warn({ node: this.config.gatewayNodeId }, 'drain timed out; terminating sockets');
+      for (const set of this.sockets.values()) {
+        for (const ws of set) ws.terminate();
+      }
     }
+
     this.sockets.clear();
-    await this.subscriber?.quit();
+  }
+
+  async stop(): Promise<void> {
+    await this.drain(0);
+    // Terminating sockets emits `close` asynchronously, which is what enqueues
+    // the unregister/presence work. Let those handlers run, then wait for them.
+    for (let round = 0; round < 20; round += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (this.pending.size === 0) break;
+      await Promise.allSettled([...this.pending]);
+    }
+    await this.broker.close();
+    await this.inboundConsumer?.close();
+    await this.inboundProducer?.close();
     await new Promise<void>((resolve) => this.wss.close(() => resolve()));
   }
 
@@ -126,10 +219,10 @@ export class ChatGateway {
       if (context) context.alive = true;
     });
     ws.on('message', (data) => {
-      void this.onFrame(ws, data.toString());
+      this.track(this.onFrame(ws, data.toString()));
     });
     ws.on('close', () => {
-      void this.onClose(ws, userId, deviceId);
+      this.track(this.onClose(ws, userId, deviceId));
     });
     ws.on('error', (error) => {
       this.logger.debug({ err: error }, 'socket error');
@@ -162,7 +255,7 @@ export class ChatGateway {
 
   /**
    * Tells every user who shares a conversation with `userId` that their online
-   * state changed. Goes through the all-nodes channel so peers connected to any
+   * state changed. Goes through the broadcast channel so peers connected to any
    * gateway replica receive it.
    */
   private async broadcastPresence(
@@ -173,11 +266,14 @@ export class ChatGateway {
     const peers = await this.ctx.presence.sharedPeerIds(userId);
     if (peers.length === 0) return;
 
-    await publishBroadcast(this.ctx.redis, peers, {
-      type: 'presence',
-      user_id: userId,
-      online,
-      last_seen_at: lastSeenAt ? lastSeenAt.toISOString() : null,
+    await this.broker.publishBroadcast({
+      user_ids: peers,
+      frame: {
+        type: 'presence',
+        user_id: userId,
+        online,
+        last_seen_at: lastSeenAt ? lastSeenAt.toISOString() : null,
+      },
     });
   }
 
@@ -220,10 +316,10 @@ export class ChatGateway {
           await this.ctx.presence.touch(context.userId);
           return;
         case 'send':
-          await this.handleSend(ws, context, frame as ClientFrame & { type: 'send' });
+          await this.handleSend(context, frame as ClientFrame & { type: 'send' });
           return;
         case 'ack':
-          await this.handleAck(ws, context, frame as ClientFrame & { type: 'ack' });
+          await this.handleAck(context, frame as ClientFrame & { type: 'ack' });
           return;
         default:
           // Unknown client events are ignored by contract.
@@ -241,7 +337,6 @@ export class ChatGateway {
   }
 
   private async handleSend(
-    ws: WebSocket,
     context: SocketContext,
     frame: { conversation_id?: unknown; client_msg_id?: unknown; msg_type?: unknown; content?: unknown },
   ): Promise<void> {
@@ -265,8 +360,33 @@ export class ChatGateway {
     if (content.length > MAX_CONTENT_LENGTH) {
       throw new ApiError('validation_error', 'Message content is too large');
     }
+    // The server cannot read an encrypted body, but it must not relay a corrupt
+    // one: a prefixed envelope that fails to parse is a client bug, and
+    // delivering it as text would silently corrupt the conversation.
+    try {
+      parseMessageContent(content);
+    } catch {
+      throw new ApiError('validation_error', 'Malformed end-to-end encrypted message');
+    }
     if (!(await this.ctx.conversations.isMember(conversationId, context.userId))) {
       throw new ApiError('not_a_member', 'You are not a member of this conversation');
+    }
+
+    if (this.inboundProducer) {
+      // Async ingest: validate here, then hand off. The `sent` ack is emitted
+      // by deliverStored() once the consumer has allocated the real `seq`, so
+      // the client still gets an ordered acknowledgement, just asynchronously.
+      const send: InboundSend = {
+        conversation_id: conversationId,
+        sender_id: context.userId,
+        device_id: context.deviceId,
+        client_msg_id: clientMsgId,
+        msg_type: msgType,
+        content,
+        accepted_at: new Date().toISOString(),
+      };
+      await this.inboundProducer.publish(send);
+      return;
     }
 
     const { message, duplicate } = await this.ctx.messages.append({
@@ -276,6 +396,47 @@ export class ChatGateway {
       type: msgType,
       content,
     });
+
+    await this.deliverStored(message, duplicate, {
+      conversation_id: conversationId,
+      sender_id: context.userId,
+      device_id: context.deviceId,
+      client_msg_id: clientMsgId,
+      msg_type: msgType,
+      content,
+    });
+  }
+
+  /**
+   * Fans a stored message out to its recipients. Shared by the synchronous send
+   * path and the async inbound consumer, so both emit the same frames.
+   */
+  private async deliverStored(
+    message: MessageRow,
+    duplicate: boolean,
+    send: InboundSend,
+  ): Promise<void> {
+    return withSpan(
+      'message.fanout',
+      {
+        conversation_id: message.conversation_id,
+        seq: message.seq,
+        duplicate,
+        async_ingest: this.inboundProducer !== null,
+      },
+      () => this.deliverStoredInner(message, duplicate, send),
+    );
+  }
+
+  private async deliverStoredInner(
+    message: MessageRow,
+    duplicate: boolean,
+    send: InboundSend,
+  ): Promise<void> {
+    // Async sends come back through the consumer on whichever replica owns the
+    // partition, so the ack must be routed to the originating device rather
+    // than written to a local socket.
+    const origin = this.deviceSocket(send.sender_id, send.device_id);
 
     const messageEvent = {
       type: 'message',
@@ -289,14 +450,20 @@ export class ChatGateway {
       created_at: message.created_at.toISOString(),
     };
 
-    // `sent` is only ever delivered to the originating socket.
-    this.send(ws, {
+    const ack = {
       type: 'status',
       conversation_id: message.conversation_id,
       client_msg_id: message.client_msg_id,
       seq: message.seq,
       status: 'sent',
-    });
+    };
+
+    // `sent` is only ever delivered to the originating socket.
+    if (origin) {
+      this.send(origin, ack);
+    } else {
+      await this.routeToDevice(send.sender_id, send.device_id, ack);
+    }
 
     // A duplicate retry is already persisted and fanned out earlier, including
     // to the sender's other devices; re-broadcasting would deliver it twice.
@@ -306,21 +473,28 @@ export class ChatGateway {
     // their local history stays in sync without a REST round trip. The
     // originating device already has the `sent` ack, so it must not get a
     // duplicate `message` frame.
-    await this.deliverToOtherDevices(context.userId, context.deviceId, messageEvent);
+    await this.deliverToOtherDevices(send.sender_id, send.device_id, messageEvent);
 
-    const members = await this.ctx.members.ids(conversationId);
-    const conversation = await this.ctx.conversations.getRow(conversationId);
+    const members = await this.ctx.members.ids(message.conversation_id);
+    const conversation = await this.ctx.conversations.getRow(message.conversation_id);
 
     // Fan-out on write. Recipients are independent, so deliver in parallel
     // instead of serializing a round trip per member in a 500-person group.
     await Promise.all(
       members
-        .filter((memberId) => memberId !== context.userId)
+        .filter((memberId) => memberId !== send.sender_id)
         .map(async (memberId) => {
-          await this.route(memberId, { kind: 'message', userId: memberId, frame: messageEvent });
+          await this.route(memberId, messageEvent);
           await this.maybeNotify(memberId, message, conversation?.type === 'group');
         }),
     );
+  }
+
+  private deviceSocket(userId: string, deviceId: string): WebSocket | null {
+    const set = this.sockets.get(`${userId}:${deviceId}`);
+    if (!set) return null;
+    for (const ws of set) return ws;
+    return null;
   }
 
   private async maybeNotify(
@@ -355,7 +529,6 @@ export class ChatGateway {
   }
 
   private async handleAck(
-    ws: WebSocket,
     context: SocketContext,
     frame: { conversation_id?: unknown; seq?: unknown; status?: unknown },
   ): Promise<void> {
@@ -408,11 +581,7 @@ export class ChatGateway {
     };
 
     // The sender (possibly on another device of theirs) needs the update.
-    await this.route(message.sender_id, {
-      kind: 'status',
-      userId: message.sender_id,
-      frame: statusEvent,
-    });
+    await this.route(message.sender_id, statusEvent);
 
     // Other devices of the acking user keep their local read cursor in sync so
     // a conversation read on one device clears its unread badge everywhere.
@@ -456,11 +625,7 @@ export class ChatGateway {
       member_count: stats.memberCount,
     };
 
-    await this.route(target.sender_id, {
-      kind: 'status',
-      userId: target.sender_id,
-      frame,
-    });
+    await this.route(target.sender_id, frame);
 
     // Every other device of the reader keeps its own read cursor in sync.
     await this.deliverToOtherDevices(reader.userId, reader.deviceId, {
@@ -471,17 +636,12 @@ export class ChatGateway {
   }
 
   /**
-   * Publishes to the recipient's gateway node over Redis. If Redis says the
-   * user is connected but no node consumes the event, the local deliver path
-   * still tries in-process sockets (single-node deployments).
+   * Delivers a frame to every socket of `userId`. Local sockets are written
+   * directly; devices owned by other nodes are reached through the broker.
    */
-  private async route(userId: string, event: RoutedEvent): Promise<void> {
-    const localSockets = this.socketsFor(userId);
-    if (localSockets.length > 0) {
-      for (const ws of localSockets) this.send(ws, event.frame);
-    }
+  private async route(userId: string, frame: Record<string, unknown>): Promise<void> {
+    for (const ws of this.socketsFor(userId)) this.send(ws, frame);
 
-    const remotePayload = JSON.stringify({ userId, frame: event.frame });
     const devices = await this.registry.liveDevices(userId);
     const nodes = new Set<string>();
     for (const deviceId of devices) {
@@ -490,13 +650,39 @@ export class ChatGateway {
     }
 
     for (const node of nodes) {
-      await this.ctx.redis.publish(redisKeys.channelForNode(node), remotePayload);
+      await this.broker.publishToNode(
+        node,
+        { userId, frame },
+        conversationKey(frame),
+      );
+    }
+  }
+
+  /** Delivers a frame to exactly one device, wherever it is connected. */
+  private async routeToDevice(
+    userId: string,
+    deviceId: string,
+    frame: Record<string, unknown>,
+  ): Promise<void> {
+    const local = this.deviceSocket(userId, deviceId);
+    if (local) {
+      this.send(local, frame);
+      return;
+    }
+
+    const node = await this.ctx.redis.get(redisKeys.connection(userId, deviceId));
+    if (node && node !== this.config.gatewayNodeId) {
+      await this.broker.publishToNode(
+        node,
+        { userId, frame, onlyDevice: deviceId },
+        conversationKey(frame),
+      );
     }
   }
 
   /**
    * Delivers a frame to every connected device of `userId` except the device
-   * that originated it. Remote devices are reached through their node's Redis
+   * that originated it. Remote devices are reached through their node's broker
    * channel, carrying an `excludeDevice` so a node never echoes the frame back
    * to the originating socket.
    */
@@ -511,7 +697,6 @@ export class ChatGateway {
       for (const ws of set) this.send(ws, frame);
     }
 
-    const payload = JSON.stringify({ userId, frame, excludeDevice: excludeDeviceId });
     const devices = await this.registry.liveDevices(userId);
     const nodes = new Set<string>();
     for (const deviceId of devices) {
@@ -521,41 +706,29 @@ export class ChatGateway {
     }
 
     for (const node of nodes) {
-      await this.ctx.redis.publish(redisKeys.channelForNode(node), payload);
+      await this.broker.publishToNode(
+        node,
+        { userId, frame, excludeDevice: excludeDeviceId },
+        conversationKey(frame),
+      );
     }
   }
 
-  private handleRoutedEvent(raw: string): void {
-    try {
-      const parsed = JSON.parse(raw) as {
-        userId: string;
-        frame: Record<string, unknown>;
-        excludeDevice?: string;
-      };
-      for (const [key, set] of this.sockets) {
-        if (!key.startsWith(`${parsed.userId}:`)) continue;
-        if (parsed.excludeDevice && key === `${parsed.userId}:${parsed.excludeDevice}`) continue;
-        for (const ws of set) this.send(ws, parsed.frame);
-      }
-    } catch (error) {
-      this.logger.debug({ err: error }, 'dropped malformed routed event');
+  private handleRoutedEvent(payload: RoutedPayload): void {
+    for (const [key, set] of this.sockets) {
+      if (!key.startsWith(`${payload.userId}:`)) continue;
+      if (payload.excludeDevice && key === `${payload.userId}:${payload.excludeDevice}`) continue;
+      if (payload.onlyDevice && key !== `${payload.userId}:${payload.onlyDevice}`) continue;
+      for (const ws of set) this.send(ws, payload.frame);
     }
   }
 
   /** Broadcast frames target a set of users that may be spread over every node. */
-  private handleBroadcast(raw: string): void {
-    try {
-      const parsed = JSON.parse(raw) as {
-        user_ids: string[];
-        frame: Record<string, unknown>;
-      };
-      for (const userId of parsed.user_ids) {
-        for (const ws of this.socketsFor(userId)) {
-          this.send(ws, parsed.frame);
-        }
+  private handleBroadcast(payload: BroadcastPayload): void {
+    for (const userId of payload.user_ids) {
+      for (const ws of this.socketsFor(userId)) {
+        this.send(ws, payload.frame);
       }
-    } catch (error) {
-      this.logger.debug({ err: error }, 'dropped malformed broadcast event');
     }
   }
 
@@ -567,6 +740,12 @@ export class ChatGateway {
     return sockets;
   }
 
+  /** Registers async fire-and-forget work so shutdown can wait for it. */
+  private track(work: Promise<unknown>): void {
+    this.pending.add(work);
+    void work.finally(() => this.pending.delete(work)).catch(() => undefined);
+  }
+
   private send(ws: WebSocket, frame: Record<string, unknown>): void {
     if (ws.readyState !== WebSocket.OPEN) return;
     // Drop slow consumers rather than buffering without bound.
@@ -574,3 +753,19 @@ export class ChatGateway {
     ws.send(JSON.stringify(frame));
   }
 }
+
+/**
+ * Partition key for broker ordering. Frames for one conversation must share a
+ * partition; user-only frames fall back to the recipient id.
+ */
+function conversationKey(frame: Record<string, unknown>): string {
+  const conversationId = frame.conversation_id;
+  if (typeof conversationId === 'string') return `c:${conversationId}`;
+  const userId = frame.user_id;
+  if (typeof userId === 'string') return `u:${userId}`;
+  return 'control';
+}
+
+/** Exposed for the broker ingestion worker and tests. */
+export { conversationKey };
+export type { RoutedPayload, BroadcastPayload };

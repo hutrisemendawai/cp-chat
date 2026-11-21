@@ -53,6 +53,11 @@ jobs:
           ORDER BY table_name;
           SELECT conname FROM pg_constraint
           WHERE conname IN ('messages_conversation_id_seq_key', 'messages_sender_id_client_msg_id_key');
+          -- Phase 4 E2EE key registry.
+          SELECT table_name FROM information_schema.tables
+          WHERE table_schema = 'public'
+            AND table_name IN ('user_identity_keys', 'user_signed_prekeys', 'user_one_time_prekeys')
+          ORDER BY table_name;
           SQL
 
       - name: Verify migrations roll back cleanly
@@ -97,10 +102,48 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # Phase 4: real broker and wide-column store, so the Kafka and Scylla
+      # suites run instead of skipping.
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 20s
+      scylla:
+        image: scylladb/scylla:6.2
+        ports:
+          - 9042:9042
+        options: >-
+          --health-cmd "nodetool status | grep -E '^UN' >/dev/null"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 40s
     env:
       DATABASE_URL: postgres://cpchat:cpchat@localhost:5432/cpchat?sslmode=disable
       REDIS_URL: redis://localhost:6379/0
       JWT_SECRET: ci-secret-that-is-long-enough
+      KAFKA_BROKERS: localhost:9092
+      SCYLLA_TEST: '1'
+      SCYLLA_CONTACT_POINTS: localhost:9042
     steps:
       - uses: actions/checkout@v4
 
@@ -121,8 +164,13 @@ jobs:
             | tar xz -C "$HOME/.local/bin" migrate
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Apply migrations
+      - name: Apply PostgreSQL migrations
         run: migrate -path backend/migrations -database "$DATABASE_URL" up
+
+      - name: Apply ScyllaDB schema
+        run: |
+          docker exec "$(docker ps -qf ancestor=scylladb/scylla:6.2 | head -1)" \
+            cqlsh -f /dev/stdin < backend/migrations/cql/0001_messages.cql
 
       - name: Typecheck
         working-directory: backend

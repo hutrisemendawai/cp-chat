@@ -430,14 +430,74 @@ Follow these phases sequentially. **By the end of Phase 1, you will have a worki
 ### Phase 4: High Scale, Reliability & Security Hardening (Weeks 11+)
 **Goal:** Prepare the architecture for high concurrency, strict privacy, and Google Play Store production deployment.
 
-- [ ] **Broker Upgrade:** Migrate inter-service messaging from Redis Pub/Sub to **Apache Kafka** (partitioned by `conversation_id`) for durable event streaming and consumer group scaling.
-- [ ] **Storage Migration:** Migrate high-volume `messages` table from PostgreSQL to **Cassandra or ScyllaDB** using `conversation_id` as the partition key and `seq DESC` as the clustering key for ultra-fast recent message reads.
-- [ ] **Gateway Scaling:** Deploy multiple Chat Gateway replicas behind a load balancer configured with consistent hashing / sticky sessions and graceful WebSocket draining during deployments.
-- [ ] **End-to-End Encryption (E2EE):** Implement Signal Protocol / Letter Sealing style key exchange (identity keys, pre-keys) on the Flutter client so the server only relays ciphertext.
-- [ ] **Android Production Release:**
+Each item below is implemented as a runtime-selectable seam so Phase 1–3
+deployments keep working unchanged; see the implementation notes after the
+checklist for the trade-offs.
+
+- [x] **Broker Upgrade:** Migrate inter-service messaging from Redis Pub/Sub to **Apache Kafka** (partitioned by `conversation_id`) for durable event streaming and consumer group scaling.
+- [x] **Storage Migration:** Migrate high-volume `messages` table from PostgreSQL to **Cassandra or ScyllaDB** using `conversation_id` as the partition key and `seq DESC` as the clustering key for ultra-fast recent message reads.
+- [x] **Gateway Scaling:** Deploy multiple Chat Gateway replicas behind a load balancer configured with consistent hashing / sticky sessions and graceful WebSocket draining during deployments.
+- [x] **End-to-End Encryption (E2EE):** Implement Signal Protocol / Letter Sealing style key exchange (identity keys, pre-keys) on the Flutter client so the server only relays ciphertext.
+- [x] **Android Production Release:**
   - Configure ProGuard/R8 shrinking and obfuscation (`minifyEnabled true`).
   - Set up Android App Bundle (`.aab`) signing and Play Store internal testing track.
   - Add Crashlytics/Sentry monitoring and OpenTelemetry backend tracing.
+
+> **Implementation notes:** every Phase 4 upgrade is a config seam, so the
+> Phase 1–3 path stays the default and a single-node deployment is unchanged.
+>
+> **Broker** (`backend/src/lib/broker.ts`): a `Broker` interface with
+> `publishToNode` and `publishBroadcast`, implemented by Redis Pub/Sub (default)
+> and Kafka. Events are keyed by `c:<conversation_id>` so one conversation stays
+> on one partition. Each gateway replica deliberately uses its **own** consumer
+> group; a shared group would split partitions and drop frames whose recipient is
+> connected to another replica. `GATEWAY_ASYNC_INGEST=true` moves `send`
+> processing onto a `chat.inbound` topic consumed by a `message-service` group,
+> which decouples gateway latency from the storage transaction; redelivery is
+> safe because `append()` is idempotent on `client_msg_id`.
+>
+> **Storage** (`backend/src/domain/messages.ts`, `scylla-messages.ts`):
+> `MESSAGE_STORE=scylla` serves `page`/`sync`/`findBySeq` from Scylla and mirrors
+> new rows there after the Postgres transaction commits. Postgres keeps
+> gap-free `seq` allocation, `client_msg_id` idempotency, receipt foreign keys,
+> and full-text search — the four guarantees Scylla cannot provide without a
+> redesign. The mirror is best-effort (a failed mirror never fails a send) and
+> `backend/scripts/backfill-scylla.mjs` replays from Postgres to close gaps. Two
+> driver pitfalls are handled explicitly: unprepared inserts would bind `seq` as
+> a double (corrupting a BIGINT), and driver `Uuid`/`Long` wrappers would hand
+> `pg` a quoted uuid.
+>
+> **Gateway scaling** (`backend/src/gateway/chat-gateway.ts`): `/readyz` reports
+> not-ready while starting or draining; `SIGTERM` refuses new upgrades (503),
+> closes live sockets with `1001`, and waits up to `GATEWAY_DRAIN_TIMEOUT_MS` for
+> handlers to finish before the database pool closes. The load balancer needs
+> sticky sessions or consistent hashing on the upgrade.
+>
+> **E2EE** (`backend/src/lib/e2ee.ts`, `backend/src/domain/keys.ts`,
+> `mobile/lib/core/crypto/`): X3DH with an X25519 identity, an Ed25519 signing
+> key, a signed prekey, and one-time prekeys, then a per-direction symmetric
+> ratchet with AES-256-GCM. One-time prekeys are consumed atomically
+> (`DELETE ... RETURNING`) so two initiators never receive the same key. Direct
+> chat `text` bodies travel as an `e2ee:v1:` envelope; the gateway validates its
+> shape and rejects a corrupt envelope rather than delivering it as text. The
+> client outbox stores display plaintext and wire ciphertext separately so a
+> retry resends identical bytes instead of advancing the ratchet. A full
+> Double Ratchet (DH re-keying, skipped-key storage), group sender keys, and a
+> safety-number UI are documented as follow-ups in `docs/e2ee.md`, not
+> approximated.
+>
+> **Release** (`mobile/android/app/build.gradle.kts`, `docs/release.md`): R8
+> minify + resource shrink with keep rules, a signed `.aab` from
+> `android/key.properties` (debug-key fallback so local builds still work),
+> Crashlytics for release-only crash and non-fatal reporting, cleartext HTTP
+> disabled, and backups disabled so E2EE keys cannot be extracted.
+> **Observability:** OpenTelemetry OTLP/HTTP export behind `OTEL_ENABLED`, with
+> `message.ingest` and `message.fanout` spans.
+
+> **Milestone 4 (Production Ready):** The stack scales horizontally behind a
+> load balancer with zero-loss rolling deploys, direct-chat text is end-to-end
+> encrypted, and the Android app ships as a shrink-wrapped, signed App Bundle
+> with crash reporting.
 
 ---
 
@@ -449,12 +509,18 @@ Follow these phases sequentially. **By the end of Phase 1, you will have a worki
 | **Message Broker** | Redis Pub/Sub | Apache Kafka |
 | **Group Fan-out** | Fan-out on write (up to 500 members) | Hybrid (Fan-out on read for huge channels) |
 | **Group Read Receipts** | Aggregated read count (`last_read_seq`) | Detailed per-member receipt log (opt-in) |
+| **Direct-chat privacy** | Server-readable plaintext | E2EE ciphertext (X3DH + symmetric ratchet) |
+
+Each Phase 4 choice is selected by configuration (`MESSAGE_STORE`, `BROKER`),
+not a code fork, so the simple and large-scale paths share one codebase. E2EE is
+on by default for direct-chat text and has no server fallback that can read it.
 
 ---
 
 ## 9. Reliability & Security Guidelines
 
 - **Delivery Guarantee:** At-least-once delivery combined with strict client-generated `client_msg_id` deduplication. The Flutter client stores unsent messages in a local SQLite outbox and retries with exponential backoff until a server `sent` ACK arrives.
-- **Transport & Auth Security:** Enforce TLS (`HTTPS` / `WSS`) on all endpoints, short-lived JWT access tokens with refresh token rotation, and certificate pinning on Android for production builds.
+- **Transport & Auth Security:** Enforce TLS (`HTTPS` / `WSS`) on all endpoints, short-lived JWT access tokens with refresh token rotation, and certificate pinning on Android for production builds. Release builds reject cleartext HTTP via `network_security_config.xml`.
+- **End-to-End Encryption:** Direct-chat text is encrypted on the device; the server stores only public prekeys and relays ciphertext. See `docs/e2ee.md`.
 - **Abuse Prevention:** Apply Redis-backed token-bucket rate limiting at the API Gateway and Chat Gateway (e.g., max messages per second per user).
-- **Data Protection:** Encrypt database volumes and S3 buckets at rest; never log raw message contents in server logs.
+- **Data Protection:** Encrypt database volumes and S3 buckets at rest; never log raw message contents in server logs. Android cloud backup and device transfer are disabled so E2EE keys cannot leave the device.

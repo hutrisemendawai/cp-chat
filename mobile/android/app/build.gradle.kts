@@ -1,7 +1,27 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    // Crashlytics symbol upload runs after minification so obfuscated stack
+    // traces are symbolicated in the Firebase console.
+    id("com.google.firebase.crashlytics")
+}
+
+/**
+ * Release signing is read from `android/key.properties` (git-ignored) so the
+ * keystore never lives in the repository. When the file is absent — a fresh
+ * clone, CI without secrets — the release build falls back to the debug key so
+ * `flutter build appbundle` still works for local verification. A real upload
+ * to Play must use the release key.
+ */
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+val hasReleaseKeystore = keystorePropertiesFile.exists()
+if (hasReleaseKeystore) {
+    FileInputStream(keystorePropertiesFile).use { keystoreProperties.load(it) }
 }
 
 android {
@@ -26,11 +46,59 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // R8 shrinks, obfuscates, and optimises the Dart/Java bridge. Flutter
+            // ships the keep rules it needs; see proguard-rules.pro for the app's
+            // own additions (Flutter engine, plugins, Crashlytics).
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // Strip debug symbols from the release binary.
+            isDebuggable = false
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                // Debug signing keeps `flutter build appbundle` working locally;
+                // never ship this artifact to Play.
+                signingConfigs.getByName("debug")
+            }
+        }
+        debug {
+            // Crashlytics stays quiet in debug so local runs do not pollute the
+            // production dashboard.
+            isMinifyEnabled = false
+        }
+    }
+
+    // The R8 mapping file is emitted to
+    // build/app/outputs/mapping/<variant>/mapping.txt. Upload it with each
+    // release (`-PfirebaseCrashlyticsMappingFileUploadEnabled=true` or the
+    // Play Console) so obfuscated stack traces can be deobfuscated.
+
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+            )
         }
     }
 }

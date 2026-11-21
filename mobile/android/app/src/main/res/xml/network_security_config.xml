@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security policy for release builds.
+
+  - Cleartext HTTP is disabled everywhere. The client defaults to
+    `http://10.0.2.2` only for emulator development, which is a debug override
+    applied through `--dart-define`, not a release capability.
+  - Certificate pinning is intentionally NOT hard-coded here. Pinning to a leaf
+    certificate makes key rotation an outage; the recommended production setup
+    is a `<pin-set>` of the CA or SPKI hashes for the API host, added once the
+    deployment hostname and certificate chain are known. See docs/release.md for
+    the exact snippet and rotation policy.
+
+  `networkSecurityConfig` is referenced from AndroidManifest.xml.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!--
+      Example pin set (commented until the production host is known):
+
+      <domain-config cleartextTrafficPermitted="false">
+          <domain includeSubdomains="true">api.cpchat.example.com</domain>
+          <pin-set expiration="2027-06-01">
+              <pin digest="SHA-256">AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</pin>
+              <pin digest="SHA-256">BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=</pin>
+          </pin-set>
+      </domain-config>
+    -->
+</network-security-config>

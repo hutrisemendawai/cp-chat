@@ -136,12 +136,17 @@ class ChatDao {
 
   /// Applies an optimistic local send: the message row and the outbox entry are
   /// committed together so a crash cannot lose an unsent message.
+  ///
+  /// [content] is what the UI renders; [wireContent] is what goes on the socket
+  /// when it differs (an E2EE ciphertext envelope). A retry reuses
+  /// [wireContent] verbatim so the ratchet is not advanced a second time.
   Future<void> enqueueOutgoing({
     required String clientMsgId,
     required String conversationId,
     required String senderId,
     required String type,
     required String content,
+    String? wireContent,
     required DateTime createdAt,
   }) async {
     await db.transaction(() async {
@@ -162,6 +167,7 @@ class ChatDao {
               conversationId: conversationId,
               type: type,
               content: content,
+              wireContent: Value(wireContent),
               createdAt: createdAt,
             ),
           );

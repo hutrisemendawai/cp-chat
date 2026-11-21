@@ -5,7 +5,6 @@ import type { AppContext } from './context.js';
 import { requireAuth } from './context.js';
 import { ApiError } from '../lib/errors.js';
 import { isUuid } from '../lib/ids.js';
-import { publishBroadcast } from '../lib/redis.js';
 
 const createSchema = z.object({
   type: z.enum(['direct', 'group']),
@@ -169,10 +168,13 @@ export function registerConversationRoutes(app: FastifyInstance, ctx: AppContext
 
   /** Pushes a lightweight refresh hint to online members of a conversation. */
   async function announce(conversationId: string, userIds: string[]): Promise<void> {
-    await publishBroadcast(ctx.redis, [...new Set(userIds)], {
-      type: 'conversation_updated',
-      conversation_id: conversationId,
-    });
+    await ctx.broker.publishBroadcast(
+      {
+        user_ids: [...new Set(userIds)],
+        frame: { type: 'conversation_updated', conversation_id: conversationId },
+      },
+      `c:${conversationId}`,
+    );
   }
 
   async function assertUsersExist(ids: string[]): Promise<void> {

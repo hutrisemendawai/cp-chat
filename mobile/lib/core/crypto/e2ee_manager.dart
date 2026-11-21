@@ -1,0 +1,281 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+
+import '../crypto/e2ee_service.dart';
+import '../models/models.dart';
+import '../network/api_client.dart';
+import '../storage/token_store.dart';
+
+/// Coordinates end-to-end encryption for 1:1 chats.
+///
+/// Responsibilities:
+/// - **Bootstrap:** generate key material on first run, persist the private
+///   halves in secure storage, and publish only the public keys.
+/// - **Prekey replenishment:** top the server's one-time prekeys back up when a
+///   peer's fetch has consumed them.
+/// - **Send:** encrypt a text body for a direct peer, fetching and verifying a
+///   prekey bundle the first time a session is needed.
+/// - **Receive:** decrypt an inbound body, falling back to the raw text for
+///   plaintext (Phase 1-3) messages, and persist the ratchet state so a restart
+///   does not break the chain.
+///
+/// Server-visible metadata (sender, timestamps, `seq`, ciphertext length) is
+/// unchanged; only the message body is opaque.
+class E2eeManager {
+  E2eeManager({
+    required TokenStore tokenStore,
+    required ApiClient api,
+    E2eeService? service,
+    this.replenishThreshold = 5,
+    this.batchSize = 20,
+  })  // Named parameters keep the public constructor readable while the fields
+      // stay private.
+      // ignore: prefer_initializing_formals
+      : _tokenStore = tokenStore,
+        // ignore: prefer_initializing_formals
+        _api = api,
+        _service = service ?? E2eeService();
+
+  final TokenStore _tokenStore;
+  final ApiClient _api;
+  final E2eeService _service;
+
+  /// Publish more one-time prekeys below this count.
+  final int replenishThreshold;
+
+  /// How many prekeys a top-up publishes at once.
+  final int batchSize;
+
+  LocalKeyMaterial? _keys;
+  bool _bootstrapped = false;
+
+  /// Decrypted plaintext cache so the UI can render without awaiting on every
+  /// rebuild. Keyed by `client_msg_id` (unique per message).
+  final Map<String, String> _plaintext = {};
+
+  bool get isReady => _keys != null;
+
+  /// Generates keys on first run or restores them from secure storage, then
+  /// ensures the server has a publishable bundle.
+  Future<void> bootstrap() async {
+    if (_bootstrapped) return;
+
+    final stored = await _tokenStore.readE2eeKeys();
+    if (stored != null) {
+      _keys = await _service.importKeyMaterial(stored);
+      await _restoreSessions();
+      // The supply may have been consumed while the app was closed.
+      await _maybeReplenishOurPrekeys();
+    } else {
+      _keys = await _service.generateKeyMaterial();
+      await _tokenStore.writeE2eeKeys(await _service.exportKeyMaterial(_keys!));
+      await _publish(_keys!);
+    }
+
+    _bootstrapped = true;
+  }
+
+  /// Returns the plaintext for a message body, decrypting an envelope if needed.
+  ///
+  /// Plaintext bodies (old clients, media keys) are returned unchanged. A body
+  /// that fails to decrypt renders a placeholder rather than throwing: a single
+  /// unreadable message must not break the whole chat view.
+  Future<String> plaintextFor(
+    String clientMsgId,
+    String conversationId,
+    String content, {
+    required bool isGroup,
+  }) async {
+    if (!isEncryptedContent(content)) return content;
+
+    final cached = _plaintext[clientMsgId];
+    if (cached != null) return cached;
+
+    // Group chats have no E2EE in this phase; a ciphertext there is unreadable
+    // by design rather than an error to surface.
+    if (isGroup || _keys == null) return _undecryptable;
+
+    final envelope = decodeEnvelope(content);
+    if (envelope == null) return _undecryptable;
+
+    final peerId = await _peerIdFor(conversationId);
+    if (peerId == null) return _undecryptable;
+
+    try {
+      final decrypted = await _service.decrypt(
+        peerId: peerId,
+        envelope: envelope,
+        local: _keys!,
+      );
+      _plaintext[clientMsgId] = decrypted.plaintext;
+      await _persistSessions();
+      return decrypted.plaintext;
+    } catch (error) {
+      debugPrint('E2EE decrypt failed: $error');
+      return _undecryptable;
+    }
+  }
+
+  static const String _undecryptable = 'Unable to decrypt this message';
+
+  /// Encrypts a text body for `conversationId`. Returns the original text when
+  /// the conversation is a group (not covered in this phase) or keys are not
+  /// ready, so sending still works before bootstrap finishes.
+  Future<String> encryptForConversation({
+    required String conversationId,
+    required String plaintext,
+    required bool isGroup,
+  }) async {
+    if (isGroup) return plaintext;
+    if (!_bootstrapped) await bootstrap();
+    final keys = _keys;
+    if (keys == null) return plaintext;
+
+    final peerId = await _peerIdFor(conversationId);
+    if (peerId == null) return plaintext;
+
+    RemotePrekeyBundle? bundle;
+    if (!_service.hasSession(peerId)) {
+      try {
+        bundle = await _api.prekeyBundle(peerId);
+      } on ApiException catch (error) {
+        // A peer that has not published keys yet cannot receive E2EE. Send the
+        // plaintext rather than blocking the conversation entirely.
+        debugPrint('No prekey bundle for $peerId (${error.code}); sending plaintext');
+        return plaintext;
+      }
+      // The bundle belongs to the peer, so it cannot tell us how many of *our*
+      // prekeys are left. A peer opening a session consumes ours, which is the
+      // signal to top up; check our own count opportunistically.
+      await _maybeReplenishOurPrekeys();
+    }
+
+    try {
+      final envelope = await _service.encrypt(
+        peerId: peerId,
+        plaintext: plaintext,
+        local: keys,
+        bundle: bundle,
+      );
+      await _persistSessions();
+      return envelope.toContent();
+    } catch (error) {
+      debugPrint('E2EE encrypt failed: $error');
+      return plaintext;
+    }
+  }
+
+  /// Resolves the other member of a direct conversation.
+  ///
+  /// The peer id is registered by the chat screen once the member list is
+  /// loaded (`rememberConversation`), because the local conversation row only
+  /// caches the peer's *name*. Encryption is skipped until it is known.
+  Future<String?> _peerIdFor(String conversationId) async {
+    return _peerIds[conversationId];
+  }
+
+  /// Known peer ids per conversation, populated by [rememberConversation].
+  final Map<String, String> _peerIds = {};
+
+  /// Records the peer id for a direct conversation so encryption can target it.
+  void rememberConversation(
+    String conversationId, {
+    required String selfId,
+    required String peerId,
+  }) {
+    if (selfId == peerId) return;
+    _peerIds[conversationId] = peerId;
+  }
+
+  Future<void> _publish(LocalKeyMaterial material) async {
+    try {
+      final bundle = await _service.buildPublicBundle(material);
+      await _api.publishKeys(bundle);
+    } catch (error) {
+      debugPrint('E2EE key publish failed: $error');
+    }
+  }
+
+  /// Tops up this device's one-time prekeys when the server reports a low
+  /// supply.
+  ///
+  /// A device publishes a fixed batch and the server consumes one per session
+  /// opened by a peer. Once the batch is spent, new peers fall back to the
+  /// signed prekey, which still works but reuses long-term material; generating
+  /// a fresh batch keeps one-time keys available. Queried from
+  /// `GET /keys/me` because a *peer's* bundle reports that peer's count.
+  Future<void> _maybeReplenishOurPrekeys() async {
+    final keys = _keys;
+    if (keys == null) return;
+
+    try {
+      final remaining = await _api.myPrekeyCount();
+      if (remaining > replenishThreshold) return;
+      // ...top up below.
+    } on ApiException catch (error) {
+      // 404 means this device has not published yet; the publish path handles
+      // the first upload, so there is nothing to top up.
+      if (error.statusCode == 404) return;
+      debugPrint('E2EE prekey count failed: ${error.code}');
+      return;
+    } catch (error) {
+      debugPrint('E2EE prekey count failed: $error');
+      return;
+    }
+
+    try {
+      final bundle = await _service.buildPublicBundle(keys);
+      // Fresh ids avoid colliding with the spent batch; the server ignores a
+      // re-upload of an id it already knows.
+      final highest = bundle.prekeys.fold<int>(0, (max, prekey) {
+        return prekey.keyId > max ? prekey.keyId : max;
+      });
+      final fresh = await _service.generatePrekeys(
+        count: batchSize,
+        startPrekeyId: highest + 1000,
+      );
+      await _api.addPrekeys(fresh.map((prekey) => prekey.public).toList());
+      await _appendPrekeys(fresh);
+    } catch (error) {
+      debugPrint('E2EE prekey replenish failed: $error');
+    }
+  }
+
+  Future<void> _appendPrekeys(List<GeneratedPrekey> prekeys) async {
+    final keys = _keys;
+    if (keys == null) return;
+    final combined = [...keys.prekeys, ...prekeys.map((prekey) => prekey.keyPairEntry)];
+    _keys = LocalKeyMaterial(
+      identityKeyPair: keys.identityKeyPair,
+      signingKeyPair: keys.signingKeyPair,
+      signedPrekeyId: keys.signedPrekeyId,
+      signedPrekeyKeyPair: keys.signedPrekeyKeyPair,
+      signedPrekeySignature: keys.signedPrekeySignature,
+      prekeys: combined,
+    );
+    await _tokenStore.writeE2eeKeys(await _service.exportKeyMaterial(_keys!));
+  }
+
+  Future<void> _persistSessions() async {
+    final sessions = <String, dynamic>{};
+    for (final peerId in _peerIds.values) {
+      final session = _service.session(peerId);
+      if (session != null) sessions[peerId] = session.toJson();
+    }
+    await _tokenStore.writeE2eeSessions(jsonEncode(sessions));
+  }
+
+  Future<void> _restoreSessions() async {
+    final raw = await _tokenStore.readE2eeSessions();
+    if (raw == null) return;
+    try {
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      for (final entry in decoded.entries) {
+        _service.restoreSession(E2eeSession.fromJson(entry.value as Map<String, dynamic>));
+      }
+    } catch (error) {
+      debugPrint('E2EE session restore failed: $error');
+    }
+  }
+}

@@ -26,16 +26,34 @@ class ChatController {
 
   /// Persists an optimistic row first, then sends. The UI renders from the local
   /// mirror, so the bubble appears immediately with a clock icon.
+  ///
+  /// Direct chats are end-to-end encrypted: the body is replaced with a
+  /// ciphertext envelope before it reaches the socket, so the server only
+  /// relays opaque bytes. Groups and media messages keep their current
+  /// behaviour.
   Future<void> sendText(String text) async {
     final trimmed = text.trim();
     final user = _user;
     if (trimmed.isEmpty || user == null) return;
 
+    final dao = _ref.read(chatDaoProvider);
+    final conversation = await dao.conversation(_conversationId);
+    final isGroup = conversation?.type == 'group';
+
+    final body = await _ref.read(e2eeManagerProvider).encryptForConversation(
+          conversationId: _conversationId,
+          plaintext: trimmed,
+          isGroup: isGroup,
+        );
+
     await _socket.send(
       conversationId: _conversationId,
       senderId: user.id,
       clientMsgId: _uuid.v4(),
+      // The bubble shows the text the user typed; the wire carries the
+      // ciphertext envelope if the conversation is encrypted.
       content: trimmed,
+      wireContent: body,
     );
   }
 

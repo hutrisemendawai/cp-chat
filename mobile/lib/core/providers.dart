@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import 'database/app_database.dart';
 import 'database/chat_dao.dart';
+import 'crypto/e2ee_manager.dart';
 import 'media/media_service.dart';
 import 'models/models.dart';
 import 'network/api_client.dart';
@@ -48,6 +49,15 @@ final mediaServiceProvider = Provider<MediaService>((ref) {
   return MediaService(ref.watch(apiClientProvider));
 });
 
+/// End-to-end encryption for direct chats. Key material is generated lazily on
+/// first use and stored in secure storage; only public keys reach the server.
+final e2eeManagerProvider = Provider<E2eeManager>((ref) {
+  return E2eeManager(
+    tokenStore: ref.watch(tokenStoreProvider),
+    api: ref.watch(apiClientProvider),
+  );
+});
+
 /// The stored access token, exposed for widgets that fetch private media.
 /// Rebuilds when the session changes so a rotated token is picked up.
 final accessTokenProvider = FutureProvider<String?>((ref) async {
@@ -60,6 +70,14 @@ final chatSocketProvider = Provider<ChatSocket>((ref) {
     ref.watch(chatDaoProvider),
     ref.watch(apiClientProvider),
     ref.watch(tokenStoreProvider),
+    decrypt: (conversationId, clientMsgId, content) {
+      return ref.read(e2eeManagerProvider).plaintextFor(
+            clientMsgId,
+            conversationId,
+            content,
+            isGroup: false,
+          );
+    },
   );
   ref.onDispose(socket.dispose);
   return socket;

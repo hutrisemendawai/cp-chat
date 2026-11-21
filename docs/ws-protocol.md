@@ -41,6 +41,12 @@ versions.
    (1 s, 2 s, 4 s, ... capped at 30 s, with jitter).
 5. On reconnect the client re-runs step 3 before accepting live messages.
 
+A gateway replica may be drained for a rolling deploy or scale-in. It then
+answers `/readyz` with `503`, refuses new upgrades, and closes live sockets with
+`1001` (going away). The client treats this exactly like any other disconnect
+and reconnects to a healthy replica; nothing beyond in-flight frames is lost,
+because the outbox and `seq` sync recover them.
+
 Messages delivered while a client is offline are not replayed on the socket;
 they are recovered through `GET /api/v1/conversations/{id}/sync?after_seq=`.
 
@@ -65,9 +71,41 @@ they are recovered through `GET /api/v1/conversations/{id}/sync?after_seq=`.
   object key returned by `POST /api/v1/media/presign` (see [Media](#media)). The
   client uploads the bytes to the presigned PUT URL *before* sending this frame,
   so recipients can resolve the object immediately.
+- **Direct-chat `text` is end-to-end encrypted.** `content` is then
+  `e2ee:v1:<json>` rather than plaintext; the gateway relays it untouched and
+  validates only its shape. See [End-to-end encryption](#end-to-end-encryption).
 - The gateway acknowledges with a `status` event carrying `status: "sent"` and
   the assigned `seq`. If no ACK arrives before the client timeout, the outbox
   entry is retried with backoff.
+
+### End-to-end encryption
+
+A direct-chat text body is an envelope the server cannot read:
+
+```
+e2ee:v1:{"v":1,"ik":"...","ek":"...","spk":42,"opk":43,"i":0,"ct":"...","n":"...","m":"..."}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `ik` | Sender's identity public key (X25519, base64) |
+| `ek` | Sender's ephemeral public key — present only on the session-opening message |
+| `spk` / `opk` | Signed-prekey and one-time-prekey ids consumed from the recipient's bundle |
+| `i` | Position in the sender's ratchet chain |
+| `ct`, `n`, `m` | AES-256-GCM ciphertext, nonce, and authentication tag |
+
+The gateway:
+
+- relays a valid envelope unchanged and stores it as the message `content`;
+- **rejects** (`validation_error`) a body with the `e2ee:v1:` prefix that is not
+  a well-formed envelope, so a corrupt encrypted body is never delivered as
+  text;
+- never logs or inspects `ct` (content is redacted from logs).
+
+The recipient decrypts on arrival and persists plaintext locally; a body it
+cannot decrypt is stored as-is and rendered as a placeholder. Group and media
+messages are not encrypted in this phase. Full protocol: [e2ee.md](./e2ee.md).
+
 
 ### Fan-out
 

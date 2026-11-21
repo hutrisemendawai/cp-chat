@@ -51,6 +51,8 @@ dependencies:
   go_router: ^18.1.4
   flutter_image_compress: ^2.5.1
   url_launcher: ^6.3.3
+  cryptography: ^2.9.0
+  firebase_crashlytics: ^6.1.0
 
 # Host-side tests (CI and local `flutter test`) run against the Linux desktop
 # target, where the prebuilt SQLite from package:sqlite3 needs a newer glibc than

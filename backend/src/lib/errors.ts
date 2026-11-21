@@ -15,6 +15,8 @@ export type ErrorCode =
   | 'last_admin'
   | 'media_too_large'
   | 'unsupported_media_type'
+  | 'keys_not_found'
+  | 'encryption_required'
   | 'internal_error';
 
 const STATUS: Record<ErrorCode, number> = {
@@ -34,6 +36,8 @@ const STATUS: Record<ErrorCode, number> = {
   last_admin: 409,
   media_too_large: 413,
   unsupported_media_type: 415,
+  keys_not_found: 404,
+  encryption_required: 422,
   internal_error: 500,
 };
 

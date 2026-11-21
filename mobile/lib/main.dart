@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'core/notifications/crash_reporter.dart';
 import 'core/notifications/fcm_service.dart';
 import 'core/models/models.dart';
 import 'core/providers.dart';
@@ -17,6 +18,9 @@ import 'features/search/search_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Install the crash handlers before the first frame so an early error is not
+  // lost. This is a no-op in debug builds.
+  await CrashReporter.initialize();
   runApp(const ProviderScope(child: CpChatApp()));
 }
 
@@ -131,6 +135,14 @@ class _CpChatAppState extends ConsumerState<CpChatApp> {
   }
 
   Future<void> _startSessionRuntime() async {
+    // Encryption keys must be ready before the first inbound frame is decrypted
+    // and before the outbox is flushed, so bootstrap them first.
+    try {
+      await ref.read(e2eeManagerProvider).bootstrap();
+    } catch (error) {
+      debugPrint('E2EE bootstrap failed: $error');
+    }
+
     final socket = ref.read(chatSocketProvider);
     await socket.connect();
 

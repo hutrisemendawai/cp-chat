@@ -55,7 +55,15 @@ class OutboxEntries extends Table {
   TextColumn get clientMsgId => text()();
   TextColumn get conversationId => text()();
   TextColumn get type => text()();
+
+  /// Display content, stored locally as the user typed it.
   TextColumn get content => text()();
+
+  /// Body actually written to the socket. For an encrypted direct chat this is
+  /// the ciphertext envelope; a retry must resend the identical bytes because
+  /// re-encrypting would advance the ratchet and the peer could not decrypt it.
+  TextColumn get wireContent => text().nullable()();
+
   DateTimeColumn get createdAt => dateTime()();
   IntColumn get attempts => integer().withDefault(const Constant(0))();
   DateTimeColumn get lastAttemptAt => dateTime().nullable()();
@@ -71,7 +79,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -88,6 +96,11 @@ class AppDatabase extends _$AppDatabase {
             await migrator.addColumn(localConversations, localConversations.avatarUrl);
             await migrator.addColumn(localMessages, localMessages.readCount);
             await migrator.addColumn(localMessages, localMessages.memberCount);
+          }
+          if (from < 4) {
+            // Existing outbox rows were plaintext; NULL wire content means
+            // "send the stored content unchanged".
+            await migrator.addColumn(outboxEntries, outboxEntries.wireContent);
           }
         },
         beforeOpen: (details) async {

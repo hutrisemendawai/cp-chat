@@ -15,6 +15,24 @@ help: ## Show available targets
 up: .env ## Start PostgreSQL, Redis and MinIO
 	$(COMPOSE) up -d postgres redis minio minio-init
 
+.PHONY: up-scale
+up-scale: .env ## Start infrastructure plus Kafka and ScyllaDB (Phase 4)
+	$(COMPOSE) --profile kafka --profile scylla up -d postgres redis minio minio-init kafka scylla scylla-init
+
+.PHONY: backfill-scylla
+backfill-scylla: ## Mirror existing messages from PostgreSQL into ScyllaDB
+	cd backend && DATABASE_URL=$${DATABASE_URL:-postgres://cpchat:cpchat@localhost:5432/cpchat?sslmode=disable} \
+		SCYLLA_CONTACT_POINTS=$${SCYLLA_CONTACT_POINTS:-localhost:9042} \
+		node scripts/backfill-scylla.mjs $(args)
+
+.PHONY: kafka-cli
+kafka-cli: ## List topics on the local Kafka broker
+	$(COMPOSE) --profile kafka exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+.PHONY: scylla-cqlsh
+scylla-cqlsh: ## Open a cqlsh shell on the local ScyllaDB node
+	$(COMPOSE) --profile scylla exec scylla cqlsh
+
 .PHONY: up-all
 up-all: .env migrate-up ## Start the full stack: infrastructure + API + chat gateway
 	$(COMPOSE) up -d --build postgres redis minio minio-init api gateway

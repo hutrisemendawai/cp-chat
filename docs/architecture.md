@@ -26,6 +26,51 @@ TypeScript sources. They share the database, Redis, and configuration, and are
 deployed and scaled independently: the REST API is stateless, while each gateway
 node holds a subset of live sockets.
 
+## Phase 4 components
+
+Phase 4 makes each Phase 1–3 shortcut replaceable at runtime by configuration,
+so a single-node deployment keeps working while a large one opts in.
+
+| Seam | Default | Scale option | Config |
+| --- | --- | --- | --- |
+| Realtime transport | Redis Pub/Sub | Apache Kafka (partitioned by conversation) | `BROKER` |
+| Message storage | PostgreSQL | ScyllaDB (Cassandra-compatible) | `MESSAGE_STORE` |
+| Send ingestion | Inline on the gateway | `chat.inbound` Kafka topic + consumer group | `GATEWAY_ASYNC_INGEST` |
+| Tracing | Off | OpenTelemetry OTLP/HTTP export | `OTEL_ENABLED` |
+
+The abstractions live in `backend/src/lib/broker.ts` and
+`backend/src/domain/messages.ts`; `docs/kafka.md`, `docs/scylla.md`, and
+`docs/e2ee.md` cover each migration in depth.
+
+### Broker
+
+`Broker` has two operations that map onto both transports: `publishToNode`
+(deliver to one recipient, optionally one device) and `publishBroadcast`
+(deliver to a set of users). Messages are keyed by `conversation_id`, so all
+events for one chat land on the same Kafka partition and stay ordered.
+
+Each gateway replica uses a **unique** consumer group (`gateway-<node_id>`).
+A shared group would split partitions across replicas and silently drop frames
+whose recipient is connected elsewhere; a unique group lets every replica read
+the whole stream and deliver to the sockets it owns.
+
+### Message storage
+
+With `MESSAGE_STORE=scylla`, new messages are written to Postgres (inside the
+`seq` transaction) and mirrored to Scylla, while history reads
+(`page`/`sync`/`findBySeq`) are served from Scylla. Postgres retains four
+responsibilities Scylla cannot replace without losing a guarantee:
+
+- gap-free `conversations.last_seq` allocation;
+- `UNIQUE (sender_id, client_msg_id)` idempotency;
+- `message_receipts` foreign keys and read-cursor updates;
+- full-text search (`tsvector` + GIN).
+
+A failing mirror does not fail the send; `scripts/backfill-scylla.mjs` replays
+from Postgres to close any gap. This dual-write is the documented transition
+state, not the destination.
+
+
 ## Components
 
 | Component | Responsibility | State |
@@ -63,7 +108,7 @@ node holds a subset of live sockets.
 | `conns:{user_id}` | set + TTL | Device ids with a socket, for fan-out without `SCAN` |
 | `presence:{user_id}` | string + TTL 45 s | Online status (refreshed by heartbeat) |
 | `gw:{node_id}` | pub/sub channel | Fan-out to sockets owned by another gateway node |
-| `members:{conversation_id}` | set | Reserved for Phase 2 group membership caching |
+| `members:{conversation_id}` | set | Group membership fan-out cache |
 | `ratelimit:{user_id}` | counter | Reserved for Phase 4 rate limiting |
 
 Both `conn:` keys carry a TTL refreshed by the heartbeat, so a crashed node
@@ -122,3 +167,47 @@ Phases are designed so each shortcut has a documented upgrade: PostgreSQL →
 Cassandra/ScyllaDB, Redis Pub/Sub → Kafka, single `user_id -> node` routing →
 `user_id -> set(device, node)`, and fan-out-on-write → hybrid fan-out for very
 large groups. Details and phase boundaries live in `AGENTS.MD`.
+
+Phase 4 delivers the first three as **runtime-selectable seams** (see
+[Phase 4 components](#phase-4-components)), adds graceful gateway draining, and
+adds end-to-end encryption, which is orthogonal to scaling and on by default for
+direct chats (see [e2ee.md](./e2ee.md)).
+
+## Gateway scaling and draining
+
+A gateway holds its sockets in memory, so a rolling deploy must move clients
+without losing frames:
+
+1. `SIGTERM` starts a drain (`ChatGateway.drain`).
+2. `/readyz` returns `503`, so the load balancer stops routing new upgrades here.
+3. Every socket is closed with `1001` (going away). The Flutter client treats any
+   close as a reconnect and backs off (1 s, 2 s, ... capped at 30 s), landing on
+   a healthy replica.
+4. The process waits up to `GATEWAY_DRAIN_TIMEOUT_MS` for closes to complete,
+   then terminates stragglers.
+5. In-flight close handlers (presence unregister, `last_seen_at`) are awaited
+   before the database pool closes.
+
+The load balancer must use sticky sessions or consistent hashing on the
+upgrade so a client is not moved mid-connection. Nothing in the gateway's state
+is required for correctness after a drain: `conn:` keys expire, clients sync
+from their `seq` cursor on reconnect, and the client outbox retries any
+unacknowledged send.
+
+## Observability
+
+`OTEL_ENABLED=true` starts an OTLP/HTTP trace exporter in both processes. HTTP
+spans come from `HttpInstrumentation`; message ingestion and fan-out are wrapped
+with `withSpan` (`message.ingest`, `message.fanout`), so a single trace follows
+a message from the sender's WebSocket frame through the storage write to the
+recipient's node. Sampling is parent-based with a configurable root ratio.
+Health checks are excluded.
+
+## End-to-end encryption
+
+Direct-chat text is encrypted on the device (X3DH + a per-direction symmetric
+ratchet) and the server only relays an `e2ee:v1:` envelope it cannot decrypt.
+The server stores public prekeys, validates the envelope shape, and rejects a
+malformed encrypted body rather than delivering it as text. Groups and media
+are out of scope for this phase. See [e2ee.md](./e2ee.md).
+

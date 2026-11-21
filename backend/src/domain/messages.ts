@@ -1,5 +1,7 @@
 import { ApiError } from '../lib/errors.js';
 import { withTransaction, type Db } from '../lib/db.js';
+import type { Logger } from '../lib/logger.js';
+import type { ScyllaMessageRepository } from './scylla-messages.js';
 
 export type MessageRow = {
   id: string;
@@ -25,6 +27,28 @@ export type StoredMessage = {
   duplicate: boolean;
 };
 
+/**
+ * Optional wide-column store for the message table.
+ *
+ * When present, history reads (`page`, `sync`, `findBySeq`) are served from
+ * Cassandra/ScyllaDB, which is the point of the Phase 4 migration: recent
+ * message reads become a single-partition, `seq`-ordered slice instead of an
+ * index scan.
+ *
+ * Postgres keeps three responsibilities that Scylla cannot replace without
+ * losing a guarantee:
+ * - `conversations.last_seq` allocation (gap-free, transactional);
+ * - `UNIQUE (sender_id, client_msg_id)` idempotency;
+ * - `message_receipts` foreign keys and the `search_vector` GIN index.
+ * It therefore receives every row as a mirror during the transition. That
+ * duplication is deliberate and is retired once search moves to a dedicated
+ * engine (see docs/architecture.md).
+ */
+export type MessageStoreOptions = {
+  scylla?: ScyllaMessageRepository | null;
+  logger?: Logger;
+};
+
 /** Signals that the `seq` increment must be rolled back: a duplicate won. */
 class ConcurrentDuplicate extends Error {
   constructor() {
@@ -34,7 +58,21 @@ class ConcurrentDuplicate extends Error {
 }
 
 export class MessageRepository {
-  constructor(private readonly db: Db) {}
+  private readonly scylla: ScyllaMessageRepository | null;
+  private readonly logger: Logger | null;
+
+  constructor(
+    private readonly db: Db,
+    options: MessageStoreOptions = {},
+  ) {
+    this.scylla = options.scylla ?? null;
+    this.logger = options.logger ?? null;
+  }
+
+  /** True when history reads are served by the wide-column store. */
+  get usesWideColumnStore(): boolean {
+    return this.scylla !== null;
+  }
 
   /**
    * Allocates the next per-conversation `seq` and inserts the message in one
@@ -62,7 +100,10 @@ export class MessageRepository {
         const stored = await withTransaction(this.db, (client) =>
           this.insertNext(client, input),
         );
-        if (stored) return { message: stored, duplicate: false };
+        if (stored) {
+          await this.mirrorToScylla(stored);
+          return { message: stored, duplicate: false };
+        }
       } catch (error) {
         // A racing request with the same client_msg_id committed first. The
         // transaction rolled the seq increment back, so retry as a duplicate.
@@ -78,6 +119,27 @@ export class MessageRepository {
       throw new ApiError('conflict', 'Message could not be stored');
     }
     return { message: existing, duplicate: true };
+  }
+
+  /**
+   * Writes a committed message to the wide-column store after the Postgres
+   * transaction succeeds.
+   *
+   * Ordering matters: Postgres is the source of truth for `seq`, so a Scylla
+   * failure must not fail the send (the client already has a durable message).
+   * A failed mirror is logged and recovered by the backfill script, which
+   * replays from Postgres.
+   */
+  private async mirrorToScylla(message: MessageRow): Promise<void> {
+    if (!this.scylla) return;
+    try {
+      await this.scylla.insert(message);
+    } catch (error) {
+      this.logger?.warn(
+        { err: error, conversation_id: message.conversation_id, seq: message.seq },
+        'scylla mirror write failed; message remains readable from postgres',
+      );
+    }
   }
 
   /**
@@ -141,6 +203,10 @@ export class MessageRepository {
     limit: number,
     beforeSeq?: number,
   ): Promise<{ messages: MessageRow[]; hasMore: boolean }> {
+    if (this.scylla) {
+      return this.scylla.page(conversationId, limit, beforeSeq);
+    }
+
     const params: unknown[] = [conversationId];
     let seqClause = '';
     if (beforeSeq !== undefined) {
@@ -169,6 +235,19 @@ export class MessageRepository {
     afterSeq: number,
     limit: number,
   ): Promise<{ messages: MessageRow[]; latestSeq: number; hasMore: boolean }> {
+    // `latest_seq` always comes from Postgres: `conversations.last_seq` is the
+    // authoritative allocation counter and is never behind Scylla's mirror.
+    const { rows: latest } = await this.db.query<{ last_seq: string }>(
+      `SELECT last_seq FROM conversations WHERE id = $1`,
+      [conversationId],
+    );
+    const latestSeq = Number(latest[0]?.last_seq ?? 0);
+
+    if (this.scylla) {
+      const page = await this.scylla.sync(conversationId, afterSeq, limit);
+      return { messages: page.messages, latestSeq, hasMore: page.hasMore };
+    }
+
     const { rows } = await this.db.query<RawMessageRow>(
       `SELECT ${COLUMNS} FROM messages
         WHERE conversation_id = $1 AND seq > $2
@@ -176,14 +255,10 @@ export class MessageRepository {
         LIMIT $3`,
       [conversationId, afterSeq, limit + 1],
     );
-    const { rows: latest } = await this.db.query<{ last_seq: string }>(
-      `SELECT last_seq FROM conversations WHERE id = $1`,
-      [conversationId],
-    );
 
     return {
       messages: rows.slice(0, limit).map(mapMessage),
-      latestSeq: Number(latest[0]?.last_seq ?? 0),
+      latestSeq,
       hasMore: rows.length > limit,
     };
   }
@@ -239,6 +314,9 @@ export class MessageRepository {
   }
 
   async findBySeq(conversationId: string, seq: number): Promise<MessageRow | null> {
+    if (this.scylla) {
+      return this.scylla.findBySeq(conversationId, seq);
+    }
     const { rows } = await this.db.query<RawMessageRow>(
       `SELECT ${COLUMNS} FROM messages WHERE conversation_id = $1 AND seq = $2`,
       [conversationId, seq],

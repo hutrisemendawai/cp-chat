@@ -386,6 +386,89 @@ async function main() {
     offline.json.online === false && typeof offline.json.last_seen_at === 'string',
   );
 
+  // Phase 4: E2EE key registry. Publish a bundle, fetch it as a peer, and
+  // confirm the one-time prekey is consumed exactly once.
+  const fakeKey = (label) => Buffer.from(label.padEnd(32, '.')).toString('base64');
+  const published = await rest('/api/v1/keys', {
+    method: 'POST',
+    token: bobToken,
+    body: {
+      identity_key: fakeKey('identity'),
+      signing_key: fakeKey('signing'),
+      signed_prekey: { key_id: 1, public_key: fakeKey('signed'), signature: fakeKey('sig') },
+      one_time_prekeys: [
+        { key_id: 10, public_key: fakeKey('otp-10') },
+        { key_id: 11, public_key: fakeKey('otp-11') },
+      ],
+    },
+  });
+  check(
+    'publishes E2EE keys',
+    published.status === 201 && published.json.one_time_prekeys === 2,
+    `stored=${published.json?.one_time_prekeys}`,
+  );
+
+  const bundle = await rest(`/api/v1/keys/${bob.json.user.id}`, { token: aliceToken });
+  check(
+    'fetches a prekey bundle and consumes one one-time prekey',
+    bundle.status === 200 &&
+      bundle.json.one_time_prekey?.key_id === 10 &&
+      bundle.json.remaining_one_time_prekeys === 1,
+    `spk=${bundle.json?.signed_prekey?.key_id}, otp=${bundle.json?.one_time_prekey?.key_id}`,
+  );
+
+  const secondBundle = await rest(`/api/v1/keys/${bob.json.user.id}`, { token: carolToken });
+  check(
+    'a second fetch never receives the same one-time prekey',
+    secondBundle.json.one_time_prekey?.key_id === 11,
+  );
+
+  // An E2EE envelope is relayed verbatim; a malformed one is rejected.
+  // Reconnect: the sockets above were closed to exercise the offline-presence
+  // path, and the envelope checks need a live sender.
+  const envelopeSocket = await openSocket(aliceToken);
+  const envelope = `e2ee:v1:${JSON.stringify({
+    v: 1,
+    ik: fakeKey('identity'),
+    ek: fakeKey('ephemeral'),
+    spk: 1,
+    i: 0,
+    ct: 'Y2lwaGVydGV4dA==',
+    n: 'MDEyMzQ1Njc4OWFi',
+    m: 'MDEyMzQ1Njc4OWFiY2RlZg==',
+  })}`;
+  envelopeSocket.send({
+    type: 'send',
+    conversation_id: conversationId,
+    client_msg_id: randomUUID(),
+    msg_type: 'text',
+    content: envelope,
+  });
+  const encryptedAck = await envelopeSocket.wait(
+    (frame) => frame.type === 'status' && frame.status === 'sent' && frame.seq > offlineAck.seq,
+  );
+  const stored = await rest(`/api/v1/conversations/${conversationId}/messages`, {
+    token: bobToken,
+  });
+  check(
+    'relays an E2EE envelope as opaque content',
+    stored.json.messages.some((message) => message.content === envelope),
+    `seq=${encryptedAck.seq}`,
+  );
+
+  envelopeSocket.send({
+    type: 'send',
+    conversation_id: conversationId,
+    client_msg_id: randomUUID(),
+    msg_type: 'text',
+    content: 'e2ee:v1:not-json',
+  });
+  const rejectedEnvelope = await envelopeSocket.wait(
+    (frame) => frame.type === 'error' && frame.code === 'validation_error',
+  );
+  check('rejects a malformed E2EE envelope', rejectedEnvelope.code === 'validation_error');
+  envelopeSocket.close();
+
   const failures = results.filter((result) => !result.ok);
   console.log(`\n${results.length - failures.length}/${results.length} checks passed`);
   if (failures.length > 0) process.exitCode = 1;

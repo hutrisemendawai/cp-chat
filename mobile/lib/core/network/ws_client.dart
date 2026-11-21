@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../config/app_config.dart';
+import '../crypto/e2ee_service.dart' show isEncryptedContent;
+import '../notifications/crash_reporter.dart';
 import '../database/chat_dao.dart';
 import '../models/models.dart';
 import '../network/api_client.dart';
@@ -27,6 +29,7 @@ class ChatSocket {
     this._tokenStore, {
     this.heartbeatInterval = const Duration(seconds: 25),
     this.sendTimeout = const Duration(seconds: 10),
+    this.decrypt,
   });
 
   final ChatDao _dao;
@@ -34,6 +37,13 @@ class ChatSocket {
   final TokenStore _tokenStore;
   final Duration heartbeatInterval;
   final Duration sendTimeout;
+
+  /// Decrypts an inbound E2EE body before it is persisted, so the local mirror
+  /// (and therefore the UI) only ever holds plaintext. Returning null leaves the
+  /// original content untouched, which is what a group or plaintext message
+  /// does.
+  final Future<String?> Function(String conversationId, String clientMsgId, String content)?
+      decrypt;
 
   final Random _random = Random();
 
@@ -127,11 +137,16 @@ class ChatSocket {
   }
 
   /// Adds a message to the outbox and sends it if the socket is up.
+  ///
+  /// [content] is stored for display; [wireContent] is what goes on the wire
+  /// and defaults to the same value. A retry always resends [wireContent], so an
+  /// encrypted body is never re-encrypted (which would advance the ratchet).
   Future<void> send({
     required String conversationId,
     required String senderId,
     required String clientMsgId,
     required String content,
+    String? wireContent,
     String type = 'text',
   }) async {
     await _dao.enqueueOutgoing(
@@ -140,9 +155,10 @@ class ChatSocket {
       senderId: senderId,
       type: type,
       content: content,
+      wireContent: wireContent,
       createdAt: DateTime.now().toUtc(),
     );
-    _writeSend(conversationId, clientMsgId, content, type);
+    _writeSend(conversationId, clientMsgId, wireContent ?? content, type);
   }
 
   /// Retries a failed or pending outbox entry with the same `client_msg_id`.
@@ -150,7 +166,7 @@ class ChatSocket {
     final pending = await _dao.pendingOutbox();
     final entry = pending.where((item) => item.clientMsgId == clientMsgId).firstOrNull;
     if (entry == null) return;
-    _writeSend(conversationId, clientMsgId, entry.content, entry.type);
+    _writeSend(conversationId, clientMsgId, entry.wireContent ?? entry.content, entry.type);
   }
 
   Future<void> discard(String clientMsgId) => _dao.deleteMessage(clientMsgId);
@@ -181,7 +197,12 @@ class ChatSocket {
   Future<void> flushOutbox() async {
     final pending = await _dao.pendingOutbox();
     for (final entry in pending) {
-      _writeSend(entry.conversationId, entry.clientMsgId, entry.content, entry.type);
+      _writeSend(
+        entry.conversationId,
+        entry.clientMsgId,
+        entry.wireContent ?? entry.content,
+        entry.type,
+      );
       await _dao.recordAttempt(entry.clientMsgId);
     }
   }
@@ -257,7 +278,7 @@ class ChatSocket {
 
   Future<void> _handleMessage(Map<String, dynamic> frame) async {
     try {
-      final message = Message.fromJson({
+      var message = Message.fromJson({
         'id': frame['message_id'],
         'conversation_id': frame['conversation_id'],
         'seq': frame['seq'],
@@ -275,10 +296,41 @@ class ChatSocket {
         await _syncConversation(message.conversationId, localMax);
       }
 
+      // Persist plaintext: decrypt an E2EE body before it reaches the mirror so
+      // every reader of the local row (bubbles, previews, search) sees text.
+      final plaintext = await _decryptForStorage(message);
+      if (plaintext != null) {
+        message = Message(
+          id: message.id,
+          conversationId: message.conversationId,
+          seq: message.seq,
+          senderId: message.senderId,
+          clientMsgId: message.clientMsgId,
+          type: message.type,
+          content: plaintext,
+          createdAt: message.createdAt,
+        );
+      }
+
       await _dao.upsertServerMessage(message);
       acknowledgeDelivered(message.conversationId, message.seq);
     } catch (error) {
       debugPrint('ChatSocket failed to persist message: $error');
+    }
+  }
+
+  /// Decrypts a body for storage. A failed decrypt keeps the ciphertext rather
+  /// than dropping the message, so it can be retried after keys are available.
+  Future<String?> _decryptForStorage(Message message) async {
+    final decryptor = decrypt;
+    if (decryptor == null || message.type != 'text') return null;
+    if (!isEncryptedContent(message.content)) return null;
+    try {
+      return await decryptor(message.conversationId, message.clientMsgId, message.content);
+    } catch (error, stack) {
+      debugPrint('ChatSocket could not decrypt message: $error');
+      CrashReporter.record(error, stack, reason: 'e2ee_decrypt_failed');
+      return null;
     }
   }
 
