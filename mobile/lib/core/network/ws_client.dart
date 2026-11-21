@@ -40,6 +40,14 @@ class ChatSocket {
   final Map<String, Timer> _sendTimers = {};
   final Set<String> _awaitingAck = {};
 
+  /// Live `presence` frames for users who share a conversation with us.
+  /// Broadcast so several chat headers can listen at once; the latest snapshot
+  /// is still fetched over REST when a chat opens.
+  final StreamController<Presence> _presenceController =
+      StreamController<Presence>.broadcast();
+
+  Stream<Presence> get presenceEvents => _presenceController.stream;
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Timer? _heartbeat;
@@ -233,6 +241,10 @@ class ChatSocket {
         unawaited(_handleStatus(decoded));
       case 'read_receipt':
         unawaited(_handleReadReceipt(decoded));
+      case 'read_state':
+        unawaited(_handleReadState(decoded));
+      case 'presence':
+        _handlePresence(decoded);
       case 'conversation_updated':
         unawaited(_handleConversationUpdated(decoded));
       case 'error':
@@ -328,6 +340,31 @@ class ChatSocket {
     }
   }
 
+  /// Another of this user's devices advanced the read cursor. Move the local
+  /// cursor forward so the unread badge clears without a manual sync.
+  Future<void> _handleReadState(Map<String, dynamic> frame) async {
+    final conversationId = frame['conversation_id'];
+    final seq = frame['seq'];
+    if (conversationId is! String || seq is! num) return;
+
+    await _dao.setReadCursor(conversationId, seq.toInt());
+    await _dao.clearUnread(conversationId);
+  }
+
+  void _handlePresence(Map<String, dynamic> frame) {
+    final userId = frame['user_id'];
+    final online = frame['online'];
+    if (userId is! String || online is! bool) return;
+
+    _presenceController.add(
+      Presence.fromJson({
+        'user_id': userId,
+        'online': online,
+        'last_seen_at': frame['last_seen_at'],
+      }),
+    );
+  }
+
   void _startHeartbeat() {
     _heartbeat?.cancel();
     _heartbeat = Timer.periodic(heartbeatInterval, (_) {
@@ -375,6 +412,7 @@ class ChatSocket {
     for (final timer in _sendTimers.values) {
       timer.cancel();
     }
+    await _presenceController.close();
     await _subscription?.cancel();
     await _channel?.sink.close();
     _channel = null;

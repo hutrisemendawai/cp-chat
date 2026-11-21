@@ -86,6 +86,11 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
         title: const Text('CP Chat'),
         actions: [
           IconButton(
+            tooltip: 'Search messages',
+            icon: const Icon(Icons.search),
+            onPressed: () => context.push('/search'),
+          ),
+          IconButton(
             tooltip: 'Sign out',
             icon: const Icon(Icons.logout),
             onPressed: () async {

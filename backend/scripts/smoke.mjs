@@ -335,8 +335,56 @@ async function main() {
   });
   check('media size limit is enforced', tooLarge.status === 413, `status=${tooLarge.status}`);
 
+  // Phase 3: message search, presence, multi-device routing.
+  const chatSearch = await rest(
+    `/api/v1/conversations/${conversationId}/search?q=${encodeURIComponent('Hello')}`,
+    { token: bobToken },
+  );
+  check(
+    'in-chat search finds a message',
+    chatSearch.status === 200 && chatSearch.json.messages.some((m) => m.content === 'Hello Bob!'),
+    `${chatSearch.json.messages.length} hits`,
+  );
+
+  const globalSearch = await rest(`/api/v1/search?q=${encodeURIComponent('burst')}`, {
+    token: bobToken,
+  });
+  check(
+    'global search only returns the caller messages',
+    globalSearch.status === 200 && globalSearch.json.messages.length >= 1,
+    `${globalSearch.json.messages.length} hits`,
+  );
+
+  const outsiderSearch = await rest(`/api/v1/search?q=${encodeURIComponent('burst')}`, {
+    token: (await rest('/api/v1/auth/register', {
+      method: 'POST',
+      body: { phone_or_email: `frank+${stamp}@example.com`, name: 'Frank', password: 'password123' },
+    })).json.access_token,
+  });
+  check(
+    'global search is scoped to the caller memberships',
+    outsiderSearch.json.messages.length === 0,
+  );
+
+  const presence = await rest(`/api/v1/presence/${alice.json.user.id}`, { token: bobToken });
+  check(
+    'presence endpoint reports online while the socket is open',
+    presence.status === 200 && presence.json.online === true,
+  );
+
+  // A second login of Bob on another device would receive a mirrored frame when
+  // Bob sends from elsewhere; the gateway tests cover that path directly.
+
   carolSocket.close();
   aliceSocket.close();
+
+  const offline = await new Promise((resolve) => setTimeout(resolve, 300)).then(() =>
+    rest(`/api/v1/presence/${alice.json.user.id}`, { token: bobToken }),
+  );
+  check(
+    'presence reports offline with a last-seen timestamp after disconnect',
+    offline.json.online === false && typeof offline.json.last_seen_at === 'string',
+  );
 
   const failures = results.filter((result) => !result.ok);
   console.log(`\n${results.length - failures.length}/${results.length} checks passed`);

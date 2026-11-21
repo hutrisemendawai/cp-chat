@@ -260,6 +260,43 @@ class ReadReceipt {
   final int memberCount;
 }
 
+/// Online state for a user, from `GET /api/v1/presence/{id}` or a live
+/// `presence` WebSocket frame.
+class Presence {
+  const Presence({
+    required this.userId,
+    required this.online,
+    this.lastSeenAt,
+  });
+
+  factory Presence.fromJson(Map<String, dynamic> json) {
+    final lastSeen = json['last_seen_at'];
+    return Presence(
+      userId: json['user_id'] as String,
+      online: json['online'] as bool? ?? false,
+      lastSeenAt: lastSeen is String ? DateTime.parse(lastSeen).toUtc() : null,
+    );
+  }
+
+  final String userId;
+  final bool online;
+  final DateTime? lastSeenAt;
+}
+
+/// A message search hit. Carries the conversation it belongs to so global
+/// results can be grouped and opened.
+class SearchHit {
+  const SearchHit({required this.message, required this.rank});
+
+  factory SearchHit.fromJson(Map<String, dynamic> json) => SearchHit(
+        message: Message.fromJson(json),
+        rank: (json['rank'] as num?)?.toDouble() ?? 0,
+      );
+
+  final Message message;
+  final double rank;
+}
+
 class ApiException implements Exception {
   ApiException(this.code, this.message, {this.statusCode});
 

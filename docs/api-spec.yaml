@@ -23,6 +23,8 @@ tags:
   - name: Messages
   - name: Devices
   - name: Media
+  - name: Presence
+  - name: Search
 
 paths:
   /api/v1/auth/register:
@@ -486,6 +488,76 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/presence/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Presence]
+      summary: Current online state and last-seen time for a user
+      description: >
+        Online state is a Redis key with a 45 s TTL refreshed by the gateway
+        heartbeat; `last_seen_at` is persisted when the user's last device
+        disconnects. Live changes after this call arrive as `presence` frames on
+        the WebSocket.
+      responses:
+        '200':
+          description: Presence snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Presence'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/search:
+    get:
+      tags: [Search]
+      summary: Full-text search across every conversation the caller belongs to
+      parameters:
+        - $ref: '#/components/parameters/SearchQuery'
+        - $ref: '#/components/parameters/SearchLimit'
+        - $ref: '#/components/parameters/SearchBeforeSeq'
+      responses:
+        '200':
+          description: Ranked search hits, best match first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResult'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/conversations/{id}/search:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Search]
+      summary: Full-text search inside one conversation
+      parameters:
+        - $ref: '#/components/parameters/SearchQuery'
+        - $ref: '#/components/parameters/SearchLimit'
+        - $ref: '#/components/parameters/SearchBeforeSeq'
+      responses:
+        '200':
+          description: Ranked search hits within the conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -501,6 +573,33 @@ components:
       schema:
         type: string
         format: uuid
+    SearchQuery:
+      name: q
+      in: query
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      description: >
+        Search text. Uses PostgreSQL `websearch_to_tsquery` semantics, so quoted
+        phrases, `or`, and a leading `-` for exclusion are supported.
+    SearchLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 30
+    SearchBeforeSeq:
+      name: before_seq
+      in: query
+      description: Return only messages with `seq` lower than this value
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
 
   responses:
     Unauthorized:
@@ -749,6 +848,43 @@ components:
           type: integer
           format: int64
           description: Highest seq in the conversation; repeat sync when it exceeds the last returned message
+
+    Presence:
+      type: object
+      required: [user_id, online]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        online:
+          type: boolean
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Last disconnection time; null if the user has never disconnected
+
+    SearchHit:
+      allOf:
+        - $ref: '#/components/schemas/Message'
+        - type: object
+          properties:
+            rank:
+              type: number
+              format: double
+              description: Relevance score from `ts_rank`; higher is a better match
+
+    SearchResult:
+      type: object
+      required: [messages, has_more]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchHit'
+          description: Ordered by rank descending, then seq descending
+        has_more:
+          type: boolean
 
 security:
   - bearerAuth: []

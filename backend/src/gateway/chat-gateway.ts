@@ -7,7 +7,7 @@ import type { Config } from '../config.js';
 import type { Logger } from '../lib/logger.js';
 import { ApiError } from '../lib/errors.js';
 import { isUuidV4 } from '../lib/ids.js';
-import { redisKeys, type Cache } from '../lib/redis.js';
+import { publishBroadcast, redisKeys, type Cache } from '../lib/redis.js';
 import { verifyAccessToken } from '../lib/tokens.js';
 import type { NotificationService } from '../lib/fcm.js';
 import type { AppContext } from '../http/context.js';
@@ -136,7 +136,12 @@ export class ChatGateway {
     });
 
     await this.registry.register(userId, deviceId);
-    await this.touchPresence(userId);
+    await this.ctx.presence.touch(userId);
+    // Only the first live device changes the peers' view from offline to
+    // online; a second login of the same user is not a state transition.
+    if ((await this.registry.liveDevices(userId)).length === 1) {
+      await this.broadcastPresence(userId, true, null);
+    }
   }
 
   private async onClose(ws: WebSocket, userId: string, deviceId: string): Promise<void> {
@@ -146,9 +151,34 @@ export class ChatGateway {
     if (set && set.size === 0) {
       this.sockets.delete(key);
       await this.registry.unregister(userId, deviceId);
-      // Presence stays until its TTL expires: the user may still be connected
-      // from another device, and a quick reconnect should not flap the status.
+      // Presence is per user, not per device: going offline is a transition
+      // only once the last device of the user has disconnected.
+      if ((await this.registry.liveDevices(userId)).length === 0) {
+        const lastSeen = await this.ctx.presence.markOffline(userId);
+        await this.broadcastPresence(userId, false, lastSeen);
+      }
     }
+  }
+
+  /**
+   * Tells every user who shares a conversation with `userId` that their online
+   * state changed. Goes through the all-nodes channel so peers connected to any
+   * gateway replica receive it.
+   */
+  private async broadcastPresence(
+    userId: string,
+    online: boolean,
+    lastSeenAt: Date | null,
+  ): Promise<void> {
+    const peers = await this.ctx.presence.sharedPeerIds(userId);
+    if (peers.length === 0) return;
+
+    await publishBroadcast(this.ctx.redis, peers, {
+      type: 'presence',
+      user_id: userId,
+      online,
+      last_seen_at: lastSeenAt ? lastSeenAt.toISOString() : null,
+    });
   }
 
   private async sweep(): Promise<void> {
@@ -164,18 +194,9 @@ export class ChatGateway {
         ws.ping();
         const [userId, deviceId] = key.split(':') as [string, string];
         await this.registry.refresh(userId, deviceId);
-        await this.touchPresence(userId);
+        await this.ctx.presence.touch(userId);
       }
     }
-  }
-
-  private async touchPresence(userId: string): Promise<void> {
-    await this.ctx.redis.set(
-      redisKeys.presenceKey(userId),
-      Date.now().toString(),
-      'EX',
-      this.config.PRESENCE_TTL_SECONDS,
-    );
   }
 
   private async onFrame(ws: WebSocket, raw: string): Promise<void> {
@@ -196,7 +217,7 @@ export class ChatGateway {
       switch (frame.type) {
         case 'ping':
           this.send(ws, { type: 'pong' });
-          await this.touchPresence(context.userId);
+          await this.ctx.presence.touch(context.userId);
           return;
         case 'send':
           await this.handleSend(ws, context, frame as ClientFrame & { type: 'send' });
@@ -277,9 +298,15 @@ export class ChatGateway {
       status: 'sent',
     });
 
-    // A duplicate retry is already persisted and fanned out; re-broadcasting
-    // would deliver it twice.
+    // A duplicate retry is already persisted and fanned out earlier, including
+    // to the sender's other devices; re-broadcasting would deliver it twice.
     if (duplicate) return;
+
+    // Multi-device: the sender's *other* devices receive the message too so
+    // their local history stays in sync without a REST round trip. The
+    // originating device already has the `sent` ack, so it must not get a
+    // duplicate `message` frame.
+    await this.deliverToOtherDevices(context.userId, context.deviceId, messageEvent);
 
     const members = await this.ctx.members.ids(conversationId);
     const conversation = await this.ctx.conversations.getRow(conversationId);
@@ -368,7 +395,7 @@ export class ChatGateway {
     // In a group the sender needs an aggregate ("read by N"), not one event per
     // member: broadcasting every reader's cursor would be O(members) noise.
     if (status === 'read' && conversation?.type === 'group' && readSeq !== null) {
-      await this.broadcastGroupRead(conversationId, context.userId, readSeq);
+      await this.broadcastGroupRead(conversationId, context, readSeq);
       return;
     }
 
@@ -387,12 +414,14 @@ export class ChatGateway {
       frame: statusEvent,
     });
 
-    // Other devices of the acking user keep their local read cursor in sync.
-    if (status === 'read') {
-      for (const deviceId of await this.registry.liveDevices(context.userId)) {
-        if (deviceId === context.deviceId) continue;
-        this.deliverToDevice(context.userId, deviceId, statusEvent);
-      }
+    // Other devices of the acking user keep their local read cursor in sync so
+    // a conversation read on one device clears its unread badge everywhere.
+    if (status === 'read' && readSeq !== null) {
+      await this.deliverToOtherDevices(context.userId, context.deviceId, {
+        type: 'read_state',
+        conversation_id: conversationId,
+        seq: readSeq,
+      });
     }
   }
 
@@ -402,7 +431,7 @@ export class ChatGateway {
    */
   private async broadcastGroupRead(
     conversationId: string,
-    readerId: string,
+    reader: SocketContext,
     readSeq: number,
   ): Promise<void> {
     const target = await this.ctx.messages.findBySeq(conversationId, readSeq);
@@ -419,7 +448,7 @@ export class ChatGateway {
     const frame = {
       type: 'read_receipt',
       conversation_id: conversationId,
-      reader_id: readerId,
+      reader_id: reader.userId,
       seq: readSeq,
       sender_id: target.sender_id,
       client_msg_id: target.client_msg_id,
@@ -434,15 +463,11 @@ export class ChatGateway {
     });
 
     // Every other device of the reader keeps its own read cursor in sync.
-    for (const deviceId of await this.registry.liveDevices(readerId)) {
-      this.deliverToDevice(readerId, deviceId, {
-        type: 'status',
-        conversation_id: conversationId,
-        client_msg_id: target.client_msg_id,
-        seq: readSeq,
-        status: 'read',
-      });
-    }
+    await this.deliverToOtherDevices(reader.userId, reader.deviceId, {
+      type: 'read_state',
+      conversation_id: conversationId,
+      seq: readSeq,
+    });
   }
 
   /**
@@ -469,11 +494,48 @@ export class ChatGateway {
     }
   }
 
+  /**
+   * Delivers a frame to every connected device of `userId` except the device
+   * that originated it. Remote devices are reached through their node's Redis
+   * channel, carrying an `excludeDevice` so a node never echoes the frame back
+   * to the originating socket.
+   */
+  private async deliverToOtherDevices(
+    userId: string,
+    excludeDeviceId: string,
+    frame: Record<string, unknown>,
+  ): Promise<void> {
+    for (const [key, set] of this.sockets) {
+      if (!key.startsWith(`${userId}:`)) continue;
+      if (key === `${userId}:${excludeDeviceId}`) continue;
+      for (const ws of set) this.send(ws, frame);
+    }
+
+    const payload = JSON.stringify({ userId, frame, excludeDevice: excludeDeviceId });
+    const devices = await this.registry.liveDevices(userId);
+    const nodes = new Set<string>();
+    for (const deviceId of devices) {
+      if (deviceId === excludeDeviceId) continue;
+      const node = await this.ctx.redis.get(redisKeys.connection(userId, deviceId));
+      if (node && node !== this.config.gatewayNodeId) nodes.add(node);
+    }
+
+    for (const node of nodes) {
+      await this.ctx.redis.publish(redisKeys.channelForNode(node), payload);
+    }
+  }
+
   private handleRoutedEvent(raw: string): void {
     try {
-      const parsed = JSON.parse(raw) as { userId: string; frame: Record<string, unknown> };
-      for (const ws of this.socketsFor(parsed.userId)) {
-        this.send(ws, parsed.frame);
+      const parsed = JSON.parse(raw) as {
+        userId: string;
+        frame: Record<string, unknown>;
+        excludeDevice?: string;
+      };
+      for (const [key, set] of this.sockets) {
+        if (!key.startsWith(`${parsed.userId}:`)) continue;
+        if (parsed.excludeDevice && key === `${parsed.userId}:${parsed.excludeDevice}`) continue;
+        for (const ws of set) this.send(ws, parsed.frame);
       }
     } catch (error) {
       this.logger.debug({ err: error }, 'dropped malformed routed event');
@@ -494,12 +556,6 @@ export class ChatGateway {
       }
     } catch (error) {
       this.logger.debug({ err: error }, 'dropped malformed broadcast event');
-    }
-  }
-
-  private deliverToDevice(userId: string, deviceId: string, frame: Record<string, unknown>): void {
-    for (const ws of this.sockets.get(`${userId}:${deviceId}`) ?? []) {
-      this.send(ws, frame);
     }
   }
 

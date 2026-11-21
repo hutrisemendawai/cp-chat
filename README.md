@@ -63,5 +63,5 @@ both as service containers and applies migrations first.
 - [x] **Phase 0** — monorepo, Docker stack, core schema, Flutter foundation, API/WS contracts, CI
 - [x] **Phase 1** — 1:1 chat MVP with offline sync and push notifications
 - [x] **Phase 2** — groups, read receipts, media sharing
-- [ ] **Phase 3** — presence, search, multi-device sync
+- [x] **Phase 3** — presence, message search, multi-device sync
 - [ ] **Phase 4** — scale, reliability, security hardening

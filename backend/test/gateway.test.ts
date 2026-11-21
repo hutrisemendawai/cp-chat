@@ -8,6 +8,7 @@ import { ChatGateway } from '../src/gateway/chat-gateway.js';
 import { NotificationService } from '../src/lib/fcm.js';
 import { createContext } from '../src/http/context.js';
 import { createLogger } from '../src/lib/logger.js';
+import { signAccessToken } from '../src/lib/tokens.js';
 import {
   TEST_CONFIG,
   createDirect,
@@ -94,7 +95,13 @@ function connect(user: TestUser, { waitForRegistry = true } = {}): Promise<TestS
               res(inbox.splice(existing, 1)[0]!);
               return;
             }
-            const timer = setTimeout(() => rej(new Error('timed out')), timeoutMs);
+            const timer = setTimeout(() => {
+              // Drop the waiter, otherwise a later matching frame would resolve
+              // a promise whose test already failed and be lost to the queue.
+              const index = waiters.findIndex((waiter) => waiter.resolve === res);
+              if (index >= 0) waiters.splice(index, 1);
+              rej(new Error('timed out'));
+            }, timeoutMs);
             waiters.push({ match, resolve: res, timer });
           }),
         close: () => ws.close(),
@@ -113,6 +120,18 @@ async function pair() {
   const bob = await registerUser(harness, 'Bob');
   const conversationId = await createDirect(harness, alice, bob);
   return { alice, bob, conversationId };
+}
+
+/**
+ * A second login of the same account: the socket's device comes from the JWT
+ * claim, so a distinct device needs a freshly signed token.
+ */
+function asDevice(user: TestUser, deviceId: string): TestUser {
+  return {
+    ...user,
+    deviceId,
+    accessToken: signAccessToken(user.id, deviceId, TEST_CONFIG),
+  };
 }
 
 describe('chat gateway', () => {
@@ -460,5 +479,119 @@ describe('chat gateway', () => {
     sender.close();
     bobSocket.close();
     carolSocket.close();
+  });
+
+  it('delivers a self-sent message to the sender other devices', async () => {
+    const { alice, bob, conversationId } = await pair();
+    const primary = await connect(alice);
+    // A second login of the same account on another device.
+    const secondary = await connect(asDevice(alice, 'alice-second-device'));
+    const recipient = await connect(bob);
+    const clientMsgId = randomUUID();
+
+    primary.send({
+      type: 'send',
+      conversation_id: conversationId,
+      client_msg_id: clientMsgId,
+      msg_type: 'text',
+      content: 'from my phone',
+    });
+
+    await primary.wait((frame) => frame.type === 'status' && frame.status === 'sent');
+    await recipient.wait((frame) => frame.type === 'message');
+
+    // The other device sees the message frame so its history stays in sync.
+    const mirrored = await secondary.wait(
+      (frame) => frame.type === 'message' && frame.client_msg_id === clientMsgId,
+    );
+    expect(mirrored).toMatchObject({ conversation_id: conversationId, sender_id: alice.id });
+    // But the originating device only ever gets its `sent` ack.
+    await expect(primary.wait((frame) => frame.type === 'message', 400)).rejects.toThrow();
+
+    primary.close();
+    secondary.close();
+    recipient.close();
+  });
+
+  it('syncs a read cursor to the reader other devices', async () => {
+    const { alice, bob, conversationId } = await pair();
+    const sender = await connect(alice);
+    const phone = await connect(bob);
+    const tablet = await connect(asDevice(bob, 'bob-tablet'));
+    const clientMsgId = randomUUID();
+
+    sender.send({
+      type: 'send',
+      conversation_id: conversationId,
+      client_msg_id: clientMsgId,
+      msg_type: 'text',
+      content: 'read on one device',
+    });
+    await sender.wait((frame) => frame.type === 'status' && frame.status === 'sent');
+    await phone.wait((frame) => frame.type === 'message');
+    await tablet.wait((frame) => frame.type === 'message');
+
+    phone.send({ type: 'ack', conversation_id: conversationId, seq: 1, status: 'read' });
+
+    const mirrored = await tablet.wait((frame) => frame.type === 'read_state');
+    expect(mirrored).toMatchObject({ conversation_id: conversationId, seq: 1 });
+
+    sender.close();
+    phone.close();
+    tablet.close();
+  });
+
+  it('broadcasts presence changes to peers who share a conversation', async () => {
+    const { alice, bob, conversationId } = await pair();
+    void conversationId;
+    const bobSocket = await connect(bob);
+
+    const aliceSocket = await connect(alice);
+    const online = await bobSocket.wait(
+      (frame) => frame.type === 'presence' && frame.user_id === alice.id,
+    );
+    expect(online.online).toBe(true);
+
+    aliceSocket.close();
+    const offline = await bobSocket.wait(
+      (frame) => frame.type === 'presence' && frame.user_id === alice.id && frame.online === false,
+    );
+    expect(typeof offline.last_seen_at).toBe('string');
+
+    bobSocket.close();
+  });
+
+  it('keeps a user online until their last device disconnects', async () => {
+    const { alice, bob } = await pair();
+    // Bob must already be listening before Alice comes online, because presence
+    // transitions are broadcast once and are not replayed to late subscribers.
+    const bobSocket = await connect(bob);
+
+    const phone = await connect(alice);
+    await bobSocket.wait(
+      (frame) => frame.type === 'presence' && frame.user_id === alice.id && frame.online === true,
+    );
+
+    // A second device joins: the user was already online, so no new broadcast.
+    const tablet = await connect(asDevice(alice, 'alice-tablet'));
+
+    phone.close();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Still online via the tablet: no offline broadcast, presence key remains.
+    expect(await harness.redis.get(`presence:${alice.id}`)).not.toBeNull();
+    await expect(
+      bobSocket.wait(
+        (frame) => frame.type === 'presence' && frame.user_id === alice.id && frame.online === false,
+        400,
+      ),
+    ).rejects.toThrow();
+
+    tablet.close();
+    const offline = await bobSocket.wait(
+      (frame) => frame.type === 'presence' && frame.user_id === alice.id && frame.online === false,
+    );
+    expect(offline.online).toBe(false);
+
+    bobSocket.close();
   });
 });

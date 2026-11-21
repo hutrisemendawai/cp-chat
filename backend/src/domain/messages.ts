@@ -188,6 +188,56 @@ export class MessageRepository {
     };
   }
 
+  /**
+   * Full-text search over messages the caller can see. `conversationId`
+   * narrows it to one thread (in-chat search); omit it for a global search
+   * across every conversation the caller belongs to.
+   *
+   * The generated `search_vector` column is indexed with GIN, and
+   * `websearch_to_tsquery` accepts the syntax users expect from search boxes
+   * (quoted phrases, OR, leading minus) without throwing on stray punctuation.
+   */
+  async search(input: {
+    userId: string;
+    query: string;
+    conversationId?: string;
+    limit: number;
+    beforeSeq?: number;
+  }): Promise<{ messages: (MessageRow & { rank: number })[]; hasMore: boolean }> {
+    const params: unknown[] = [input.userId, input.query];
+    const clauses: string[] = [];
+
+    if (input.conversationId) {
+      params.push(input.conversationId);
+      clauses.push(`m.conversation_id = $${params.length}`);
+    }
+    if (input.beforeSeq !== undefined) {
+      params.push(input.beforeSeq);
+      clauses.push(`m.seq < $${params.length}`);
+    }
+    params.push(input.limit + 1);
+
+    const { rows } = await this.db.query<RawMessageRow & { rank: number }>(
+      `SELECT ${COLUMNS.split(', ')
+        .map((column) => `m.${column.trim()}`)
+        .join(', ')}, ts_rank(m.search_vector, tsq)::float8 AS rank
+         FROM messages m
+         JOIN conversation_members cm
+           ON cm.conversation_id = m.conversation_id AND cm.user_id = $1
+         CROSS JOIN LATERAL websearch_to_tsquery('simple', $2) AS tsq
+        WHERE m.search_vector @@ tsq
+          ${clauses.map((clause) => `AND ${clause}`).join('\n          ')}
+        ORDER BY rank DESC, m.seq DESC
+        LIMIT $${params.length}`,
+      params,
+    );
+
+    return {
+      messages: rows.slice(0, input.limit).map((row) => ({ ...mapMessage(row), rank: row.rank })),
+      hasMore: rows.length > input.limit,
+    };
+  }
+
   async findBySeq(conversationId: string, seq: number): Promise<MessageRow | null> {
     const { rows } = await this.db.query<RawMessageRow>(
       `SELECT ${COLUMNS} FROM messages WHERE conversation_id = $1 AND seq = $2`,

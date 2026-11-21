@@ -31,7 +31,9 @@ versions.
 
 1. Client opens the socket with a valid access token.
 2. Gateway registers the connection: `conn:{user_id}:{device_id} -> node_id` in
-   Redis, plus presence key `presence:{user_id}` with a 45 s TTL.
+   Redis, plus presence key `presence:{user_id}` with a 45 s TTL. Multiple
+   devices of the same user get one `conn:` key each; routing therefore targets
+   every live device, not just one.
 3. Client flushes its local outbox (Phase 1) and calls the REST sync endpoint for
    each conversation where `server_seq > local_seq`.
 4. Client sends `ping` every 25 s; the gateway replies with `pong`. Two missed
@@ -79,6 +81,19 @@ A message is stored once. The gateway then fans out on write:
 
 Fan-out is best-effort per recipient: a member whose node is unreachable is
 still caught up by the `sync` endpoint on their next connect.
+
+### Multi-device
+
+A user may hold several sockets (one per logged-in device). The gateway keeps a
+`conn:{user_id}:{device_id}` key per device and routes to all of them:
+
+- A `send` from one device is echoed as a `message` frame to the sender's *other*
+  devices, so their history stays in sync without a REST call. The originating
+  device only receives the `sent` ack. A retried `client_msg_id` is idempotent.
+- A `read` ack from one device sends a [`read_state`](#read_state--cross-device-read-cursor)
+  frame to the sender's other devices.
+- Presence is per user, not per device: a user goes offline only once their last
+  device disconnects.
 
 ### `ack` — update a delivery/read cursor
 
@@ -192,18 +207,41 @@ The server replies with `{ "type": "pong" }`.
 4. Recipients render via `GET /api/v1/media/{object_key}`, which authorizes the
    caller and redirects to a short-lived presigned GET. The bucket is private.
 
+### `read_state` — cross-device read cursor
+
+```json
+{
+  "type": "read_state",
+  "conversation_id": "c1",
+  "seq": 42
+}
+```
+
+- Sent to the reader's other devices when one device acks `read` up to `seq`.
+- The receiving device advances its local read cursor and clears the unread
+  badge, so reading a chat on a phone also clears it on a tablet.
+- It carries no sender identity: it is only delivered to the same user.
+
 ### `presence` — online state change
 
 ```json
 {
   "type": "presence",
   "user_id": "u1",
-  "online": true,
+  "online": false,
   "last_seen_at": "2026-11-20T08:00:00Z"
 }
 ```
 
-Delivered to members of shared conversations (Phase 3).
+- Delivered to every user who shares at least one conversation with `user_id`.
+- `online: true` is broadcast when a user's *first* device connects;
+  `online: false` when their *last* device disconnects. A second device coming or
+  going does not change the state, so peers see no flapping.
+- `last_seen_at` is present on an offline transition and is the durable
+  `users.last_seen_at` value; it is `null` on the online transition.
+- Not replayed to late subscribers: a client opening a chat should fetch the
+  current snapshot from `GET /api/v1/presence/{id}` (see the REST spec) and then
+  apply subsequent frames.
 
 ## Delivery guarantees
 

@@ -10,6 +10,7 @@ import { DeviceRepository } from '../domain/devices.js';
 import { MediaRepository } from '../domain/media.js';
 import { MemberCache } from '../domain/member-cache.js';
 import { MessageRepository } from '../domain/messages.js';
+import { PresenceService } from '../domain/presence.js';
 import { RefreshTokenRepository } from '../domain/refresh-tokens.js';
 import { UserRepository } from '../domain/users.js';
 import { StorageService } from '../lib/storage.js';
@@ -25,6 +26,7 @@ export type AppContext = {
   devices: DeviceRepository;
   media: MediaRepository;
   members: MemberCache;
+  presence: PresenceService;
   storage: StorageService;
 };
 
@@ -41,6 +43,7 @@ export function createContext(config: Config, db: Db, redis: Cache): AppContext 
     devices: new DeviceRepository(db),
     media: new MediaRepository(db),
     members: new MemberCache(redis, conversations, config.MEMBERS_CACHE_TTL_SECONDS),
+    presence: new PresenceService(redis, db, config.PRESENCE_TTL_SECONDS),
     storage: new StorageService(config),
   };
 }

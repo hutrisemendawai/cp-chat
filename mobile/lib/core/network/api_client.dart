@@ -322,6 +322,51 @@ class ApiClient {
     return SyncResult.fromJson(_ok(response));
   }
 
+  /// Current online state for a user, used when a chat opens. Later changes
+  /// arrive as `presence` frames over the WebSocket.
+  Future<Presence> presence(String userId) async {
+    final response = await dio.get<dynamic>('/api/v1/presence/$userId');
+    return Presence.fromJson(_ok(response));
+  }
+
+  /// Full-text search inside a single conversation.
+  Future<MessagePage> searchConversation(
+    String conversationId,
+    String query, {
+    int limit = 30,
+    int? beforeSeq,
+  }) async {
+    final response = await dio.get<dynamic>(
+      '/api/v1/conversations/$conversationId/search',
+      queryParameters: {
+        'q': query,
+        'limit': limit,
+        'before_seq': ?beforeSeq,
+      },
+    );
+    return MessagePage.fromJson(_ok(response));
+  }
+
+  /// Full-text search across every conversation the caller belongs to.
+  Future<List<SearchHit>> search(
+    String query, {
+    int limit = 30,
+    int? beforeSeq,
+  }) async {
+    final response = await dio.get<dynamic>(
+      '/api/v1/search',
+      queryParameters: {
+        'q': query,
+        'limit': limit,
+        'before_seq': ?beforeSeq,
+      },
+    );
+    final body = _ok(response);
+    return (body['messages'] as List<dynamic>)
+        .map((item) => SearchHit.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
   /// Registers the Firebase Installation ID for push delivery.
   Future<void> registerFcmToken(String fid) async {
     final response = await dio.post<dynamic>(

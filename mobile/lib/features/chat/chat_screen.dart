@@ -9,7 +9,9 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/database/app_database.dart';
 import '../../core/providers.dart';
+import '../presence/presence_controller.dart';
 import 'chat_controller.dart';
+import 'chat_search_sheet.dart';
 import 'conversation_metadata.dart';
 import 'media_message.dart';
 
@@ -175,6 +177,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         'Chat';
     final isGroup = cached?.type == 'group' || metadata.value?.isGroup == true;
 
+    // For a 1:1 chat the other participant's live presence is the subtitle.
+    final peer = selfId == null ? null : metadata.value?.otherMember(selfId);
+    final presence = !isGroup && peer != null
+        ? ref.watch(presenceProvider(peer.user.id))
+        : null;
+    final presenceLabel = !isGroup ? formatPresence(presence) : null;
+
     // Sender names make a group thread readable; direct chats already imply it.
     final senderNames = <String, String>{
       if (metadata.value != null)
@@ -188,21 +197,47 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Row(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            if (isGroup)
-              Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: MediaAvatar(
-                  objectKey: cached?.avatarUrl,
-                  radius: 16,
-                  fallback: Icon(isGroup ? Icons.groups : Icons.person),
+            Row(
+              children: [
+                if (isGroup)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: MediaAvatar(
+                      objectKey: cached?.avatarUrl,
+                      radius: 16,
+                      fallback: Icon(isGroup ? Icons.groups : Icons.person),
+                    ),
+                  ),
+                Flexible(
+                  child: Text(title, overflow: TextOverflow.ellipsis),
+                ),
+              ],
+            ),
+            if (presenceLabel != null)
+              Text(
+                presenceLabel,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: presence?.online == true
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.onSurfaceVariant,
                 ),
               ),
-            Flexible(child: Text(title, overflow: TextOverflow.ellipsis)),
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Search in chat',
+            icon: const Icon(Icons.search),
+            onPressed: () => showModalBottomSheet<void>(
+              context: context,
+              isScrollControlled: true,
+              builder: (_) => ChatSearchSheet(conversationId: widget.conversationId),
+            ),
+          ),
           if (isGroup)
             IconButton(
               tooltip: 'Group info',

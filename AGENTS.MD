@@ -401,14 +401,29 @@ Follow these phases sequentially. **By the end of Phase 1, you will have a worki
 **Goal:** Polish user experience and support seamless synchronization across multiple devices.
 
 #### Backend Tasks
-- [ ] **Presence Service:** Implement WebSocket heartbeat ping every 20–30s refreshing a Redis key `presence:{user_id}` with a 45s TTL; persist `last_seen_at` to DB on expiry/disconnect.
-- [ ] **Message Search:** Add PostgreSQL full-text search (`tsvector` + GIN index) or integrate Meilisearch/Elasticsearch for fast conversation history search.
-- [ ] **Multi-Device Support:** Update Redis routing map from `user_id -> single_node` to `user_id -> Set<(device_id, gateway_node)>` so messages and read cursors sync across all logged-in devices simultaneously.
+- [x] **Presence Service:** Implement WebSocket heartbeat ping every 20–30s refreshing a Redis key `presence:{user_id}` with a 45s TTL; persist `last_seen_at` to DB on expiry/disconnect.
+- [x] **Message Search:** Add PostgreSQL full-text search (`tsvector` + GIN index) or integrate Meilisearch/Elasticsearch for fast conversation history search.
+- [x] **Multi-Device Support:** Update Redis routing map from `user_id -> single_node` to `user_id -> Set<(device_id, gateway_node)>` so messages and read cursors sync across all logged-in devices simultaneously.
 
 #### Flutter Android Tasks
-- [ ] Display live "Online" badge and formatted "Last seen..." subtitle in chat headers.
-- [ ] Add in-chat and global search bars.
-- [ ] Handle self-sent message events arriving over WebSocket (sent from another device) and sync `last_read_seq` across devices to clear unread badges automatically.
+- [x] Display live "Online" badge and formatted "Last seen..." subtitle in chat headers.
+- [x] Add in-chat and global search bars.
+- [x] Handle self-sent message events arriving over WebSocket (sent from another device) and sync `last_read_seq` across devices to clear unread badges automatically.
+
+> **Implementation notes:** presence is a per-user Redis key
+> (`presence:{id}`, 45 s TTL) refreshed by the gateway heartbeat and by every
+> client `ping`; `users.last_seen_at` is written when the *last* device
+> disconnects. Online/offline transitions are broadcast as `presence` frames to
+> everyone who shares a conversation, and only on a real state change so a
+> second device logging in does not flap the badge. Search is a generated
+> `messages.search_vector` (`to_tsvector('simple', content)`) with a GIN index;
+> `GET /api/v1/search` and `GET /api/v1/conversations/{id}/search` use
+> `websearch_to_tsquery` and always join through `conversation_members` so a
+> caller only ever matches messages they can see. The gateway already tracked
+> `conn:{user}:{device}` per device; Phase 3 makes delivery use all of them —
+> a `send` mirrors a `message` frame to the sender's other devices, and a `read`
+> ack emits a `read_state` frame so every device advances its cursor and clears
+> its unread badge.
 
 ---
 
