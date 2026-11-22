@@ -4,7 +4,7 @@
 
   - Cleartext HTTP is disabled everywhere. The client defaults to
     `http://10.0.2.2` only for emulator development, which is a debug override
-    applied through `--dart-define`, not a release capability.
+    applied through a dart-define, not a release capability.
   - Certificate pinning is intentionally NOT hard-coded here. Pinning to a leaf
     certificate makes key rotation an outage; the recommended production setup
     is a `<pin-set>` of the CA or SPKI hashes for the API host, added once the

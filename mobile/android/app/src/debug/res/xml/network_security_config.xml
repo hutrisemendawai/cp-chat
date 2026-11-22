@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only override of the release policy in src/main.
+
+  Debug builds talk to a local backend over plain HTTP/WS (10.0.2.2 for the
+  emulator, or a LAN host supplied through a dart-define), so cleartext has to
+  be permitted here. An explicit networkSecurityConfig makes Android ignore
+  android:usesCleartextTraffic, so this file is what actually allows it.
+
+  Build-type source sets override src/main during resource merging, so release
+  builds keep the strict policy.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

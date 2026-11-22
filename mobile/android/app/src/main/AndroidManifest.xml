@@ -10,7 +10,7 @@
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules">
         <!-- Release builds reject cleartext HTTP; debug/emulator traffic is
-             configured through --dart-define, not the manifest. Backups are
+             configured through a dart-define, not the manifest. Backups are
              disabled so E2EE identity/prekeys cannot be extracted from a
              device backup. -->
         <activity
