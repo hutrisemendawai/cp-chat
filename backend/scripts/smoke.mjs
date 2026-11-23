@@ -6,7 +6,7 @@
  */
 import { randomUUID } from 'node:crypto';
 
-const REST = process.argv[2] ?? process.env.REST_BASE_URL ?? 'http://localhost:8088';
+const REST = process.argv[2] ?? process.env.REST_BASE_URL ?? 'http://localhost:8080';
 const WS = process.argv[3] ?? process.env.WS_BASE_URL ?? 'ws://localhost:8081';
 
 const stamp = Date.now();
@@ -21,7 +21,7 @@ async function rest(path, { method = 'GET', body, token } = {}) {
   const response = await fetch(`${REST}${path}`, {
     method,
     headers: {
-      'content-type': 'application/json',
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -34,6 +34,53 @@ async function rest(path, { method = 'GET', body, token } = {}) {
     json = text;
   }
   return { status: response.status, json };
+}
+
+/** Raw-body variant: uploads binary bytes and returns them back unparsed. */
+async function upload(path, { bytes, contentType, filename, token } = {}) {
+  const response = await fetch(`${REST}${path}`, {
+    method: 'POST',
+    headers: {
+      'content-type': contentType,
+      ...(filename ? { 'x-filename': filename } : {}),
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: bytes,
+  });
+  const text = await response.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = text;
+  }
+  return { status: response.status, json };
+}
+
+/** Fetches a media object and returns the raw bytes plus headers. */
+async function download(path, { token, queryToken } = {}) {
+  const url = queryToken
+    ? `${REST}${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(queryToken)}`
+    : `${REST}${path}`;
+  const response = await fetch(url, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return { status: response.status, buffer, headers: response.headers };
+}
+
+/**
+ * Optional shared secret for `/logs` and `/api/v1/logs*`. When the deployment
+ * sets `LOG_VIEWER_TOKEN`, the viewer is closed and this is required.
+ */
+const LOG_TOKEN = process.env.LOG_VIEWER_TOKEN ?? '';
+const withLogToken = (path) =>
+  LOG_TOKEN ? `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(LOG_TOKEN)}` : path;
+
+/** Fetches a non-JSON endpoint (the HTML log dashboard). */
+async function fetchText(path) {
+  const response = await fetch(`${REST}${path}`);
+  return { status: response.status, text: await response.text() };
 }
 
 function openSocket(token) {
@@ -468,6 +515,202 @@ async function main() {
   );
   check('rejects a malformed E2EE envelope', rejectedEnvelope.code === 'validation_error');
   envelopeSocket.close();
+
+  // ---- Phase 6: profiles, friends, proxied media, and the log timeline ----
+  const dave = await rest('/api/v1/auth/register', {
+    method: 'POST',
+    body: { phone_or_email: `dave+${stamp}@example.com`, name: 'Dave Smoke', password: 'password123' },
+  });
+  const daveToken = dave.json.access_token;
+  const daveId = dave.json.user.id;
+
+  // Profile: nickname, bio, and each Discord-style presence preference.
+  const profile = await rest('/api/v1/users/me', {
+    method: 'PATCH',
+    token: daveToken,
+    body: { nickname: 'dave', bio: 'Smoke-testing the profile.', custom_status: 'verifying' },
+  });
+  check(
+    'profile update stores nickname, bio and custom status',
+    profile.status === 200 &&
+      profile.json.nickname === 'dave' &&
+      profile.json.bio === 'Smoke-testing the profile.' &&
+      profile.json.custom_status === 'verifying',
+    `nickname=${profile.json?.nickname}`,
+  );
+
+  const statusResults = [];
+  for (const wanted of ['idle', 'dnd', 'invisible']) {
+    const response = await rest('/api/v1/users/me', {
+      method: 'PATCH',
+      token: daveToken,
+      body: { status: wanted },
+    });
+    statusResults.push({ wanted, ok: response.status === 200 && response.json.status === wanted });
+    if (wanted === 'invisible') {
+      // `invisible` must never leak to a peer: the effective view is offline.
+      const asPeer = await rest(`/api/v1/users/${daveId}`, { token: aliceToken });
+      check(
+        'invisible status is masked as offline for peers',
+        asPeer.json.effective_status === 'offline' && asPeer.json.online === false,
+        `effective=${asPeer.json?.effective_status}`,
+      );
+    }
+  }
+  check(
+    'status accepts idle, dnd and invisible',
+    statusResults.every((result) => result.ok),
+    statusResults.filter((r) => !r.ok).map((r) => r.wanted).join(',') || 'idle,dnd,invisible',
+  );
+
+  // Directory search over name and email, excluding the caller.
+  const byName = await rest(`/api/v1/users/search?q=${encodeURIComponent('Dave Smoke')}`, {
+    token: aliceToken,
+  });
+  const byEmail = await rest(`/api/v1/users/search?q=${encodeURIComponent('dave+')}`, {
+    token: aliceToken,
+  });
+  check(
+    'user search finds a user by name',
+    byName.status === 200 && byName.json.users.some((user) => user.id === daveId),
+    `${byName.json.users?.length ?? 0} hits`,
+  );
+  check(
+    'user search finds a user by email',
+    byEmail.status === 200 && byEmail.json.users.some((user) => user.id === daveId),
+    `${byEmail.json.users?.length ?? 0} hits`,
+  );
+  const selfSearch = await rest(`/api/v1/users/search?q=${encodeURIComponent('Alice')}`, {
+    token: aliceToken,
+  });
+  check(
+    'user search never returns the caller',
+    selfSearch.json.users.every((user) => user.id !== alice.json.user.id),
+  );
+
+  // Friends: add by identifier, list, then remove.
+  const addedFriend = await rest('/api/v1/friends', {
+    method: 'POST',
+    token: aliceToken,
+    body: { identifier: `dave+${stamp}@example.com` },
+  });
+  check(
+    'adds a friend by email',
+    addedFriend.status === 201 && addedFriend.json.id === daveId,
+    `status=${addedFriend.status}`,
+  );
+  const friendList = await rest('/api/v1/friends', { token: aliceToken });
+  check(
+    'lists the friend with a profile projection',
+    friendList.status === 200 &&
+      friendList.json.friends.some(
+        (friend) => friend.id === daveId && friend.nickname === 'dave' && friend.is_friend === true,
+      ),
+    `${friendList.json.friends?.length ?? 0} friends`,
+  );
+  const removedFriend = await rest(`/api/v1/friends/${daveId}`, {
+    method: 'DELETE',
+    token: aliceToken,
+  });
+  const afterRemoval = await rest('/api/v1/friends', { token: aliceToken });
+  check(
+    'removes the friend',
+    removedFriend.status === 204 &&
+      !afterRemoval.json.friends.some((friend) => friend.id === daveId),
+    `status=${removedFriend.status}`,
+  );
+
+  // Proxied media: upload bytes through the API, read them back, and confirm a
+  // stranger is refused while a profile avatar is readable app-wide.
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]);
+  const uploaded = await upload('/api/v1/media/upload', {
+    bytes: pngBytes,
+    contentType: 'image/png',
+    filename: 'avatar.png',
+    token: daveToken,
+  });
+  const mediaKey = uploaded.json?.object_key;
+  check(
+    'proxied upload stores media and returns a key',
+    uploaded.status === 201 &&
+      typeof mediaKey === 'string' &&
+      uploaded.json.content_type === 'image/png' &&
+      uploaded.json.size_bytes === pngBytes.length,
+    `status=${uploaded.status}`,
+  );
+
+  const streamed = await download(`/api/v1/media/${mediaKey}`, { token: daveToken });
+  check(
+    'streams the uploaded bytes back without a redirect',
+    streamed.status === 200 &&
+      streamed.buffer.equals(pngBytes) &&
+      streamed.headers.get('location') === null &&
+      streamed.headers.get('content-type') === 'image/png' &&
+      streamed.headers.get('cache-control') === 'private, max-age=300',
+    `status=${streamed.status}, ${streamed.buffer.length}B`,
+  );
+
+  const strangerMedia = await download(`/api/v1/media/${mediaKey}`, { token: bobToken });
+  check(
+    'a stranger cannot read a non-avatar object',
+    strangerMedia.status === 403,
+    `status=${strangerMedia.status}`,
+  );
+
+  const setAvatar = await rest('/api/v1/users/me', {
+    method: 'PATCH',
+    token: daveToken,
+    body: { avatar_url: mediaKey },
+  });
+  // Carol shares no conversation or friendship with Dave, so this isolates the
+  // avatar rule rather than the conversation-partner rule.
+  const avatarAsStranger = await download(`/api/v1/media/${mediaKey}`, { token: carolToken });
+  check(
+    'a non-contact can read a profile avatar',
+    setAvatar.status === 200 && avatarAsStranger.status === 200,
+    `status=${avatarAsStranger.status}`,
+  );
+
+  const queryTokenMedia = await download(`/api/v1/media/${mediaKey}`, {
+    queryToken: carolToken,
+  });
+  check(
+    'media download accepts a query token for image widgets',
+    queryTokenMedia.status === 200 && queryTokenMedia.buffer.equals(pngBytes),
+    `status=${queryTokenMedia.status}`,
+  );
+
+  // Logs: a mobile diagnostic lands in the shared buffer and is queryable.
+  const logTag = `smoke-${stamp}`;
+  const pushedLog = await rest('/api/v1/logs/client', {
+    method: 'POST',
+    token: daveToken,
+    body: { level: 'warn', tag: 'smoke', message: `phase6 ${logTag}`, meta: { run: logTag } },
+  });
+  check('accepts a mobile diagnostic log entry', pushedLog.status === 202, `status=${pushedLog.status}`);
+
+  const logQuery = await rest(withLogToken(`/api/v1/logs?q=${encodeURIComponent(logTag)}&limit=50`));
+  check(
+    'log API returns the ingested entry',
+    logQuery.status === 200 &&
+      Array.isArray(logQuery.json.logs) &&
+      logQuery.json.logs.some((entry) => entry.message === `phase6 ${logTag}`),
+    `${logQuery.json.logs?.length ?? 0} entries`,
+  );
+  check(
+    'log API reports the one-hour retention window',
+    logQuery.json.retention_seconds === 3600,
+    `retention=${logQuery.json.retention_seconds}s`,
+  );
+
+  const dashboard = await fetchText(withLogToken('/logs'));
+  check(
+    'live log dashboard renders over HTTP',
+    dashboard.status === 200 &&
+      dashboard.text.includes('CP Chat — Live Logs') &&
+      dashboard.text.includes('/api/v1/logs/stream'),
+    `status=${dashboard.status}`,
+  );
 
   const failures = results.filter((result) => !result.ok);
   console.log(`\n${results.length - failures.length}/${results.length} checks passed`);

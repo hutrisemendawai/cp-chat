@@ -1,8 +1,9 @@
 # CP Chat — Flutter Android Client
 
-Flutter Android app for CP Chat. Phase 0 ships the foundation: Riverpod state
-management, a Drift/SQLite local store, secure token storage, a REST client, a
-reconnecting WebSocket client, and FCM bootstrap.
+Flutter Android app for CP Chat: 1:1 and group messaging with Riverpod state
+management, a Drift/SQLite local store, secure token storage, a reconnecting
+WebSocket client, E2EE for direct chats, user profiles, a people directory, and
+friends.
 
 ## Prerequisites
 
@@ -19,8 +20,8 @@ flutter run -d android
 ```
 
 The app defaults to the backend on the host machine via `10.0.2.2`
-(`http://10.0.2.2:8080` REST, `ws://10.0.2.2:8081` WebSocket). Override for a
-physical device or a remote backend:
+(`http://10.0.2.2:8080` REST, `ws://10.0.2.2:8081` WebSocket). Both endpoints are
+compile-time overrides:
 
 ```bash
 flutter run -d android \
@@ -35,8 +36,50 @@ adb reverse tcp:8080 tcp:8080
 adb reverse tcp:8081 tcp:8081
 ```
 
-Cleartext HTTP is enabled only in the debug manifest. Release builds require
-HTTPS/WSS.
+## Physical device on a LAN
+
+A physical phone needs the host's LAN IP, not `localhost`. Two rules apply:
+
+1. **Only the API and gateway ports matter.** Media uploads (`POST
+   /api/v1/media/upload`) and downloads (`GET /api/v1/media/*`) are proxied
+   through the API, so MinIO's port 9000 does not have to be exposed.
+2. **LAN builds must be debug builds.** The release network policy
+   (`android/app/src/main/res/xml/network_security_config.xml`) blocks cleartext
+   HTTP; the debug source set overrides it to permit plain HTTP/WS.
+
+Find the host IP (`hostname -I` or `ip addr`), make sure ports 8080/8081 are
+reachable from the phone on the same Wi-Fi, then build an installable APK:
+
+```bash
+# from the repo root
+make mobile-apk \
+  API_BASE_URL=http://192.168.1.20:8080 \
+  WS_BASE_URL=ws://192.168.1.20:8081
+
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
+```
+
+`make mobile-apk` runs `flutter build apk --debug` with the two `--dart-define`
+values. Pass `MODE=release` only when the endpoint is HTTPS/WSS. The equivalent
+raw command is:
+
+```bash
+flutter build apk --debug \
+  --dart-define=API_BASE_URL=http://192.168.1.20:8080 \
+  --dart-define=WS_BASE_URL=ws://192.168.1.20:8081
+```
+
+If presigned URLs are needed (instead of streamed downloads), also set
+`S3_PUBLIC_ENDPOINT=http://<host-ip>:9000` on the backend so the signature
+matches a host the phone can reach.
+
+## Live logs
+
+Every device can forward diagnostics to the shared backend buffer, and the
+whole stack's log timeline is visible at `http://<host>:<api-port>/logs` (for
+example `http://192.168.1.20:8080/logs`). The dashboard shows `mobile` entries
+alongside `rest` and `gateway` ones with a 1-hour retention. See
+[../docs/logging.md](../docs/logging.md).
 
 ## Firebase (FCM)
 
@@ -57,13 +100,26 @@ lib/
 ├── main.dart
 ├── core/
 │   ├── config/         # API/WS endpoints and dart-define overrides
+│   ├── crypto/         # E2EE key material, X3DH, and the symmetric ratchet
 │   ├── database/       # Drift tables: conversations, messages, outbox
+│   ├── logging/        # AppLogger forwarding diagnostics to the backend
+│   ├── media/          # Presign/upload/download for images and files
+│   ├── models/         # API DTOs and presence/profile parsing
 │   ├── network/        # Dio REST client and reconnecting WebSocket
 │   ├── notifications/  # FCM initialization and streams
 │   ├── storage/        # Secure JWT storage
-│   └── providers.dart  # Riverpod providers for the core services
-└── features/
-    └── home/           # Placeholder shell until auth lands in Phase 1
+│   └── widgets/        # Shared presence badges, avatars, status dots
+├── features/
+│   ├── auth/           # Login, register, session restore
+│   ├── chat/           # Message stream, outbox retry, media bubbles
+│   ├── conversations/  # Chat list, unread badges
+│   ├── groups/         # Create group, group info and member management
+│   ├── home/           # Bottom-navigation shell (Chats / People / Profile)
+│   ├── people/         # People directory and user profile viewer
+│   ├── presence/       # Discord-style status picker
+│   ├── profile/        # Own profile editing
+│   └── search/         # In-chat and global message search
+└── shared/widgets/
 ```
 
 ## Checks

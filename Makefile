@@ -37,6 +37,23 @@ scylla-cqlsh: ## Open a cqlsh shell on the local ScyllaDB node
 up-all: .env migrate-up ## Start the full stack: infrastructure + API + chat gateway
 	$(COMPOSE) up -d --build postgres redis minio minio-init api gateway
 
+.PHONY: backend-rebuild
+backend-rebuild: ## Rebuild the api + gateway images from the current source
+	$(COMPOSE) build api gateway
+
+.PHONY: backend-restart
+backend-restart: ## Rebuild and restart the api + gateway containers
+	$(COMPOSE) build api gateway
+	$(COMPOSE) up -d api gateway
+
+.PHONY: api-logs
+api-logs: ## Tail only the api container logs
+	$(COMPOSE) logs -f --tail=100 api
+
+.PHONY: gateway-logs
+gateway-logs: ## Tail only the gateway container logs
+	$(COMPOSE) logs -f --tail=100 gateway
+
 .PHONY: backend-install
 backend-install: ## Install backend dependencies
 	cd backend && npm ci --include=dev
@@ -74,8 +91,23 @@ ps: ## Show infrastructure container status
 	$(COMPOSE) ps
 
 .PHONY: migrate-up
-migrate-up: ## Apply all pending migrations
+migrate-up: ## Apply all pending migrations (000001 through 000007)
 	$(MIGRATE) up
+
+.PHONY: migrations-check
+migrations-check: ## Verify every migration has a matching up/down pair
+	@cd backend/migrations && set -e; \
+	fail=0; \
+	for up in [0-9]*.up.sql; do \
+		base=$${up%.up.sql}; \
+		if [ ! -f "$$base.down.sql" ]; then echo "missing $$base.down.sql"; fail=1; fi; \
+	done; \
+	for down in [0-9]*.down.sql; do \
+		base=$${down%.down.sql}; \
+		if [ ! -f "$$base.up.sql" ]; then echo "missing $$base.up.sql"; fail=1; fi; \
+	done; \
+	if [ "$$fail" -ne 0 ]; then exit 1; fi; \
+	echo "migration pairs OK: $$(ls [0-9]*.up.sql | wc -l) versions"
 
 .PHONY: migrate-down
 migrate-down: ## Roll back one migration
@@ -122,3 +154,15 @@ mobile-test: ## Run Flutter tests
 .PHONY: mobile-run
 mobile-run: ## Run the Android app on a connected device/emulator
 	cd mobile && flutter run -d android
+
+.PHONY: mobile-apk
+mobile-apk: ## Build an installable APK for a LAN device (MODE=debug|release, default debug)
+	@test -n "$(API_BASE_URL)" || (echo "usage: make mobile-apk API_BASE_URL=http://<host-ip>:8080 WS_BASE_URL=ws://<host-ip>:8081 [MODE=release]" && exit 1)
+	@test -n "$(WS_BASE_URL)" || (echo "usage: make mobile-apk API_BASE_URL=http://<host-ip>:8080 WS_BASE_URL=ws://<host-ip>:8081 [MODE=release]" && exit 1)
+	cd mobile && flutter build apk --$(or $(MODE),debug) \
+		--dart-define=API_BASE_URL=$(API_BASE_URL) \
+		--dart-define=WS_BASE_URL=$(WS_BASE_URL)
+
+.PHONY: verify
+verify: migrations-check backend-typecheck backend-build backend-test mobile-analyze mobile-test ## Run the full Phase 6 verification suite
+	@echo "verification suite passed"

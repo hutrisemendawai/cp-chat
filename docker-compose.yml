@@ -220,6 +220,10 @@ services:
       LOG_BUFFER_ENABLED: ${LOG_BUFFER_ENABLED:-true}
       LOG_RETENTION_SECONDS: ${LOG_RETENTION_SECONDS:-3600}
       LOG_MAX_ENTRIES: ${LOG_MAX_ENTRIES:-5000}
+      LOG_VIEWER_TOKEN: ${LOG_VIEWER_TOKEN:-}
+      # Passed to both services so the media/log configuration is identical
+      # across the stack; the gateway itself serves no media routes.
+      MEDIA_PROXY_DOWNLOAD: ${MEDIA_PROXY_DOWNLOAD:-true}
       # Phase 4 realtime transport, async ingest, and graceful drain budget.
       BROKER: ${BROKER:-redis}
       KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
