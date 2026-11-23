@@ -56,6 +56,20 @@ class E2eeManager {
 
   bool get isReady => _keys != null;
 
+  /// Clears in-memory session state on logout.
+  ///
+  /// Key material and persisted sessions stay in secure storage: they are
+  /// per-device and discarding them would make existing chats unreadable. What
+  /// must not survive is state belonging to the signed-out account — the
+  /// decrypted plaintext cache and the peer map — so a different user signing
+  /// in on this device cannot read or target the previous user's conversations.
+  void reset() {
+    _plaintext.clear();
+    _peerIds.clear();
+    _bootstrapped = false;
+    _keys = null;
+  }
+
   /// Generates keys on first run or restores them from secure storage, then
   /// ensures the server has a publishable bundle.
   Future<void> bootstrap() async {

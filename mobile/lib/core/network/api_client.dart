@@ -85,6 +85,52 @@ class ApiClient {
 
   Future<bool>? _inFlightRefresh;
 
+  /// Returns an access token that is valid for at least [leeway], refreshing it
+  /// first when it is missing or about to expire.
+  ///
+  /// The WebSocket handshake is a plain HTTP upgrade, so an expired token there
+  /// means a failed connection rather than a retryable 401. Proactively
+  /// refreshing keeps reconnects from failing on a stale token, and the
+  /// single-flight refresh means a concurrent REST call shares the rotation.
+  Future<String?> ensureFreshAccessToken({
+    Duration leeway = const Duration(seconds: 30),
+  }) async {
+    final token = await _tokenStore.readAccessToken();
+    if (token == null) {
+      return await refreshAccessToken() ? _tokenStore.readAccessToken() : null;
+    }
+    if (_isExpired(token, leeway)) {
+      // A failed proactive refresh falls back to the current token; the server
+      // is still authoritative and may accept a token we think is stale.
+      if (await refreshAccessToken()) {
+        return _tokenStore.readAccessToken();
+      }
+    }
+    return token;
+  }
+
+  /// Forces one refresh-token rotation, sharing an in-flight rotation.
+  Future<bool> refreshAccessToken() => _refreshOnce();
+
+  /// Decodes a JWT's `exp` claim. A malformed or opaque token is treated as
+  /// non-expiring so it is still tried rather than discarded.
+  bool _isExpired(String token, Duration leeway) {
+    try {
+      final parts = token.split('.');
+      if (parts.length != 3) return false;
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      );
+      if (payload is! Map<String, dynamic>) return false;
+      final exp = payload['exp'];
+      if (exp is! num) return false;
+      final expiry = DateTime.fromMillisecondsSinceEpoch(exp.toInt() * 1000, isUtc: true);
+      return DateTime.now().toUtc().add(leeway).isAfter(expiry);
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Authenticates and persists the session.
   Future<AuthSession> register({
     required String phoneOrEmail,
@@ -244,60 +290,45 @@ class ApiClient {
     }
   }
 
-  /// Requests a presigned upload slot for a media object.
-  Future<MediaUpload> presignUpload({
-    required String filename,
-    required String contentType,
-    required int sizeBytes,
-  }) async {
-    final response = await dio.post<dynamic>(
-      '/api/v1/media/presign',
-      data: {
-        'filename': filename,
-        'content_type': contentType,
-        'size_bytes': sizeBytes,
-      },
-    );
-    return MediaUpload.fromJson(_ok(response, expected: 201));
-  }
-
-  /// Uploads bytes straight to object storage using the presigned PUT. The
-  /// `Content-Type` must match what was declared when presigning or the
-  /// signature is rejected.
-  Future<void> uploadToPresignedUrl({
-    required String uploadUrl,
+  /// Uploads media through the API instead of directly to object storage.
+  ///
+  /// The phone only has to reach [AppConfig.apiBaseUrl]; the API writes the
+  /// bytes to storage server-side. This is what makes uploads work on a
+  /// physical device that cannot reach the MinIO host directly.
+  Future<MediaUpload> uploadMedia({
     required List<int> bytes,
+    required String filename,
     required String contentType,
     void Function(int sent, int total)? onProgress,
   }) async {
-    final uploader = Dio(
-      BaseOptions(
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 60),
-        sendTimeout: const Duration(seconds: 120),
-      ),
-    );
-    final response = await uploader.put<void>(
-      uploadUrl,
+    final response = await dio.post<dynamic>(
+      '/api/v1/media/upload',
       data: Stream.fromIterable([bytes]),
       options: Options(
         headers: {
           Headers.contentTypeHeader: contentType,
           Headers.contentLengthHeader: bytes.length,
+          'x-filename': filename,
         },
-        // Presigned S3 URLs must not carry the API bearer token.
-        followRedirects: false,
-        validateStatus: (status) => status != null && status < 500,
+        // The upload route accepts a raw body, so skip the JSON content type
+        // the client defaults to.
+        contentType: contentType,
+        // A 25 MB body over a slow link can outlast the default request budget.
+        sendTimeout: const Duration(seconds: 120),
+        receiveTimeout: const Duration(seconds: 60),
       ),
       onSendProgress: onProgress,
     );
-    if ((response.statusCode ?? 0) >= 300) {
-      throw ApiException('upload_failed', 'Upload failed (${response.statusCode})');
-    }
+    final body = _ok(response, expected: 201);
+    return MediaUpload.fromJson({
+      ...body,
+      'upload_url': body['file_url'],
+      'expires_at': DateTime.now().toUtc().toIso8601String(),
+    });
   }
 
   /// Absolute URL the client can load the media from. The API authorizes the
-  /// caller and redirects to a short-lived presigned download.
+  /// caller and streams the bytes back.
   String mediaUrl(String objectKey) => '${dio.options.baseUrl}/api/v1/media/$objectKey';
 
   Future<MessagePage> messages(
@@ -484,7 +515,19 @@ class ApiClient {
     return <String, dynamic>{};
   }
 
-  String _body(dynamic data) => data is String ? data : (data == null ? '' : data.toString());
+  /// Re-serializes a decoded response body so [ApiException.fromResponse] can
+  /// read the `error` object. Dio decodes JSON into a Map, and Map#toString is
+  /// not valid JSON (unquoted keys), which made every typed error fall back to
+  /// a generic `Request failed (<status>)`.
+  String _body(dynamic data) {
+    if (data == null) return '';
+    if (data is String) return data;
+    try {
+      return jsonEncode(data);
+    } catch (_) {
+      return data.toString();
+    }
+  }
 
   /// Single-flight refresh: the first caller rotates, everyone else awaits the
   /// same rotation. The server revokes the whole token family on reuse, so two

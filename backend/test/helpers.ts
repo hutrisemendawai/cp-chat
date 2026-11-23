@@ -21,6 +21,8 @@ export const TEST_CONFIG = loadConfig({
   JWT_SECRET: 'test-secret-that-is-long-enough',
   ACCESS_TOKEN_TTL_SECONDS: '900',
   REFRESH_TOKEN_TTL_SECONDS: '3600',
+  // Keep uploaded bytes in-process so media tests need no MinIO container.
+  S3_DRIVER: 'memory',
 });
 
 export type TestHarness = {

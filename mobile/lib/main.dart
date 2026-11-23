@@ -9,7 +9,6 @@ import 'core/notifications/fcm_service.dart';
 import 'core/models/models.dart';
 import 'core/providers.dart';
 import 'features/auth/auth_screen.dart';
-import 'features/chat/chat_controller.dart';
 import 'features/chat/chat_screen.dart';
 import 'features/conversations/conversations_screen.dart';
 import 'features/groups/create_group_screen.dart';
@@ -102,7 +101,6 @@ class CpChatApp extends ConsumerStatefulWidget {
 
 class _CpChatAppState extends ConsumerState<CpChatApp> {
   StreamSubscription<dynamic>? _tapSubscription;
-  PushRegistration? _push;
 
   @override
   void initState() {
@@ -113,44 +111,30 @@ class _CpChatAppState extends ConsumerState<CpChatApp> {
   @override
   void dispose() {
     _tapSubscription?.cancel();
-    unawaited(_push?.stop());
     super.dispose();
   }
 
   Future<void> _bootstrap() async {
     await ref.read(bootstrapProvider.future);
 
+    // Keep the session runtime subscribed for the whole app lifetime so a
+    // manual login (not just a cold-start restore) starts the socket. The
+    // provider's own listener reacts to every auth transition; this read also
+    // constructs it before the first transition can occur.
+    ref.read(sessionRuntimeProvider);
+
     // Restore a persisted session before the router's first redirect settles.
     await ref.read(authControllerProvider.notifier).restore();
 
+    // A restored session is applied by assigning state, which the runtime
+    // listener picks up; call start() explicitly so the first boot does not
+    // depend on listener ordering.
     if (ref.read(authControllerProvider) != null) {
-      await _startSessionRuntime();
+      await ref.read(sessionRuntimeProvider.notifier).start();
     }
 
-    ref.listen<AuthSession?>(authControllerProvider, (previous, next) {
-      if (previous == null && next != null) {
-        unawaited(_startSessionRuntime());
-      }
-    });
-  }
-
-  Future<void> _startSessionRuntime() async {
-    // Encryption keys must be ready before the first inbound frame is decrypted
-    // and before the outbox is flushed, so bootstrap them first.
-    try {
-      await ref.read(e2eeManagerProvider).bootstrap();
-    } catch (error) {
-      debugPrint('E2EE bootstrap failed: $error');
-    }
-
-    final socket = ref.read(chatSocketProvider);
-    await socket.connect();
-
-    _push ??= PushRegistration(ref.read(apiClientProvider));
-    await _push!.start();
-
-    await _routeFromInitialNotification();
     _tapSubscription ??= FcmService.onNotificationTap.listen(_openFromMessage);
+    await _routeFromInitialNotification();
   }
 
   Future<void> _routeFromInitialNotification() async {

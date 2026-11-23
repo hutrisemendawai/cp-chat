@@ -393,6 +393,10 @@ paths:
     post:
       tags: [Media]
       summary: Get a pre-signed upload URL for images and files
+      description: >
+        Presigned URLs are signed against `S3_PUBLIC_ENDPOINT`, the storage host
+        the client must be able to reach directly. Devices that cannot reach
+        that host should use `POST /media/upload` instead.
       requestBody:
         required: true
         content:
@@ -459,20 +463,99 @@ paths:
         '422':
           $ref: '#/components/responses/ValidationError'
 
+  /api/v1/media/upload:
+    post:
+      tags: [Media]
+      summary: Upload media bytes through the API
+      description: >
+        Uploads the file body directly to the API, which writes it to object
+        storage server-side. Use this instead of `POST /media/presign` when the
+        device can only reach the API host (e.g. a physical phone that cannot
+        reach the MinIO/S3 endpoint). The bytes are sent as a raw body with the
+        media type in `Content-Type` and an optional name in `x-filename`.
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+          image/png:
+            schema:
+              type: string
+              format: binary
+          application/pdf:
+            schema:
+              type: string
+              format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      parameters:
+        - name: x-filename
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Original file name; drives the stored extension.
+      responses:
+        '201':
+          description: Media stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [media_id, object_key, file_url, content_type, size_bytes]
+                properties:
+                  media_id:
+                    type: string
+                    format: uuid
+                  object_key:
+                    type: string
+                    description: Reference this key in a message `content` or group `avatar_url`
+                  file_url:
+                    type: string
+                    format: uri
+                  content_type:
+                    type: string
+                  size_bytes:
+                    type: integer
+                    format: int64
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: File exceeds the configured limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Content type not permitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
   /api/v1/media/{key}:
     get:
       tags: [Media]
-      summary: Resolve a media object to a short-lived download URL
+      summary: Fetch a media object
       description: >
-        Redirects (302) to a presigned GET. Allowed for the owner and for users
-        who share a conversation with the owner.
+        Allowed for the owner and for users who share a conversation with the
+        owner. By default the bytes are streamed through the API so a device
+        only needs to reach the API host. Pass `proxy=0` to instead receive a
+        `302` redirect to a short-lived presigned GET (for clients that can
+        reach the storage host directly).
       parameters:
         - name: key
           in: path
           required: true
           schema:
             type: string
-          description: Object key returned by `POST /media/presign`
+          description: Object key returned by `POST /media/upload` or `POST /media/presign`
         - name: token
           in: query
           required: false
@@ -481,9 +564,24 @@ paths:
           description: >
             Access token for image/download handlers that cannot set an
             `Authorization` header. A bearer header is preferred when possible.
+        - name: proxy
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: >
+            Set to `0` to redirect to a presigned URL instead of streaming the
+            bytes through the API.
       responses:
+        '200':
+          description: The media bytes, with `Content-Type` and `Cache-Control private, max-age=300`
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
         '302':
-          description: Redirect to the presigned download URL
+          description: Redirect to the presigned download URL (when `proxy=0`)
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':

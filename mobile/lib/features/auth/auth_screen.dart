@@ -104,6 +104,12 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         keyboardType: TextInputType.emailAddress,
                         autofillHints: const [AutofillHints.email],
                         textInputAction: TextInputAction.next,
+                        // Credential fields must arrive byte-for-byte; a keyboard
+                        // that capitalizes or autocorrects the first letter would
+                        // make an otherwise-correct login fail.
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        textCapitalization: TextCapitalization.none,
                         decoration: const InputDecoration(
                           labelText: 'Phone or email',
                           prefixIcon: Icon(Icons.person_outline),
@@ -144,6 +150,9 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         obscureText: _obscure,
                         autofillHints: [_isRegister ? AutofillHints.newPassword : AutofillHints.password],
                         textInputAction: TextInputAction.done,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        textCapitalization: TextCapitalization.none,
                         onFieldSubmitted: (_) => _submit(),
                         decoration: InputDecoration(
                           labelText: 'Password',

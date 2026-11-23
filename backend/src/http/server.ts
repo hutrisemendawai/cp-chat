@@ -31,9 +31,18 @@ export function buildServer(ctx: AppContext, logger: Logger): FastifyInstance {
       sendError(reply, error);
       return;
     }
-    if ((error as { statusCode?: number }).statusCode === 400) {
+    const statusCode = (error as { statusCode?: number }).statusCode;
+    if (statusCode === 400) {
       reply.status(422).send({
         error: { code: 'validation_error', message: 'Malformed request body' },
+      });
+      return;
+    }
+    // Preserve framework client errors such as the body-limit 413 so a large
+    // media upload is reported as `media_too_large` rather than an internal 500.
+    if (statusCode === 413) {
+      reply.status(413).send({
+        error: { code: 'media_too_large', message: 'File exceeds the upload limit' },
       });
       return;
     }

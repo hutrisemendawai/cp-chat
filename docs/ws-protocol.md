@@ -238,12 +238,21 @@ The server replies with `{ "type": "pong" }`.
 
 ### Media
 
-1. Client compresses the image (if any) and calls `POST /api/v1/media/presign`.
-2. Client `PUT`s the bytes to `upload_url` with the declared `Content-Type`.
-3. Client sends a `send` frame with `msg_type: "image" | "file"` and
+1. Client compresses the image (if any) and uploads the bytes with
+   `POST /api/v1/media/upload` (raw body, `Content-Type` and `x-filename`
+   headers), which receives `object_key`. This path only needs the API host, so
+   it works from a physical phone that cannot reach the storage host directly.
+   `POST /api/v1/media/presign` remains available for clients that can `PUT`
+   straight to object storage.
+2. Client sends a `send` frame with `msg_type: "image" | "file"` and
    `content` set to `object_key`.
-4. Recipients render via `GET /api/v1/media/{object_key}`, which authorizes the
-   caller and redirects to a short-lived presigned GET. The bucket is private.
+3. Recipients render via `GET /api/v1/media/{object_key}`, which authorizes the
+   caller and streams the bytes through the API. `?proxy=0` redirects to a
+   short-lived presigned GET instead. The bucket is private.
+
+Sending a message while the socket is down is not an error: the row stays in
+the local outbox and `ChatSocket.send()` starts a connect, so it flushes as soon
+as the socket is up. A screen shows a reconnect banner while the socket is down.
 
 ### `read_state` — cross-device read cursor
 

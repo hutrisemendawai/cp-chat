@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Readable } from 'node:stream';
 
 import {
   DeleteObjectCommand,
@@ -16,34 +17,96 @@ export type PresignedUpload = {
   expiresAt: Date;
 };
 
+export type StoredObject = {
+  body: Readable | Uint8Array;
+  contentType?: string;
+  contentLength?: number;
+};
+
+/**
+ * The small slice of object-storage behaviour the API needs. The S3-backed
+ * implementation is the default; an in-memory one lets the media-upload and
+ * streaming tests run without a live MinIO container.
+ */
+interface ObjectStore {
+  put(key: string, body: Uint8Array, contentType: string): Promise<void>;
+  get(key: string): Promise<StoredObject>;
+  remove(key: string): Promise<void>;
+}
+
 /**
  * S3-compatible object storage (MinIO in development).
  *
- * Uploads go straight from the client to the object store with a short-lived
- * presigned PUT; the API never proxies media bytes. The object key is generated
- * server-side and bound to a `media_objects` row, so a signature cannot be fed
- * to a client to forge keys it did not request.
+ * Two clients are kept deliberately separate:
+ * - `internal` talks to `S3_ENDPOINT` (e.g. `http://minio:9000` inside Docker)
+ *   and is used by the server for `PutObject`/`GetObject`/`DeleteObject`.
+ * - `presign` signs URLs against `S3_PUBLIC_ENDPOINT`, the host the mobile
+ *   client can actually reach. Presigning is a local computation, so this
+ *   client never needs to open a connection.
+ *
+ * Because a phone often cannot reach MinIO directly, the API proxies uploads
+ * (`POST /media/upload`) and downloads (`GET /media/*`) through the internal
+ * client; presigned URLs remain available for callers that can reach storage.
  */
 export class StorageService {
-  private readonly client: S3Client;
-  private readonly endpoint: string;
+  private readonly internal: S3Client;
+  private readonly presign: S3Client;
   private readonly bucket: string;
   private readonly ttlSeconds: number;
+  private readonly publicEndpoint: string;
+  private readonly store: ObjectStore;
 
   constructor(private readonly config: Config) {
-    this.endpoint = config.S3_PUBLIC_ENDPOINT ?? config.S3_ENDPOINT;
     this.bucket = config.S3_BUCKET;
     this.ttlSeconds = config.MEDIA_PRESIGN_TTL_SECONDS;
+    this.publicEndpoint = config.S3_PUBLIC_ENDPOINT ?? config.S3_ENDPOINT;
 
-    this.client = new S3Client({
-      region: config.S3_REGION,
-      endpoint: this.endpoint,
-      forcePathStyle: config.S3_FORCE_PATH_STYLE,
+    this.internal = this.createClient(config.S3_ENDPOINT);
+    this.presign = this.createClient(this.publicEndpoint);
+    this.store =
+      config.S3_DRIVER === 'memory'
+        ? new InMemoryObjectStore()
+        : {
+            put: async (key, body, contentType) => {
+              await this.internal.send(
+                new PutObjectCommand({
+                  Bucket: this.bucket,
+                  Key: key,
+                  Body: body,
+                  ContentType: contentType,
+                  ContentLength: body.length,
+                }),
+              );
+            },
+            get: async (key) => {
+              const response = await this.internal.send(
+                new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+              );
+              if (!response.Body) {
+                throw new Error(`Object ${key} has no body`);
+              }
+              return {
+                body: response.Body as Readable,
+                contentType: response.ContentType,
+                contentLength: response.ContentLength,
+              };
+            },
+            remove: async (key) => {
+              await this.internal.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+            },
+          };
+  }
+
+  private createClient(endpoint: string): S3Client {
+    return new S3Client({
+      region: this.config.S3_REGION,
+      endpoint,
+      forcePathStyle: this.config.S3_FORCE_PATH_STYLE,
       credentials: {
-        accessKeyId: config.S3_ACCESS_KEY_ID,
-        secretAccessKey: config.S3_SECRET_ACCESS_KEY,
+        accessKeyId: this.config.S3_ACCESS_KEY_ID,
+        secretAccessKey: this.config.S3_SECRET_ACCESS_KEY,
       },
-      // Only presign here; avoid retries complicating a purely local operation.
+      // Presigning is local; avoiding retries keeps it a pure computation.
       maxAttempts: 2,
     });
   }
@@ -72,7 +135,7 @@ export class StorageService {
       ContentLength: input.sizeBytes,
     });
 
-    const uploadUrl = await getSignedUrl(this.client, command, {
+    const uploadUrl = await getSignedUrl(this.presign, command, {
       expiresIn: this.ttlSeconds,
     });
 
@@ -86,22 +149,57 @@ export class StorageService {
   /** Presigns a download for an object; used to serve private media. */
   async presignDownload(key: string, expiresIn = this.ttlSeconds): Promise<string> {
     const command = new GetObjectCommand({ Bucket: this.bucket, Key: key });
-    return getSignedUrl(this.client, command, { expiresIn });
+    return getSignedUrl(this.presign, command, { expiresIn });
+  }
+
+  /** Writes bytes through the internal client (the API-proxied upload path). */
+  async putObject(key: string, body: Uint8Array, contentType: string): Promise<void> {
+    await this.store.put(key, body, contentType);
+  }
+
+  /** Reads an object through the internal client for a streamed download. */
+  async getObject(key: string): Promise<StoredObject> {
+    return this.store.get(key);
   }
 
   objectUrl(key: string): string {
-    const base = this.endpoint.replace(/\/+$/, '');
+    const base = this.publicEndpoint.replace(/\/+$/, '');
     return this.config.S3_FORCE_PATH_STYLE
       ? `${base}/${this.bucket}/${key}`
       : `${base.replace(/^https?:\/\//, (scheme) => `${scheme}//${this.bucket}.`)}/${key}`;
   }
 
   async delete(key: string): Promise<void> {
-    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+    await this.store.remove(key);
   }
 
   get bucketName(): string {
     return this.bucket;
+  }
+}
+
+/** Test-only store: keeps uploaded bytes in the process. */
+class InMemoryObjectStore implements ObjectStore {
+  private readonly objects = new Map<string, { body: Uint8Array; contentType: string }>();
+
+  async put(key: string, body: Uint8Array, contentType: string): Promise<void> {
+    this.objects.set(key, { body, contentType });
+  }
+
+  async get(key: string): Promise<StoredObject> {
+    const object = this.objects.get(key);
+    if (!object) {
+      throw new Error(`Object ${key} not found`);
+    }
+    return {
+      body: object.body,
+      contentType: object.contentType,
+      contentLength: object.body.length,
+    };
+  }
+
+  async remove(key: string): Promise<void> {
+    this.objects.delete(key);
   }
 }
 

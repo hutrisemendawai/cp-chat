@@ -173,6 +173,10 @@ services:
       S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-cpchat}
       S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-cpchat-secret}
       S3_FORCE_PATH_STYLE: "true"
+      # Stream media downloads through the API so a device only needs to reach
+      # this service; set to false to redirect to presigned storage URLs.
+      MEDIA_PROXY_DOWNLOAD: ${MEDIA_PROXY_DOWNLOAD:-true}
+      MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-26214400}
       # Phase 4. Defaults keep the Phase 1-3 behaviour; see .env.example.
       BROKER: ${BROKER:-redis}
       KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}

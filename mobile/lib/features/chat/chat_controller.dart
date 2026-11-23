@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
@@ -9,7 +8,6 @@ import '../../core/media/media_service.dart';
 import '../../core/models/models.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/ws_client.dart';
-import '../../core/notifications/fcm_service.dart';
 import '../../core/providers.dart';
 
 /// Sending, retrying and read-acknowledging for a single conversation.
@@ -145,36 +143,3 @@ final chatControllerProvider =
     Provider.family<ChatController, String>((ref, conversationId) {
   return ChatController(ref, conversationId);
 });
-
-/// Registers this install for push delivery once a session exists and keeps the
-/// registration current when Firebase rotates the installation id.
-class PushRegistration {
-  PushRegistration(this._api);
-
-  final ApiClient _api;
-  StreamSubscription<String>? _refresh;
-
-  Future<void> start() async {
-    final fid = await FcmService.currentToken();
-    if (fid != null) {
-      try {
-        await _api.registerFcmToken(fid);
-      } catch (error) {
-        debugPrint('FCM registration failed: $error');
-      }
-    }
-
-    _refresh ??= FcmService.onTokenRefresh.listen((next) async {
-      try {
-        await _api.registerFcmToken(next);
-      } catch (error) {
-        debugPrint('FCM refresh registration failed: $error');
-      }
-    });
-  }
-
-  Future<void> stop() async {
-    await _refresh?.cancel();
-    _refresh = null;
-  }
-}

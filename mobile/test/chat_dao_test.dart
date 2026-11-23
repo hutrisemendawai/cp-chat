@@ -124,6 +124,63 @@ void main() {
       await dao.applyStatus('does-not-exist', 'read');
       expect(await dao.watchMessages('conv-1').first, isEmpty);
     });
+
+    test('a sent status persists seq and clears the outbox', () async {
+      await dao.enqueueOutgoing(
+        clientMsgId: 'c1',
+        conversationId: 'conv-1',
+        senderId: 'me',
+        type: 'text',
+        content: 'hello',
+        createdAt: DateTime.utc(2026, 1, 1),
+      );
+      expect(await dao.pendingOutbox(), hasLength(1));
+
+      await dao.applyStatus('c1', 'sent', seq: 7);
+
+      final row = (await dao.watchMessages('conv-1').first).single;
+      expect(row.status, 'sent');
+      expect(row.seq, 7);
+      expect(await dao.pendingOutbox(), isEmpty);
+    });
+
+    test('a server status recovers a message that timed out as failed', () async {
+      await dao.enqueueOutgoing(
+        clientMsgId: 'c1',
+        conversationId: 'conv-1',
+        senderId: 'me',
+        type: 'text',
+        content: 'slow',
+        createdAt: DateTime.utc(2026, 1, 1),
+      );
+      await dao.markFailed('c1');
+      expect((await dao.watchMessages('conv-1').first).single.status, 'failed');
+
+      // The send did land after all; the late ack must clear the failure.
+      await dao.applyStatus('c1', 'sent', seq: 3);
+
+      final row = (await dao.watchMessages('conv-1').first).single;
+      expect(row.status, 'sent');
+      expect(row.seq, 3);
+      expect(await dao.pendingOutbox(), isEmpty);
+    });
+
+    test('a manual retry returns a failed message to pending', () async {
+      await dao.enqueueOutgoing(
+        clientMsgId: 'c1',
+        conversationId: 'conv-1',
+        senderId: 'me',
+        type: 'text',
+        content: 'again',
+        createdAt: DateTime.utc(2026, 1, 1),
+      );
+      await dao.markFailed('c1');
+
+      await dao.markPending('c1');
+
+      expect((await dao.watchMessages('conv-1').first).single.status, 'pending');
+      expect(await dao.pendingOutbox(), hasLength(1));
+    });
   });
 
   group('cursor and unread bookkeeping', () {

@@ -9,6 +9,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/database/app_database.dart';
 import '../../core/providers.dart';
+import '../../core/widgets/connection_banner.dart';
 import '../presence/presence_controller.dart';
 import 'chat_controller.dart';
 import 'chat_search_sheet.dart';
@@ -264,6 +265,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ),
       body: Column(
         children: [
+          const ConnectionBanner(),
           if (_uploading)
             LinearProgressIndicator(value: _uploadProgress == 0 ? null : _uploadProgress),
           Expanded(

@@ -37,8 +37,15 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().default('cpchat'),
   S3_SECRET_ACCESS_KEY: z.string().default('cpchat-secret'),
   S3_FORCE_PATH_STYLE: booleanEnv(true),
+  // `s3` talks to a real bucket; `memory` keeps objects in-process so media
+  // tests run without MinIO (the object key and auth paths are unchanged).
+  S3_DRIVER: z.enum(['s3', 'memory']).default('s3'),
   MEDIA_PRESIGN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   MEDIA_MAX_BYTES: z.coerce.number().int().positive().default(26_214_400),
+  // Serve `GET /media/*` by streaming the object through the API instead of
+  // redirecting to a presigned URL. A phone often cannot reach the storage host
+  // directly, so streaming is the default; `?proxy=0` opts back into a redirect.
+  MEDIA_PROXY_DOWNLOAD: booleanEnv(true),
   MEDIA_ALLOWED_TYPES: z
     .string()
     .default(

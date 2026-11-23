@@ -13,6 +13,30 @@ import '../models/models.dart';
 import '../network/api_client.dart';
 import '../storage/token_store.dart';
 
+/// Lifecycle of the realtime connection, surfaced to the UI.
+enum SocketState { disconnected, connecting, connected }
+
+/// A snapshot of the connection plus the last failure, for a status banner.
+@immutable
+class SocketStatus {
+  const SocketStatus(this.state, [this.lastError]);
+
+  const SocketStatus.disconnected([String? error]) : this(SocketState.disconnected, error);
+
+  final SocketState state;
+  final String? lastError;
+
+  bool get isConnected => state == SocketState.connected;
+  bool get isConnecting => state == SocketState.connecting;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SocketStatus && other.state == state && other.lastError == lastError;
+
+  @override
+  int get hashCode => Object.hash(state, lastError);
+}
+
 /// Owns the realtime connection and keeps the local mirror consistent.
 ///
 /// Responsibilities, per `docs/ws-protocol.md`:
@@ -58,6 +82,10 @@ class ChatSocket {
 
   Stream<Presence> get presenceEvents => _presenceController.stream;
 
+  /// The current connection status, reactive so a screen can show a banner.
+  final ValueNotifier<SocketStatus> connection =
+      ValueNotifier<SocketStatus>(const SocketStatus.disconnected());
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Timer? _heartbeat;
@@ -66,40 +94,105 @@ class ChatSocket {
   int _attempt = 0;
   bool _disposed = false;
   bool _syncing = false;
+  bool _connecting = false;
 
   bool get isConnected => _channel != null;
 
   Future<void> connect() async {
-    if (_disposed || _channel != null) return;
+    if (_disposed || _channel != null || _connecting) return;
     _reconnect?.cancel();
-
-    final token = await _tokenStore.readAccessToken();
-    if (token == null) return;
+    _connecting = true;
+    connection.value = const SocketStatus(SocketState.connecting);
 
     try {
-      final channel = WebSocketChannel.connect(AppConfig.wsUri(token));
-      await channel.ready;
-      _channel = channel;
-      _subscription = channel.stream.listen(
-        _onData,
-        onDone: _onDisconnected,
-        onError: (Object error) {
-          debugPrint('ChatSocket error: $error');
-          _onDisconnected();
-        },
-        cancelOnError: true,
-      );
-      _attempt = 0;
-      _startHeartbeat();
-
-      // Recover anything missed while offline before accepting live traffic.
-      await syncAll();
-      await flushOutbox();
-      _startOutboxRetry();
+      // A valid token is obtained up front so a reconnect after a long offline
+      // stretch does not fail on an access token that expired while asleep.
+      final token = await _api.ensureFreshAccessToken();
+      if (token == null) {
+        connection.value = const SocketStatus.disconnected('Not signed in');
+        return;
+      }
+      try {
+        await _open(token);
+      } catch (error) {
+        // A rejected handshake usually means the token was rejected even though
+        // the client believed it valid. Force one rotation, then retry.
+        if (!_authFailure(error) || !await _api.refreshAccessToken()) rethrow;
+        final rotated = await _tokenStore.readAccessToken();
+        if (rotated == null) rethrow;
+        await _open(rotated);
+      }
     } catch (error) {
       debugPrint('ChatSocket connect failed: $error');
-      _onDisconnected();
+      _onDisconnected(error);
+    } finally {
+      _connecting = false;
     }
+  }
+
+  /// Opens a channel and wires its listeners. Throws when the handshake fails so
+  /// [connect] can decide whether to refresh the token and retry.
+  Future<void> _open(String token) async {
+    final channel = WebSocketChannel.connect(AppConfig.wsUri(token));
+    await channel.ready;
+    if (_disposed) {
+      await channel.sink.close();
+      return;
+    }
+
+    _channel = channel;
+    _subscription = channel.stream.listen(
+      _onData,
+      onDone: _onDisconnected,
+      onError: (Object error) {
+        debugPrint('ChatSocket error: $error');
+        _onDisconnected(error);
+      },
+      cancelOnError: true,
+    );
+    _attempt = 0;
+    connection.value = const SocketStatus(SocketState.connected);
+    _startHeartbeat();
+
+    // Recover anything missed while offline before accepting live traffic.
+    await syncAll();
+    await flushOutbox();
+    _startOutboxRetry();
+  }
+
+  /// A failed upgrade reports the HTTP status in its message on the `ws`
+  /// package (`... status code: 401`). Treat that, and an explicit auth error,
+  /// as a token problem worth one rotation.
+  bool _authFailure(Object error) {
+    final text = error.toString();
+    return text.contains('401') || text.contains('403') || text.contains('Unauthorized');
+  }
+
+  /// Closes the connection and stops every timer without scheduling a reconnect
+  /// and without marking the socket permanently disposed, so a later
+  /// [connect] (e.g. after signing in again) works. Logout calls this.
+  Future<void> disconnect() async {
+    _reconnect?.cancel();
+    _reconnect = null;
+    _heartbeat?.cancel();
+    _heartbeat = null;
+    _outboxTimer?.cancel();
+    _outboxTimer = null;
+    for (final timer in _sendTimers.values) {
+      timer.cancel();
+    }
+    _sendTimers.clear();
+    _awaitingAck.clear();
+    _attempt = 0;
+
+    final subscription = _subscription;
+    _subscription = null;
+    final channel = _channel;
+    _channel = null;
+    connection.value = const SocketStatus.disconnected();
+
+    await subscription?.cancel();
+    await channel?.sink.close();
   }
 
   /// Pulls every conversation forward from its local `last_seq`.
@@ -141,6 +234,10 @@ class ChatSocket {
   /// [content] is stored for display; [wireContent] is what goes on the wire
   /// and defaults to the same value. A retry always resends [wireContent], so an
   /// encrypted body is never re-encrypted (which would advance the ratchet).
+  ///
+  /// When the socket is down the entry stays queued and a connect is kicked
+  /// off, so the message flushes over the socket once it is up — rather than
+  /// sitting `pending` until the next reconnect timer fires.
   Future<void> send({
     required String conversationId,
     required String senderId,
@@ -158,15 +255,29 @@ class ChatSocket {
       wireContent: wireContent,
       createdAt: DateTime.now().toUtc(),
     );
-    _writeSend(conversationId, clientMsgId, wireContent ?? content, type);
+    if (!_writeSend(conversationId, clientMsgId, wireContent ?? content, type)) {
+      unawaited(connect());
+    }
   }
 
   /// Retries a failed or pending outbox entry with the same `client_msg_id`.
+  ///
+  /// Any prior `failed` state is cleared first so the bubble returns to
+  /// `pending` and the new attempt is visible, instead of staying red until the
+  /// server happens to answer.
   Future<void> retry(String conversationId, String clientMsgId) async {
     final pending = await _dao.pendingOutbox();
     final entry = pending.where((item) => item.clientMsgId == clientMsgId).firstOrNull;
     if (entry == null) return;
-    _writeSend(conversationId, clientMsgId, entry.wireContent ?? entry.content, entry.type);
+
+    await _dao.markPending(clientMsgId);
+    final sent = _writeSend(
+      conversationId,
+      clientMsgId,
+      entry.wireContent ?? entry.content,
+      entry.type,
+    );
+    if (!sent) unawaited(connect());
   }
 
   Future<void> discard(String clientMsgId) => _dao.deleteMessage(clientMsgId);
@@ -195,19 +306,21 @@ class ChatSocket {
 
   /// Re-sends every outbox entry. Called on connect and by the retry timer.
   Future<void> flushOutbox() async {
+    if (!isConnected) return;
     final pending = await _dao.pendingOutbox();
     for (final entry in pending) {
-      _writeSend(
+      if (_writeSend(
         entry.conversationId,
         entry.clientMsgId,
         entry.wireContent ?? entry.content,
         entry.type,
-      );
-      await _dao.recordAttempt(entry.clientMsgId);
+      )) {
+        await _dao.recordAttempt(entry.clientMsgId);
+      }
     }
   }
 
-  void _writeSend(String conversationId, String clientMsgId, String content, String type) {
+  bool _writeSend(String conversationId, String clientMsgId, String content, String type) {
     final sent = _write({
       'type': 'send',
       'conversation_id': conversationId,
@@ -215,17 +328,32 @@ class ChatSocket {
       'msg_type': type,
       'content': content,
     });
-    if (!sent) return;
+    if (!sent) return false;
 
     _awaitingAck.add(clientMsgId);
     _sendTimers[clientMsgId]?.cancel();
     _sendTimers[clientMsgId] = Timer(sendTimeout, () {
       _sendTimers.remove(clientMsgId);
       if (_awaitingAck.remove(clientMsgId)) {
-        // No ACK in time: leave the entry queued for the retry loop.
+        // No ACK in time: mark it failed so the user can tap to retry, and the
+        // entry stays in the outbox so the retry loop keeps trying.
         unawaited(_dao.markFailed(clientMsgId));
+        unawaited(checkConnection());
       }
     });
+    return true;
+  }
+
+  /// Verifies the socket is still usable after a send timed out. A dead link can
+  /// linger without a `done`/`error` callback (e.g. Wi-Fi dropped silently), so
+  /// reconnect when the socket is gone and otherwise probe with a ping — a
+  /// failed write tears the socket down and schedules the reconnect.
+  Future<void> checkConnection() async {
+    if (_channel == null) {
+      await connect();
+      return;
+    }
+    if (!_write({'type': 'ping'})) _onDisconnected();
   }
 
   bool _write(Map<String, dynamic> event) {
@@ -236,7 +364,7 @@ class ChatSocket {
       return true;
     } catch (error) {
       debugPrint('ChatSocket write failed: $error');
-      _onDisconnected();
+      _onDisconnected(error);
       return false;
     }
   }
@@ -269,7 +397,7 @@ class ChatSocket {
       case 'conversation_updated':
         unawaited(_handleConversationUpdated(decoded));
       case 'error':
-        debugPrint('ChatSocket server error: ${decoded['code']}');
+        unawaited(_handleError(decoded));
       default:
         // Unknown server events are ignored by contract.
         return;
@@ -312,7 +440,9 @@ class ChatSocket {
         );
       }
 
-      await _dao.upsertServerMessage(message);
+      // An inbound `message` (including the echo of our own send) is on the
+      // server, so it reconciles a still-`pending` row to `sent`.
+      await _dao.upsertServerMessage(message, status: 'sent');
       acknowledgeDelivered(message.conversationId, message.seq);
     } catch (error) {
       debugPrint('ChatSocket failed to persist message: $error');
@@ -339,11 +469,34 @@ class ChatSocket {
     final status = frame['status'];
     if (clientMsgId is! String || status is! String) return;
 
-    if (status == 'sent') {
+    if (status == 'sent' || status == 'delivered' || status == 'read') {
       _awaitingAck.remove(clientMsgId);
       _sendTimers.remove(clientMsgId)?.cancel();
     }
-    await _dao.applyStatus(clientMsgId, status);
+    // `seq` is present on the `sent` ack; persisting it gives the optimistic row
+    // its server identity even before the `message` echo arrives.
+    final seq = frame['seq'];
+    await _dao.applyStatus(
+      clientMsgId,
+      status,
+      seq: seq is num ? seq.toInt() : null,
+    );
+  }
+
+  /// A server `error` frame that references a `client_msg_id` means the send was
+  /// rejected (validation, membership, malformed envelope). Mark it failed so
+  /// the bubble offers a manual retry instead of spinning forever.
+  Future<void> _handleError(Map<String, dynamic> frame) async {
+    final code = frame['code'];
+    final message = frame['message'];
+    debugPrint('ChatSocket server error: $code $message');
+
+    final clientMsgId = frame['client_msg_id'];
+    if (clientMsgId is String && clientMsgId.isNotEmpty) {
+      _awaitingAck.remove(clientMsgId);
+      _sendTimers.remove(clientMsgId)?.cancel();
+      await _dao.markFailed(clientMsgId);
+    }
   }
 
   /// A [ReadReceipt] means every message this user sent up to `seq` has been
@@ -431,7 +584,7 @@ class ChatSocket {
     });
   }
 
-  void _onDisconnected() {
+  void _onDisconnected([Object? error]) {
     _heartbeat?.cancel();
     _heartbeat = null;
     _outboxTimer?.cancel();
@@ -446,6 +599,7 @@ class ChatSocket {
     _awaitingAck.clear();
     if (_disposed) return;
 
+    connection.value = SocketStatus.disconnected(error?.toString());
     final exponential = min(30, pow(2, _attempt).toInt());
     final jitterMs = _random.nextInt(1000);
     _attempt += 1;
@@ -457,16 +611,10 @@ class ChatSocket {
   }
 
   Future<void> dispose() async {
+    await disconnect();
     _disposed = true;
-    _heartbeat?.cancel();
     _reconnect?.cancel();
-    _outboxTimer?.cancel();
-    for (final timer in _sendTimers.values) {
-      timer.cancel();
-    }
+    connection.dispose();
     await _presenceController.close();
-    await _subscription?.cancel();
-    await _channel?.sink.close();
-    _channel = null;
   }
 }

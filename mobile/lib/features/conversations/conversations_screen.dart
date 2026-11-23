@@ -6,6 +6,7 @@ import '../../core/database/app_database.dart';
 import '../../core/models/models.dart';
 
 import '../../core/providers.dart';
+import '../../core/widgets/connection_banner.dart';
 import '../chat/media_message.dart';
 
 class ConversationsScreen extends ConsumerStatefulWidget {
@@ -100,52 +101,59 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
           ),
         ],
       ),
-      body: user == null
-          ? const Center(child: CircularProgressIndicator())
-          : conversations.when(
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (error, _) => _EmptyState(
-                icon: Icons.error_outline,
-                title: 'Something went wrong',
-                message: '$error',
-                actionLabel: 'Retry',
-                onAction: _refresh,
-              ),
-              data: (items) {
-                if (items.isEmpty) {
-                  return RefreshIndicator(
-                    onRefresh: _refresh,
-                    child: ListView(
-                      children: [
-                        _EmptyState(
-                          icon: Icons.forum_outlined,
-                          title: 'No conversations yet',
-                          message: 'Start a 1:1 chat to get going.',
-                          actionLabel: 'New chat',
-                          onAction: _startNewChat,
-                        ),
-                      ],
+      body: Column(
+        children: [
+          const ConnectionBanner(),
+          Expanded(
+            child: user == null
+                ? const Center(child: CircularProgressIndicator())
+                : conversations.when(
+                    loading: () => const Center(child: CircularProgressIndicator()),
+                    error: (error, _) => _EmptyState(
+                      icon: Icons.error_outline,
+                      title: 'Something went wrong',
+                      message: '$error',
+                      actionLabel: 'Retry',
+                      onAction: _refresh,
                     ),
-                  );
-                }
+                    data: (items) {
+                      if (items.isEmpty) {
+                        return RefreshIndicator(
+                          onRefresh: _refresh,
+                          child: ListView(
+                            children: [
+                              _EmptyState(
+                                icon: Icons.forum_outlined,
+                                title: 'No conversations yet',
+                                message: 'Start a 1:1 chat to get going.',
+                                actionLabel: 'New chat',
+                                onAction: _startNewChat,
+                              ),
+                            ],
+                          ),
+                        );
+                      }
 
-                return RefreshIndicator(
-                  onRefresh: _refresh,
-                  child: ListView.separated(
-                    itemCount: items.length,
-                    separatorBuilder: (_, _) => const Divider(height: 1),
-                    itemBuilder: (context, index) {
-                      final conversation = items[index];
-                      return _ConversationTile(
-                        conversation: conversation,
-                        selfId: user.id,
-                        onTap: () => context.push('/conversations/${conversation.id}'),
+                      return RefreshIndicator(
+                        onRefresh: _refresh,
+                        child: ListView.separated(
+                          itemCount: items.length,
+                          separatorBuilder: (_, _) => const Divider(height: 1),
+                          itemBuilder: (context, index) {
+                            final conversation = items[index];
+                            return _ConversationTile(
+                              conversation: conversation,
+                              selfId: user.id,
+                              onTap: () => context.push('/conversations/${conversation.id}'),
+                            );
+                          },
+                        ),
                       );
                     },
                   ),
-                );
-              },
-            ),
+          ),
+        ],
+      ),
       floatingActionButton: FloatingActionButton(
         onPressed: _refreshing ? null : _startNewChat,
         tooltip: 'New chat',

@@ -12,6 +12,7 @@ import 'models/models.dart';
 import 'network/api_client.dart';
 import 'network/ws_client.dart';
 import 'notifications/fcm_service.dart';
+import 'notifications/push_registration.dart';
 import 'storage/token_store.dart';
 
 final appDatabaseProvider = Provider<AppDatabase>((ref) {
@@ -83,6 +84,83 @@ final chatSocketProvider = Provider<ChatSocket>((ref) {
   return socket;
 });
 
+/// Registers this install for push delivery while a session is active.
+final pushRegistrationProvider = Provider<PushRegistration>((ref) {
+  final registration = PushRegistration(ref.watch(apiClientProvider));
+  ref.onDispose(() => unawaited(registration.stop()));
+  return registration;
+});
+
+/// Drives the post-authentication runtime: it watches the auth state and starts
+/// (or tears down) the E2EE bootstrap, the chat socket, and push registration.
+///
+/// It is a provider rather than an `initState` listener so session transitions
+/// are handled in one place and cannot be missed: `ref.listen` inside a
+/// lifecycle method is not permitted, and a boot that ran only once would never
+/// react to a manual login.
+class SessionRuntime extends Notifier<bool> {
+  /// In-flight boot, so a listener-triggered start and an explicit start (the
+  /// cold-start restore path) share one run instead of racing the E2EE
+  /// bootstrap, which is not safe to enter twice concurrently.
+  Future<void>? _starting;
+
+  @override
+  bool build() {
+    ref.listen<AuthSession?>(authControllerProvider, (previous, next) {
+      if (next != null) {
+        unawaited(start());
+      } else {
+        unawaited(_stop());
+      }
+    });
+    return false;
+  }
+
+  /// Starts the socket and push registration for the active session. Safe to
+  /// call repeatedly: a run already in flight is awaited rather than duplicated.
+  Future<void> start() async {
+    if (ref.read(authControllerProvider) == null) return;
+    state = true;
+    final existing = _starting;
+    if (existing != null) return existing;
+    final run = _start();
+    _starting = run;
+    try {
+      await run;
+    } finally {
+      _starting = null;
+    }
+  }
+
+  Future<void> _start() async {
+    // Encryption keys must be ready before the first inbound frame is decrypted
+    // and before the outbox is flushed, so bootstrap them first.
+    try {
+      await ref.read(e2eeManagerProvider).bootstrap();
+    } catch (error) {
+      debugPrint('E2EE bootstrap failed: $error');
+    }
+
+    await ref.read(chatSocketProvider).connect();
+
+    final push = ref.read(pushRegistrationProvider);
+    await push.start();
+  }
+
+  /// Stops realtime work on logout: the socket disconnects and its timers stop,
+  /// push registration ends, and per-session E2EE state is cleared.
+  Future<void> stop() => _stop();
+
+  Future<void> _stop() async {
+    await ref.read(chatSocketProvider).disconnect();
+    await ref.read(pushRegistrationProvider).stop();
+    ref.read(e2eeManagerProvider).reset();
+  }
+}
+
+final sessionRuntimeProvider =
+    NotifierProvider<SessionRuntime, bool>(SessionRuntime.new);
+
 /// Resolves the device id and boots push registration before the app renders.
 final bootstrapProvider = FutureProvider<void>((ref) async {
   final tokenStore = ref.watch(tokenStoreProvider);
@@ -145,6 +223,10 @@ class AuthController extends Notifier<AuthSession?> {
 
   Future<void> logout() async {
     final api = ref.read(apiClientProvider);
+    // Tear down the socket before clearing tokens so it stops reconnecting with
+    // a session that is about to disappear, and reset E2EE state so a different
+    // account signing in next cannot see the previous account's plaintext.
+    await ref.read(sessionRuntimeProvider.notifier).stop();
     await api.logout();
     await ref.read(chatDaoProvider).clearAll();
     state = null;

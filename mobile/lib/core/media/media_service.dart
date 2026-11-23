@@ -7,12 +7,12 @@ import 'package:path_provider/path_provider.dart';
 import '../models/models.dart';
 import '../network/api_client.dart';
 
-/// Attaches media to a conversation: compress (images only), presign, upload
-/// directly to object storage, then hand back the object key to put in a
-/// websocket message.
+/// Attaches media to a conversation: compress (images only), upload through the
+/// API, then hand back the object key to put in a websocket message.
 ///
-/// The upload never passes through the API; only the short-lived presigned PUT
-/// URL does. This keeps large binaries off the request/response path.
+/// Uploads go to `POST /api/v1/media/upload`, so a physical device only needs
+/// connectivity to the API host. The API streams the bytes to object storage
+/// server-side; the device never has to reach MinIO/S3 directly.
 class MediaService {
   MediaService(this._api);
 
@@ -71,18 +71,13 @@ class MediaService {
     void Function(int sent, int total)? onProgress,
   }) async {
     final bytes = await file.readAsBytes();
-    final presigned = await _api.presignUpload(
-      filename: filename,
-      contentType: contentType,
-      sizeBytes: bytes.length,
-    );
-    await _api.uploadToPresignedUrl(
-      uploadUrl: presigned.uploadUrl,
+    final uploaded = await _api.uploadMedia(
       bytes: bytes,
+      filename: filename,
       contentType: contentType,
       onProgress: onProgress,
     );
-    return presigned.objectKey;
+    return uploaded.objectKey;
   }
 
   /// Compresses an image on-device. Falls back to the original file when the

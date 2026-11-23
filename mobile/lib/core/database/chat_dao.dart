@@ -207,16 +207,35 @@ class ChatDao {
     }
   }
 
-  /// A `status` frame advances lifecycle state; it never moves backwards.
-  Future<void> applyStatus(String clientMsgId, String status) async {
+  /// A `status` frame advances lifecycle state. Server-confirmed states
+  /// (`sent`, `delivered`, `read`) also mean the message was accepted, so the
+  /// row leaves the outbox and — when the frame carries it — records the
+  /// server-assigned `seq`. This resolves a message that is still `pending` (or
+  /// was marked `failed` by a timeout) without waiting for a sync.
+  Future<void> applyStatus(String clientMsgId, String status, {int? seq}) async {
     final existing = await (db.select(db.localMessages)
           ..where((table) => table.clientMsgId.equals(clientMsgId)))
         .getSingleOrNull();
     if (existing == null) return;
 
-    await (db.update(db.localMessages)
-          ..where((table) => table.clientMsgId.equals(clientMsgId)))
-        .write(LocalMessagesCompanion(status: Value(_maxStatus(existing.status, status))));
+    final nextSeq = seq ?? existing.seq;
+    final confirmed = _confirmedStatuses.contains(status);
+
+    await db.transaction(() async {
+      await (db.update(db.localMessages)
+            ..where((table) => table.clientMsgId.equals(clientMsgId)))
+          .write(
+        LocalMessagesCompanion(
+          status: Value(_maxStatus(existing.status, status)),
+          seq: Value(nextSeq),
+        ),
+      );
+      if (confirmed) {
+        await (db.delete(db.outboxEntries)
+              ..where((table) => table.clientMsgId.equals(clientMsgId)))
+            .go();
+      }
+    });
   }
 
   /// Stores the aggregated group read tally. Reading up to `upToSeq` means every
@@ -265,6 +284,14 @@ class ChatDao {
   Future<void> markFailed(String clientMsgId) async {
     await (db.update(db.localMessages)..where((table) => table.clientMsgId.equals(clientMsgId)))
         .write(const LocalMessagesCompanion(status: Value('failed')));
+  }
+
+  /// Returns a message to `pending` for a manual retry. Unlike [applyStatus],
+  /// this deliberately clears a local `failed` so the bubble shows that a new
+  /// attempt is in flight.
+  Future<void> markPending(String clientMsgId) async {
+    await (db.update(db.localMessages)..where((table) => table.clientMsgId.equals(clientMsgId)))
+        .write(const LocalMessagesCompanion(status: Value('pending')));
   }
 
   Future<void> deleteMessage(String clientMsgId) async {
@@ -361,13 +388,30 @@ class ChatDao {
   }
 }
 
+/// States assigned by the server, which prove it accepted the message.
+const _confirmedStatuses = {'sent', 'delivered', 'read'};
+
 const _statusOrder = {'pending': 0, 'sent': 1, 'delivered': 2, 'read': 3, 'failed': 4};
 
-/// Keeps the furthest-along lifecycle state; `failed` is terminal and only
-/// clears when the server confirms the message.
+/// Picks the furthest-along lifecycle state.
+///
+/// Server-confirmed states always win: a `failed` row is only a local "no ack
+/// yet" marker, and a late-but-valid `sent`/`delivered`/`read` proves the send
+/// succeeded, so the bubble must recover instead of staying red. Between two
+/// confirmed states the furthest along wins (`sent` < `delivered` < `read`). A
+/// local `failed` is kept over a still-`pending` retry so it does not flicker
+/// back to "sending"; a manual retry clears it via [ChatDao.markPending].
 String _maxStatus(String? current, String incoming) {
-  final a = _statusOrder[current] ?? 0;
-  final b = _statusOrder[incoming] ?? 0;
-  if (current == 'failed' && incoming != 'failed') return 'failed';
-  return b > a ? incoming : (current ?? incoming);
+  final cur = current ?? incoming;
+  final curConfirmed = _confirmedStatuses.contains(cur);
+  final nextConfirmed = _confirmedStatuses.contains(incoming);
+
+  if (nextConfirmed) {
+    if (!curConfirmed) return incoming;
+    return (_statusOrder[incoming] ?? 0) > (_statusOrder[cur] ?? 0) ? incoming : cur;
+  }
+
+  if (cur == 'failed' && incoming == 'pending') return cur;
+  if (curConfirmed) return cur;
+  return (_statusOrder[incoming] ?? 0) > (_statusOrder[cur] ?? 0) ? incoming : cur;
 }
