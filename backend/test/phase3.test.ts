@@ -58,9 +58,11 @@ describe('presence', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({
+    expect(response.json()).toMatchObject({
       user_id: alice.id,
       online: false,
+      status: 'offline',
+      custom_status: null,
       last_seen_at: null,
     });
   });

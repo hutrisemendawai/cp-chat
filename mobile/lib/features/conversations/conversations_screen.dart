@@ -7,7 +7,9 @@ import '../../core/models/models.dart';
 
 import '../../core/providers.dart';
 import '../../core/widgets/connection_banner.dart';
+import '../../shared/widgets/user_avatar.dart';
 import '../chat/media_message.dart';
+import '../presence/presence_controller.dart';
 
 class ConversationsScreen extends ConsumerStatefulWidget {
   const ConversationsScreen({super.key});
@@ -92,12 +94,15 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
             onPressed: () => context.push('/search'),
           ),
           IconButton(
-            tooltip: 'Sign out',
-            icon: const Icon(Icons.logout),
-            onPressed: () async {
-              await ref.read(authControllerProvider.notifier).logout();
-              if (context.mounted) context.go('/auth');
-            },
+            tooltip: 'My profile',
+            icon: UserAvatarWithStatus(
+              avatarKey: user?.avatarUrl,
+              name: user?.name ?? '?',
+              status: user?.effectiveStatus,
+              radius: 14,
+              showStatus: false,
+            ),
+            onPressed: () => context.push('/profile'),
           ),
         ],
       ),
@@ -163,7 +168,7 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
   }
 }
 
-class _ConversationTile extends StatelessWidget {
+class _ConversationTile extends ConsumerWidget {
   const _ConversationTile({
     required this.conversation,
     required this.selfId,
@@ -175,13 +180,19 @@ class _ConversationTile extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final isGroup = conversation.type == 'group';
     final title = isGroup
         ? (conversation.name ?? 'Group')
-        : (conversation.peerName ?? conversation.name ?? 'Chat');
+        : _peerLabel(conversation);
     final unread = conversation.unreadCount;
+
+    // A direct chat shows the peer's live presence dot; a group has no single
+    // presence, so it keeps the group icon.
+    final presence = isGroup || conversation.peerId == null
+        ? null
+        : ref.watch(presenceProvider(conversation.peerId!));
 
     return ListTile(
       onTap: onTap,
@@ -190,12 +201,10 @@ class _ConversationTile extends StatelessWidget {
               objectKey: conversation.avatarUrl,
               fallback: Icon(Icons.groups, color: theme.colorScheme.onPrimaryContainer),
             )
-          : CircleAvatar(
-              backgroundColor: theme.colorScheme.primaryContainer,
-              foregroundColor: theme.colorScheme.onPrimaryContainer,
-              child: Text(
-                title.isEmpty ? '?' : title.characters.first.toUpperCase(),
-              ),
+          : UserAvatarWithStatus(
+              avatarKey: conversation.peerAvatarUrl,
+              name: conversation.peerName ?? title,
+              status: presence?.resolvedStatus,
             ),
       title: Text(
         title,
@@ -228,6 +237,14 @@ class _ConversationTile extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// "Name (nickname)" for a direct chat, matching the chat header.
+  String _peerLabel(LocalConversation conversation) {
+    final name = conversation.peerName ?? conversation.name ?? 'Chat';
+    final nickname = conversation.peerNickname?.trim();
+    if (nickname == null || nickname.isEmpty) return name;
+    return '$name ($nickname)';
   }
 
   String _subtitle() {

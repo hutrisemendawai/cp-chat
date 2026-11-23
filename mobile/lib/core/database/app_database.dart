@@ -11,6 +11,15 @@ class LocalConversations extends Table {
   /// Display name for a direct conversation: the other participant.
   TextColumn get peerName => text().nullable()();
 
+  /// The other participant's id, used to subscribe to their live presence.
+  TextColumn get peerId => text().nullable()();
+
+  /// The peer's nickname, rendered as `Name (nickname)` in the chat list.
+  TextColumn get peerNickname => text().nullable()();
+
+  /// Peer avatar object key for direct chats, resolved via the media endpoint.
+  TextColumn get peerAvatarUrl => text().nullable()();
+
   /// Group avatar object key, resolved through the media endpoint.
   TextColumn get avatarUrl => text().nullable()();
   TextColumn get lastMessagePreview => text().nullable()();
@@ -79,7 +88,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -101,6 +110,13 @@ class AppDatabase extends _$AppDatabase {
             // Existing outbox rows were plaintext; NULL wire content means
             // "send the stored content unchanged".
             await migrator.addColumn(outboxEntries, outboxEntries.wireContent);
+          }
+          if (from < 5) {
+            // Direct-chat peer identity for the list: id for live presence,
+            // nickname for the "Name (nickname)" label, avatar for the badge.
+            await migrator.addColumn(localConversations, localConversations.peerId);
+            await migrator.addColumn(localConversations, localConversations.peerNickname);
+            await migrator.addColumn(localConversations, localConversations.peerAvatarUrl);
           }
         },
         beforeOpen: (details) async {

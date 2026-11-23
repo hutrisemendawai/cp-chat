@@ -224,6 +224,50 @@ class ApiClient {
     return User.fromJson(_ok(response));
   }
 
+  /// Updates the caller's profile.
+  ///
+  /// Omitted arguments are left unchanged. Pass [clearAvatar],
+  /// [clearNickname], [clearCustomStatus] or [clearBio] to null a field that
+  /// the API would otherwise keep. `avatarUrl` is the object key returned by
+  /// [uploadMedia].
+  Future<User> updateProfile({
+    String? name,
+    String? nickname,
+    String? avatarUrl,
+    bool clearAvatar = false,
+    String? status,
+    String? customStatus,
+    bool clearCustomStatus = false,
+    String? bio,
+    bool clearBio = false,
+  }) async {
+    final payload = <String, dynamic>{};
+    if (name != null) payload['name'] = name;
+    if (nickname != null) payload['nickname'] = nickname;
+    if (status != null) payload['status'] = status;
+
+    if (clearAvatar) {
+      payload['avatar_url'] = null;
+    } else if (avatarUrl != null) {
+      payload['avatar_url'] = avatarUrl;
+    }
+
+    if (clearCustomStatus) {
+      payload['custom_status'] = null;
+    } else if (customStatus != null) {
+      payload['custom_status'] = customStatus;
+    }
+
+    if (clearBio) {
+      payload['bio'] = null;
+    } else if (bio != null) {
+      payload['bio'] = bio;
+    }
+
+    final response = await dio.patch<dynamic>('/api/v1/users/me', data: payload);
+    return User.fromJson(_ok(response));
+  }
+
   Future<List<Conversation>> conversations({int limit = 50}) async {
     final response = await dio.get<dynamic>(
       '/api/v1/conversations',

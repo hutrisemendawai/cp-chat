@@ -120,6 +120,10 @@ paths:
     get:
       tags: [Users]
       summary: Get the authenticated user's profile
+      description: >
+        Returns the caller's real presence preference (`status`, which may be
+        `invisible`) plus `effective_status` (what peers currently see). Until
+        the user opens a gateway socket the effective status is `offline`.
       responses:
         '200':
           description: Current user
@@ -129,6 +133,61 @@ paths:
                 $ref: '#/components/schemas/User'
         '401':
           $ref: '#/components/responses/Unauthorized'
+    patch:
+      tags: [Users]
+      summary: Update the authenticated user's profile
+      description: >
+        Omit a field to leave it unchanged; send `null` to clear `nickname`,
+        `avatar_url`, `custom_status` or `bio`. An empty nickname/custom status
+        is normalised to null. Changing `status` or `custom_status` broadcasts a
+        `presence` frame to every user who shares a conversation with the caller.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdate'
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Users]
+      summary: Get another user's public profile
+      description: >
+        Returns the public profile with presence. An `invisible` user is always
+        reported as `offline`; the raw preference never leaks. `phone_or_email`
+        is included so app users can identify contacts by email before a chat
+        exists.
+      responses:
+        '200':
+          description: Public profile with presence
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
 
   /api/v1/devices/fcm-token:
     post:
@@ -545,11 +604,13 @@ paths:
       tags: [Media]
       summary: Fetch a media object
       description: >
-        Allowed for the owner and for users who share a conversation with the
-        owner. By default the bytes are streamed through the API so a device
-        only needs to reach the API host. Pass `proxy=0` to instead receive a
-        `302` redirect to a short-lived presigned GET (for clients that can
-        reach the storage host directly).
+        Allowed for the owner, for users who share a conversation with the
+        owner, and for any authenticated user when the key is referenced as a
+        user avatar or a group avatar of a conversation they belong to, so
+        profile photos load before a chat exists. By default the bytes are
+        streamed through the API so a device only needs to reach the API host.
+        Pass `proxy=0` to instead receive a `302` redirect to a short-lived
+        presigned GET (for clients that can reach the storage host directly).
       parameters:
         - name: key
           in: path
@@ -598,12 +659,14 @@ paths:
           format: uuid
     get:
       tags: [Presence]
-      summary: Current online state and last-seen time for a user
+      summary: Current visible status and last-seen time for a user
       description: >
         Online state is a Redis key with a 45 s TTL refreshed by the gateway
         heartbeat; `last_seen_at` is persisted when the user's last device
-        disconnects. Live changes after this call arrive as `presence` frames on
-        the WebSocket.
+        disconnects. `status` is the effective visible Discord-style state: an
+        `invisible` user reports `offline` and a connected `dnd` user reports
+        `dnd`. Live changes after this call arrive as `presence` frames on the
+        WebSocket.
       responses:
         '200':
           description: Presence snapshot
@@ -1060,15 +1123,70 @@ components:
           format: uuid
         phone_or_email:
           type: string
-          description: Only returned for the authenticated user
+          description: Included on the caller's own profile and on public profiles
         name:
           type: string
+        nickname:
+          type: string
+          nullable: true
+          maxLength: 60
+          description: Optional handle rendered as "Name (nickname)"
         avatar_url:
           type: string
+          nullable: true
+          description: Object key returned by the media service
+        status:
+          type: string
+          enum: [online, idle, dnd, invisible, offline]
+          description: >
+            On the caller's own profile, the real preference (including
+            `invisible`). On another user's profile, the masked visible value
+            (`invisible` is never returned).
+        effective_status:
+          type: string
+          enum: [online, idle, dnd, offline]
+          description: What peers currently see, derived from preference and connection
+        custom_status:
+          type: string
+          nullable: true
+          maxLength: 120
+        bio:
+          type: string
+          nullable: true
+        last_seen_at:
+          type: string
+          format: date-time
           nullable: true
         created_at:
           type: string
           format: date-time
+
+    ProfileUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        nickname:
+          type: string
+          nullable: true
+          maxLength: 60
+        avatar_url:
+          type: string
+          nullable: true
+          description: Object key returned by the media service; null clears it
+        status:
+          type: string
+          enum: [online, idle, dnd, invisible]
+        custom_status:
+          type: string
+          nullable: true
+          maxLength: 120
+        bio:
+          type: string
+          nullable: true
 
     TokenPair:
       type: object
@@ -1258,6 +1376,16 @@ components:
           format: uuid
         online:
           type: boolean
+          description: Backward-compatible alias for `status != "offline"`
+        status:
+          type: string
+          enum: [online, idle, dnd, offline]
+          description: >
+            Effective visible status. An `invisible` user is reported as
+            `offline`; a connected `dnd` user reports `dnd`.
+        custom_status:
+          type: string
+          nullable: true
         last_seen_at:
           type: string
           format: date-time

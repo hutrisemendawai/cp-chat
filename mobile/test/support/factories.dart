@@ -22,9 +22,23 @@ Message message(
   );
 }
 
-User user(String id, {String? name}) => User(
+User user(
+  String id, {
+  String? name,
+  String? nickname,
+  String? avatarKey,
+  String? status,
+  String? effectiveStatus,
+  String? customStatus,
+}) =>
+    User(
       id: id,
       name: name ?? id,
+      nickname: nickname,
+      avatarUrl: avatarKey,
+      status: status,
+      effectiveStatus: effectiveStatus,
+      customStatus: customStatus,
     );
 
 Conversation conversation(
@@ -32,6 +46,8 @@ Conversation conversation(
   required String selfId,
   String peerId = 'them',
   String peerName = 'Them',
+  String? peerNickname,
+  String? peerAvatarKey,
   int lastSeq = 0,
   int lastReadSeq = 0,
   int unreadCount = 0,
@@ -47,7 +63,16 @@ Conversation conversation(
     avatarUrl: avatarKey,
     members: [
       ConversationMember(user: user(selfId), role: 'member', lastReadSeq: lastReadSeq),
-      ConversationMember(user: user(peerId, name: peerName), role: 'member', lastReadSeq: 0),
+      ConversationMember(
+        user: user(
+          peerId,
+          name: peerName,
+          nickname: peerNickname,
+          avatarKey: peerAvatarKey,
+        ),
+        role: 'member',
+        lastReadSeq: 0,
+      ),
     ],
     lastSeq: lastSeq,
     lastReadSeq: lastReadSeq,

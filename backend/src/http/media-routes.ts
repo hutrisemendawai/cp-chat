@@ -219,12 +219,12 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
       throw new ApiError('not_found', 'Media not found');
     }
 
-    // Readers are the owner or anyone who shares a conversation with them. A
-    // full ACL is out of scope; the object key is only shared inside message
-    // bodies visible to conversation members.
+    // Readers are the owner, anyone who shares a conversation with them, or any
+    // authenticated user when the object is a profile/group avatar. Avatars must
+    // load before a chat exists, so they are readable app-wide.
     if (record.owner_id !== request.userId) {
       const shares = await users.sharesConversationWith(record.owner_id, request.userId);
-      if (!shares) {
+      if (!shares && !(await users.isAvatarVisibleTo(key, request.userId))) {
         throw new ApiError('forbidden', 'You cannot access this media');
       }
     }

@@ -14,6 +14,8 @@ import { verifyAccessToken } from '../lib/tokens.js';
 import type { NotificationService } from '../lib/fcm.js';
 import type { AppContext } from '../http/context.js';
 import type { MessageRow } from '../domain/messages.js';
+import type { UserStatus } from '../domain/users.js';
+import { USER_STATUSES } from '../domain/users.js';
 import type { Broker, BroadcastPayload, RoutedPayload } from '../lib/broker.js';
 import { InboundConsumer, InboundProducer, type InboundSend } from './inbound.js';
 import { ConnectionRegistry } from './connection-registry.js';
@@ -21,6 +23,7 @@ import { ConnectionRegistry } from './connection-registry.js';
 type ClientFrame =
   | { type: 'send'; conversation_id: string; client_msg_id: string; msg_type: 'text' | 'image' | 'file'; content: string }
   | { type: 'ack'; conversation_id: string; seq: number; status: 'delivered' | 'read' }
+  | { type: 'presence'; status?: string; custom_status?: string | null }
   | { type: 'ping' };
 
 type SocketContext = {
@@ -241,7 +244,7 @@ export class ChatGateway {
     // Only the first live device changes the peers' view from offline to
     // online; a second login of the same user is not a state transition.
     if ((await this.registry.liveDevices(userId)).length === 1) {
-      await this.broadcastPresence(userId, true, null);
+      await this.broadcastPresence(userId);
     }
   }
 
@@ -256,34 +259,40 @@ export class ChatGateway {
       // Presence is per user, not per device: going offline is a transition
       // only once the last device of the user has disconnected.
       if ((await this.registry.liveDevices(userId)).length === 0) {
-        const lastSeen = await this.ctx.presence.markOffline(userId);
-        await this.broadcastPresence(userId, false, lastSeen);
+        await this.ctx.presence.markOffline(userId);
+        await this.broadcastPresence(userId);
       }
     }
   }
 
   /**
-   * Tells every user who shares a conversation with `userId` that their online
-   * state changed. Goes through the broadcast channel so peers connected to any
-   * gateway replica receive it.
+   * Tells every user who shares a conversation with `userId` their visible
+   * presence state. The frame is derived from the user's preference and the
+   * Redis key, so an `invisible` user is broadcast as `offline` and a `dnd`
+   * user keeps their badge while connected. Goes through the broadcast channel
+   * so peers connected to any gateway replica receive it.
    */
-  private async broadcastPresence(
-    userId: string,
-    online: boolean,
-    lastSeenAt: Date | null,
-  ): Promise<void> {
+  private async broadcastPresence(userId: string): Promise<void> {
+    const snapshot = await this.ctx.presence.snapshot(userId);
+    if (!snapshot) return;
+
     const peers = await this.ctx.presence.sharedPeerIds(userId);
     if (peers.length === 0) return;
 
-    await this.broker.publishBroadcast({
-      user_ids: peers,
-      frame: {
-        type: 'presence',
-        user_id: userId,
-        online,
-        last_seen_at: lastSeenAt ? lastSeenAt.toISOString() : null,
+    await this.broker.publishBroadcast(
+      {
+        user_ids: peers,
+        frame: {
+          type: 'presence',
+          user_id: userId,
+          online: snapshot.online,
+          status: snapshot.status,
+          custom_status: snapshot.custom_status,
+          last_seen_at: snapshot.last_seen_at ? snapshot.last_seen_at.toISOString() : null,
+        },
       },
-    });
+      `u:${userId}`,
+    );
   }
 
   private async sweep(): Promise<void> {
@@ -329,6 +338,9 @@ export class ChatGateway {
           return;
         case 'ack':
           await this.handleAck(context, frame as ClientFrame & { type: 'ack' });
+          return;
+        case 'presence':
+          await this.handlePresenceUpdate(context, frame);
           return;
         default:
           // Unknown client events are ignored by contract.
@@ -520,6 +532,49 @@ export class ChatGateway {
     return null;
   }
 
+  /**
+   * A client changes its own Discord-style presence. Only `status` and
+   * `custom_status` are mutable here; a nickname/bio edit goes through REST
+   * (`PATCH /api/v1/users/me`). The visible frame is broadcast so peers update
+   * their badges live — an `invisible` update is broadcast as `offline`.
+   */
+  private async handlePresenceUpdate(
+    context: SocketContext,
+    frame: Record<string, unknown>,
+  ): Promise<void> {
+    const status = frame.status;
+    const customStatus = frame.custom_status;
+
+    if (status !== undefined && !isUserStatus(status)) {
+      throw new ApiError('validation_error', 'status must be online, idle, dnd or invisible');
+    }
+    if (
+      customStatus !== undefined &&
+      customStatus !== null &&
+      (typeof customStatus !== 'string' || customStatus.length > 120)
+    ) {
+      throw new ApiError('validation_error', 'custom_status must be a string of at most 120 chars');
+    }
+
+    await this.ctx.users.updateProfile(context.userId, {
+      status: status === undefined ? undefined : (status as UserStatus),
+      custom_status:
+        customStatus === undefined ? undefined : (customStatus as string | null),
+    });
+
+    await this.broadcastPresence(context.userId);
+  }
+
+  /**
+   * Chooses the FCM notification title for a message. Direct chats show the
+   * sender's display name, a group prefixes it so the chat is identifiable.
+   */
+  private senderLabel(sender: { name: string; nickname: string | null } | null): string {
+    if (!sender) return 'New message';
+    const nickname = sender.nickname?.trim();
+    return nickname ? `${sender.name} (${nickname})` : sender.name;
+  }
+
   private async maybeNotify(
     userId: string,
     message: MessageRow,
@@ -529,11 +584,17 @@ export class ChatGateway {
     const onlineDevices = await this.registry.liveDevices(userId);
     if (onlineDevices.length > 0) return;
 
+    // Do Not Disturb suppresses pushes: the recipient will see the message when
+    // they clear their status. Messages still arrive over the socket the moment
+    // a device reconnects, so nothing is lost.
+    const recipient = await this.ctx.users.findById(userId);
+    if (recipient?.status === 'dnd') return;
+
     const tokens = await this.ctx.devices.tokensForUser(userId);
     if (tokens.length === 0) return;
 
     const sender = await this.ctx.users.findById(message.sender_id);
-    const senderName = sender?.name ?? 'New message';
+    const senderName = this.senderLabel(sender);
     const body = message.type === 'text' ? message.content : 'Sent an attachment';
 
     const stale = await this.notifications.notify(
@@ -785,6 +846,11 @@ export class ChatGateway {
     if (ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
     ws.send(JSON.stringify(frame));
   }
+}
+
+/** Guards a client-supplied presence value before it reaches the database. */
+function isUserStatus(value: unknown): value is UserStatus {
+  return typeof value === 'string' && (USER_STATUSES as readonly string[]).includes(value);
 }
 
 /**

@@ -60,7 +60,15 @@ function mapConversation(row: ConversationRow & { last_seq: string | number }): 
 }
 
 export class ConversationRepository {
-  constructor(private readonly db: Db) {}
+  constructor(
+    private readonly db: Db,
+    /**
+     * Optional presence lookup so a projected member list carries an accurate
+     * `effective_status`. Without it (e.g. a unit test constructing the repo
+     * directly) members report `offline`.
+     */
+    private readonly presence?: { onlineUserIds(ids: string[]): Promise<Set<string>> },
+  ) {}
 
   async isMember(conversationId: string, userId: string): Promise<boolean> {
     const { rows } = await this.db.query(
@@ -488,7 +496,8 @@ export class ConversationRepository {
       }
     >(
       `SELECT cm.conversation_id, cm.role, cm.last_read_seq, cm.joined_at,
-              u.id, u.phone_or_email, u.name, u.avatar_url, u.created_at
+              u.id, u.phone_or_email, u.name, u.nickname, u.avatar_url,
+              u.status, u.custom_status, u.bio, u.last_seen_at, u.created_at
          FROM conversation_members cm
          JOIN users u ON u.id = cm.user_id
         WHERE cm.conversation_id = ANY($1::uuid[])
@@ -496,17 +505,30 @@ export class ConversationRepository {
       [conversations.map((conversation) => conversation.id)],
     );
 
+    const online = this.presence
+      ? await this.presence.onlineUserIds([...new Set(rows.map((row) => row.id))])
+      : new Set<string>();
+
     const byConversation = new Map<string, MemberRow[]>();
     for (const row of rows) {
       const members = byConversation.get(row.conversation_id) ?? [];
       members.push({
-        user: toPublicUser({
-          id: row.id,
-          phone_or_email: row.phone_or_email,
-          name: row.name,
-          avatar_url: row.avatar_url,
-          created_at: row.created_at,
-        }),
+        user: toPublicUser(
+          {
+            id: row.id,
+            phone_or_email: row.phone_or_email,
+            name: row.name,
+            nickname: row.nickname,
+            avatar_url: row.avatar_url,
+            status: row.status,
+            custom_status: row.custom_status,
+            bio: row.bio,
+            last_seen_at: row.last_seen_at,
+            created_at: row.created_at,
+          },
+          false,
+          online.has(row.id),
+        ),
         role: row.role,
         last_read_seq: Number(row.last_read_seq),
         joined_at: row.joined_at,

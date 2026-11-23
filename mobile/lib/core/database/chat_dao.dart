@@ -80,6 +80,9 @@ class ChatDao {
             type: conversation.type,
             name: Value(conversation.name),
             peerName: Value(_peerName(conversation, selfId)),
+            peerId: Value(_peerId(conversation, selfId)),
+            peerNickname: Value(_peerNickname(conversation, selfId)),
+            peerAvatarUrl: Value(_peerAvatar(conversation, selfId)),
             avatarUrl: Value(conversation.avatarUrl),
             lastMessagePreview: Value(_preview(conversation.lastMessage)),
             lastSeq: Value(conversation.lastSeq),
@@ -110,6 +113,11 @@ class ChatDao {
             type: conversation.type,
             name: Value(conversation.name),
             peerName: Value(_peerName(conversation, selfId) ?? existing?.peerName),
+            peerId: Value(_peerId(conversation, selfId) ?? existing?.peerId),
+            peerNickname:
+                Value(_peerNickname(conversation, selfId) ?? existing?.peerNickname),
+            peerAvatarUrl:
+                Value(_peerAvatar(conversation, selfId) ?? existing?.peerAvatarUrl),
             avatarUrl: Value(conversation.avatarUrl),
             lastMessagePreview: Value(_preview(conversation.lastMessage)),
             lastSeq: Value(lastSeq),
@@ -126,6 +134,21 @@ class ChatDao {
     // shadow it in the chat header.
     if (conversation.type == 'group') return null;
     return conversation.otherMember(selfId)?.user.name;
+  }
+
+  String? _peerId(Conversation conversation, String? selfId) {
+    if (selfId == null || conversation.type == 'group') return null;
+    return conversation.otherMember(selfId)?.user.id;
+  }
+
+  String? _peerNickname(Conversation conversation, String? selfId) {
+    if (selfId == null || conversation.type == 'group') return null;
+    return conversation.otherMember(selfId)?.user.nickname;
+  }
+
+  String? _peerAvatar(Conversation conversation, String? selfId) {
+    if (selfId == null || conversation.type == 'group') return null;
+    return conversation.otherMember(selfId)?.user.avatarUrl;
   }
 
   String? _preview(Message? message) {

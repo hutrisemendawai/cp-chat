@@ -10,6 +10,8 @@ import 'package:material_ui/material_ui.dart';
 import '../../core/database/app_database.dart';
 import '../../core/providers.dart';
 import '../../core/widgets/connection_banner.dart';
+import '../../shared/widgets/status_badge.dart';
+import '../../shared/widgets/user_avatar.dart';
 import '../presence/presence_controller.dart';
 import 'chat_controller.dart';
 import 'chat_search_sheet.dart';
@@ -172,10 +174,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final metadata = ref.watch(conversationMetadataProvider(widget.conversationId));
 
     final cached = conversation.value;
-    final title = cached?.peerName ??
-        cached?.name ??
-        metadata.value?.displayName(selfId ?? '') ??
-        'Chat';
+    final peer = selfId == null ? null : metadata.value?.otherMember(selfId);
+    final peerLabel = peer?.user.displayName;
+    final title = cached?.peerName != null
+        ? _peerLabelFromCache(cached!)
+        : (peerLabel ??
+            cached?.name ??
+            metadata.value?.displayName(selfId ?? '') ??
+            'Chat');
     final isGroup = cached?.type == 'group' || metadata.value?.isGroup == true;
 
     // Register the peer id so outgoing text can be encrypted for this chat.
@@ -195,7 +201,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
 
     // For a 1:1 chat the other participant's live presence is the subtitle.
-    final peer = selfId == null ? null : metadata.value?.otherMember(selfId);
     final presence = !isGroup && peer != null
         ? ref.watch(presenceProvider(peer.user.id))
         : null;
@@ -204,7 +209,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // Sender names make a group thread readable; direct chats already imply it.
     final senderNames = <String, String>{
       if (metadata.value != null)
-        for (final member in metadata.value!.members) member.user.id: member.user.name,
+        for (final member in metadata.value!.members) member.user.id: member.user.displayName,
     };
 
     ref.listen(messagesProvider(widget.conversationId), (_, _) {
@@ -220,14 +225,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           children: [
             Row(
               children: [
-                if (isGroup)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: isGroup
+                      ? MediaAvatar(
+                          objectKey: cached?.avatarUrl,
+                          radius: 16,
+                          fallback: const Icon(Icons.groups),
+                        )
+                      : UserAvatarWithStatus(
+                          avatarKey: peer?.user.avatarUrl ?? cached?.peerAvatarUrl,
+                          name: peer?.user.name ?? cached?.peerName ?? title,
+                          status: presence?.resolvedStatus,
+                          radius: 16,
+                          showStatus: false,
+                        ),
+                ),
+                if (!isGroup && presence != null)
                   Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: MediaAvatar(
-                      objectKey: cached?.avatarUrl,
-                      radius: 16,
-                      fallback: Icon(isGroup ? Icons.groups : Icons.person),
-                    ),
+                    padding: const EdgeInsets.only(right: 6),
+                    child: StatusBadge(status: presence.resolvedStatus, size: 10),
                   ),
                 Flexible(
                   child: Text(title, overflow: TextOverflow.ellipsis),
@@ -238,7 +255,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               Text(
                 presenceLabel,
                 style: theme.textTheme.labelSmall?.copyWith(
-                  color: presence?.online == true
+                  color: presence?.isActive == true
                       ? theme.colorScheme.primary
                       : theme.colorScheme.onSurfaceVariant,
                 ),
@@ -366,6 +383,14 @@ final conversationLocalProvider =
     StreamProvider.family<LocalConversation?, String>((ref, conversationId) {
   return ref.watch(chatDaoProvider).watchConversation(conversationId);
 });
+
+/// "Name (nickname)" from the cached direct-chat peer fields.
+String _peerLabelFromCache(LocalConversation conversation) {
+  final name = conversation.peerName ?? conversation.name ?? 'Chat';
+  final nickname = conversation.peerNickname?.trim();
+  if (nickname == null || nickname.isEmpty) return name;
+  return '$name ($nickname)';
+}
 
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({

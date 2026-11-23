@@ -234,6 +234,42 @@ void main() {
       expect(row.lastSeq, 4);
     });
 
+    test('caches the peer id, nickname and avatar for the chat list', () async {
+      await dao.upsertConversations(
+        [
+          conversation(
+            'conv-1',
+            selfId: 'me',
+            peerId: 'bob',
+            peerName: 'Bob',
+            peerNickname: 'bo',
+            peerAvatarKey: 'bob/avatar.jpg',
+          ),
+        ],
+        selfId: 'me',
+      );
+
+      final row = await dao.conversation('conv-1');
+      expect(row!.peerId, 'bob');
+      expect(row.peerNickname, 'bo');
+      expect(row.peerAvatarUrl, 'bob/avatar.jpg');
+    });
+
+    test('a group caches no peer identity', () async {
+      await dao.upsertConversations(
+        [
+          conversation('group-1', selfId: 'me', type: 'group', name: 'Team'),
+        ],
+        selfId: 'me',
+      );
+
+      final row = await dao.conversation('group-1');
+      expect(row!.peerName, isNull);
+      expect(row.peerId, isNull);
+      expect(row.peerNickname, isNull);
+      expect(row.peerAvatarUrl, isNull);
+    });
+
     test('a synced message updates the preview and ordering timestamp', () async {
       await dao.upsertConversations([conversation('conv-1', selfId: 'me')]);
 

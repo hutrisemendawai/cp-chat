@@ -168,7 +168,7 @@ describe('auth', () => {
     expect(garbage.statusCode).toBe(401);
   });
 
-  it('hides the contact of other users', async () => {
+  it('exposes the contact of another user so contacts can be identified', async () => {
     const viewer = await registerUser(harness, 'Viewer User');
     const other = await registerUser(harness, 'Other User');
 
@@ -179,7 +179,7 @@ describe('auth', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).not.toHaveProperty('phone_or_email');
+    expect(response.json().phone_or_email).toBe(other.email);
   });
 });
 

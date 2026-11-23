@@ -575,9 +575,22 @@ class ChatSocket {
       Presence.fromJson({
         'user_id': userId,
         'online': online,
+        'status': frame['status'],
+        'custom_status': frame['custom_status'],
         'last_seen_at': frame['last_seen_at'],
       }),
     );
+  }
+
+  /// Pushes the caller's visible presence state to the gateway, which fans it
+  /// out to peers who share a conversation. Fire-and-forget: the profile is
+  /// already saved over REST, so a dropped frame only delays the badge update.
+  void setPresence({required String status, String? customStatus}) {
+    _write({
+      'type': 'presence',
+      'status': status,
+      'custom_status': ?customStatus,
+    });
   }
 
   void _startHeartbeat() {

@@ -153,6 +153,84 @@ void main() {
       expect(receipt.readCount, 3);
       expect(receipt.memberCount, 8);
     });
+
+    test('parses a profile with nickname, status, custom status and bio', () {
+      final user = User.fromJson(
+        jsonDecode('''
+        {
+          "id": "u1", "name": "Alice", "nickname": "ally",
+          "avatar_url": "u1/a.jpg", "status": "dnd",
+          "effective_status": "dnd", "custom_status": "heads down",
+          "bio": "Hello there", "phone_or_email": "alice@example.com",
+          "last_seen_at": "2026-01-01T00:00:00Z"
+        }
+        ''') as Map<String, dynamic>,
+      );
+
+      expect(user.nickname, 'ally');
+      expect(user.status, 'dnd');
+      expect(user.effectiveStatus, 'dnd');
+      expect(user.customStatus, 'heads down');
+      expect(user.bio, 'Hello there');
+      expect(user.lastSeenAt, DateTime.utc(2026, 1, 1));
+    });
+
+    test('displayName renders "Name (nickname)" only when a nickname is set', () {
+      const withNickname = User(id: 'u1', name: 'Alice', nickname: 'ally');
+      const blankNickname = User(id: 'u1', name: 'Alice', nickname: '   ');
+      const noNickname = User(id: 'u1', name: 'Alice');
+
+      expect(withNickname.displayName, 'Alice (ally)');
+      expect(blankNickname.displayName, 'Alice');
+      expect(noNickname.displayName, 'Alice');
+    });
+
+    test('a direct conversation display name uses the peer nickname', () {
+      final conversation = Conversation.fromJson(
+        jsonDecode('''
+        {
+          "id": "c1", "type": "direct", "name": null, "created_by": "u1",
+          "last_seq": 0, "last_read_seq": 0, "unread_count": 0,
+          "created_at": "2026-01-01T00:00:00Z",
+          "members": [
+            {"user": {"id": "u1", "name": "Alice", "created_at": "2026-01-01T00:00:00Z"},
+             "role": "member", "last_read_seq": 0},
+            {"user": {"id": "u2", "name": "Bob", "nickname": "bo",
+                      "created_at": "2026-01-01T00:00:00Z"},
+             "role": "member", "last_read_seq": 0}
+          ],
+          "last_message": null
+        }
+        ''') as Map<String, dynamic>,
+      );
+
+      expect(conversation.displayName('u1'), 'Bob (bo)');
+    });
+
+    test('parses a Discord presence snapshot with status and custom status', () {
+      final presence = Presence.fromJson({
+        'user_id': 'u1',
+        'online': true,
+        'status': 'idle',
+        'custom_status': 'brb',
+        'last_seen_at': null,
+      });
+
+      expect(presence.resolvedStatus, 'idle');
+      expect(presence.customStatus, 'brb');
+      expect(presence.isActive, isTrue);
+    });
+
+    test('an invisible presence is not active', () {
+      final presence = Presence.fromJson({
+        'user_id': 'u1',
+        'online': false,
+        'status': 'offline',
+      });
+
+      expect(presence.resolvedStatus, 'offline');
+      expect(presence.isActive, isFalse);
+    });
   });
 
   group('ApiException', () {

@@ -41,6 +41,8 @@ class PresenceNotifier extends Notifier<Presence?> {
   }
 
   bool _isNewer(Presence candidate, Presence current) {
+    if (candidate.resolvedStatus != current.resolvedStatus) return true;
+    if (candidate.customStatus != current.customStatus) return true;
     if (candidate.online != current.online) return true;
     final next = candidate.lastSeenAt;
     final previous = current.lastSeenAt;
@@ -53,10 +55,43 @@ class PresenceNotifier extends Notifier<Presence?> {
 final presenceProvider =
     NotifierProvider.family<PresenceNotifier, Presence?, String>(PresenceNotifier.new);
 
-/// "Online", "Last seen 5m ago", or nothing while unknown.
+/// Human label for a Discord-style status, used by the selector and badges.
+String statusLabel(String status) {
+  switch (status) {
+    case 'online':
+      return 'Online';
+    case 'idle':
+      return 'Idle';
+    case 'dnd':
+      return 'Do Not Disturb';
+    case 'offline':
+    case 'invisible':
+      return 'Invisible';
+    default:
+      return 'Offline';
+  }
+}
+
+/// Secondary header line: a live status label, or a relative last-seen time.
+///
+/// A custom status takes precedence while the user is visible, so a chat header
+/// can show "Online · Building things". An invisible or offline user never
+/// reveals a status label.
 String? formatPresence(Presence? presence, {DateTime? now}) {
   if (presence == null) return null;
-  if (presence.online) return 'Online';
+
+  final label = switch (presence.resolvedStatus) {
+    'online' => 'Online',
+    'idle' => 'Idle',
+    'dnd' => 'Do Not Disturb',
+    _ => null,
+  };
+
+  if (label != null) {
+    final custom = presence.customStatus?.trim();
+    if (custom != null && custom.isNotEmpty) return '$label · $custom';
+    return label;
+  }
 
   final lastSeen = presence.lastSeenAt;
   if (lastSeen == null) return 'Offline';

@@ -47,6 +47,37 @@ class $LocalConversationsTable extends LocalConversations
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _peerIdMeta = const VerificationMeta('peerId');
+  @override
+  late final GeneratedColumn<String> peerId = GeneratedColumn<String>(
+    'peer_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _peerNicknameMeta = const VerificationMeta(
+    'peerNickname',
+  );
+  @override
+  late final GeneratedColumn<String> peerNickname = GeneratedColumn<String>(
+    'peer_nickname',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _peerAvatarUrlMeta = const VerificationMeta(
+    'peerAvatarUrl',
+  );
+  @override
+  late final GeneratedColumn<String> peerAvatarUrl = GeneratedColumn<String>(
+    'peer_avatar_url',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _avatarUrlMeta = const VerificationMeta(
     'avatarUrl',
   );
@@ -122,6 +153,9 @@ class $LocalConversationsTable extends LocalConversations
     type,
     name,
     peerName,
+    peerId,
+    peerNickname,
+    peerAvatarUrl,
     avatarUrl,
     lastMessagePreview,
     lastSeq,
@@ -164,6 +198,30 @@ class $LocalConversationsTable extends LocalConversations
       context.handle(
         _peerNameMeta,
         peerName.isAcceptableOrUnknown(data['peer_name']!, _peerNameMeta),
+      );
+    }
+    if (data.containsKey('peer_id')) {
+      context.handle(
+        _peerIdMeta,
+        peerId.isAcceptableOrUnknown(data['peer_id']!, _peerIdMeta),
+      );
+    }
+    if (data.containsKey('peer_nickname')) {
+      context.handle(
+        _peerNicknameMeta,
+        peerNickname.isAcceptableOrUnknown(
+          data['peer_nickname']!,
+          _peerNicknameMeta,
+        ),
+      );
+    }
+    if (data.containsKey('peer_avatar_url')) {
+      context.handle(
+        _peerAvatarUrlMeta,
+        peerAvatarUrl.isAcceptableOrUnknown(
+          data['peer_avatar_url']!,
+          _peerAvatarUrlMeta,
+        ),
       );
     }
     if (data.containsKey('avatar_url')) {
@@ -238,6 +296,18 @@ class $LocalConversationsTable extends LocalConversations
         DriftSqlType.string,
         data['${effectivePrefix}peer_name'],
       ),
+      peerId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}peer_id'],
+      ),
+      peerNickname: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}peer_nickname'],
+      ),
+      peerAvatarUrl: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}peer_avatar_url'],
+      ),
       avatarUrl: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}avatar_url'],
@@ -280,6 +350,15 @@ class LocalConversation extends DataClass
   /// Display name for a direct conversation: the other participant.
   final String? peerName;
 
+  /// The other participant's id, used to subscribe to their live presence.
+  final String? peerId;
+
+  /// The peer's nickname, rendered as `Name (nickname)` in the chat list.
+  final String? peerNickname;
+
+  /// Peer avatar object key for direct chats, resolved via the media endpoint.
+  final String? peerAvatarUrl;
+
   /// Group avatar object key, resolved through the media endpoint.
   final String? avatarUrl;
   final String? lastMessagePreview;
@@ -292,6 +371,9 @@ class LocalConversation extends DataClass
     required this.type,
     this.name,
     this.peerName,
+    this.peerId,
+    this.peerNickname,
+    this.peerAvatarUrl,
     this.avatarUrl,
     this.lastMessagePreview,
     required this.lastSeq,
@@ -309,6 +391,15 @@ class LocalConversation extends DataClass
     }
     if (!nullToAbsent || peerName != null) {
       map['peer_name'] = Variable<String>(peerName);
+    }
+    if (!nullToAbsent || peerId != null) {
+      map['peer_id'] = Variable<String>(peerId);
+    }
+    if (!nullToAbsent || peerNickname != null) {
+      map['peer_nickname'] = Variable<String>(peerNickname);
+    }
+    if (!nullToAbsent || peerAvatarUrl != null) {
+      map['peer_avatar_url'] = Variable<String>(peerAvatarUrl);
     }
     if (!nullToAbsent || avatarUrl != null) {
       map['avatar_url'] = Variable<String>(avatarUrl);
@@ -331,6 +422,15 @@ class LocalConversation extends DataClass
       peerName: peerName == null && nullToAbsent
           ? const Value.absent()
           : Value(peerName),
+      peerId: peerId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(peerId),
+      peerNickname: peerNickname == null && nullToAbsent
+          ? const Value.absent()
+          : Value(peerNickname),
+      peerAvatarUrl: peerAvatarUrl == null && nullToAbsent
+          ? const Value.absent()
+          : Value(peerAvatarUrl),
       avatarUrl: avatarUrl == null && nullToAbsent
           ? const Value.absent()
           : Value(avatarUrl),
@@ -354,6 +454,9 @@ class LocalConversation extends DataClass
       type: serializer.fromJson<String>(json['type']),
       name: serializer.fromJson<String?>(json['name']),
       peerName: serializer.fromJson<String?>(json['peerName']),
+      peerId: serializer.fromJson<String?>(json['peerId']),
+      peerNickname: serializer.fromJson<String?>(json['peerNickname']),
+      peerAvatarUrl: serializer.fromJson<String?>(json['peerAvatarUrl']),
       avatarUrl: serializer.fromJson<String?>(json['avatarUrl']),
       lastMessagePreview: serializer.fromJson<String?>(
         json['lastMessagePreview'],
@@ -372,6 +475,9 @@ class LocalConversation extends DataClass
       'type': serializer.toJson<String>(type),
       'name': serializer.toJson<String?>(name),
       'peerName': serializer.toJson<String?>(peerName),
+      'peerId': serializer.toJson<String?>(peerId),
+      'peerNickname': serializer.toJson<String?>(peerNickname),
+      'peerAvatarUrl': serializer.toJson<String?>(peerAvatarUrl),
       'avatarUrl': serializer.toJson<String?>(avatarUrl),
       'lastMessagePreview': serializer.toJson<String?>(lastMessagePreview),
       'lastSeq': serializer.toJson<int>(lastSeq),
@@ -386,6 +492,9 @@ class LocalConversation extends DataClass
     String? type,
     Value<String?> name = const Value.absent(),
     Value<String?> peerName = const Value.absent(),
+    Value<String?> peerId = const Value.absent(),
+    Value<String?> peerNickname = const Value.absent(),
+    Value<String?> peerAvatarUrl = const Value.absent(),
     Value<String?> avatarUrl = const Value.absent(),
     Value<String?> lastMessagePreview = const Value.absent(),
     int? lastSeq,
@@ -397,6 +506,11 @@ class LocalConversation extends DataClass
     type: type ?? this.type,
     name: name.present ? name.value : this.name,
     peerName: peerName.present ? peerName.value : this.peerName,
+    peerId: peerId.present ? peerId.value : this.peerId,
+    peerNickname: peerNickname.present ? peerNickname.value : this.peerNickname,
+    peerAvatarUrl: peerAvatarUrl.present
+        ? peerAvatarUrl.value
+        : this.peerAvatarUrl,
     avatarUrl: avatarUrl.present ? avatarUrl.value : this.avatarUrl,
     lastMessagePreview: lastMessagePreview.present
         ? lastMessagePreview.value
@@ -412,6 +526,13 @@ class LocalConversation extends DataClass
       type: data.type.present ? data.type.value : this.type,
       name: data.name.present ? data.name.value : this.name,
       peerName: data.peerName.present ? data.peerName.value : this.peerName,
+      peerId: data.peerId.present ? data.peerId.value : this.peerId,
+      peerNickname: data.peerNickname.present
+          ? data.peerNickname.value
+          : this.peerNickname,
+      peerAvatarUrl: data.peerAvatarUrl.present
+          ? data.peerAvatarUrl.value
+          : this.peerAvatarUrl,
       avatarUrl: data.avatarUrl.present ? data.avatarUrl.value : this.avatarUrl,
       lastMessagePreview: data.lastMessagePreview.present
           ? data.lastMessagePreview.value
@@ -434,6 +555,9 @@ class LocalConversation extends DataClass
           ..write('type: $type, ')
           ..write('name: $name, ')
           ..write('peerName: $peerName, ')
+          ..write('peerId: $peerId, ')
+          ..write('peerNickname: $peerNickname, ')
+          ..write('peerAvatarUrl: $peerAvatarUrl, ')
           ..write('avatarUrl: $avatarUrl, ')
           ..write('lastMessagePreview: $lastMessagePreview, ')
           ..write('lastSeq: $lastSeq, ')
@@ -450,6 +574,9 @@ class LocalConversation extends DataClass
     type,
     name,
     peerName,
+    peerId,
+    peerNickname,
+    peerAvatarUrl,
     avatarUrl,
     lastMessagePreview,
     lastSeq,
@@ -465,6 +592,9 @@ class LocalConversation extends DataClass
           other.type == this.type &&
           other.name == this.name &&
           other.peerName == this.peerName &&
+          other.peerId == this.peerId &&
+          other.peerNickname == this.peerNickname &&
+          other.peerAvatarUrl == this.peerAvatarUrl &&
           other.avatarUrl == this.avatarUrl &&
           other.lastMessagePreview == this.lastMessagePreview &&
           other.lastSeq == this.lastSeq &&
@@ -478,6 +608,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
   final Value<String> type;
   final Value<String?> name;
   final Value<String?> peerName;
+  final Value<String?> peerId;
+  final Value<String?> peerNickname;
+  final Value<String?> peerAvatarUrl;
   final Value<String?> avatarUrl;
   final Value<String?> lastMessagePreview;
   final Value<int> lastSeq;
@@ -490,6 +623,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     this.type = const Value.absent(),
     this.name = const Value.absent(),
     this.peerName = const Value.absent(),
+    this.peerId = const Value.absent(),
+    this.peerNickname = const Value.absent(),
+    this.peerAvatarUrl = const Value.absent(),
     this.avatarUrl = const Value.absent(),
     this.lastMessagePreview = const Value.absent(),
     this.lastSeq = const Value.absent(),
@@ -503,6 +639,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     required String type,
     this.name = const Value.absent(),
     this.peerName = const Value.absent(),
+    this.peerId = const Value.absent(),
+    this.peerNickname = const Value.absent(),
+    this.peerAvatarUrl = const Value.absent(),
     this.avatarUrl = const Value.absent(),
     this.lastMessagePreview = const Value.absent(),
     this.lastSeq = const Value.absent(),
@@ -518,6 +657,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     Expression<String>? type,
     Expression<String>? name,
     Expression<String>? peerName,
+    Expression<String>? peerId,
+    Expression<String>? peerNickname,
+    Expression<String>? peerAvatarUrl,
     Expression<String>? avatarUrl,
     Expression<String>? lastMessagePreview,
     Expression<int>? lastSeq,
@@ -531,6 +673,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
       if (type != null) 'type': type,
       if (name != null) 'name': name,
       if (peerName != null) 'peer_name': peerName,
+      if (peerId != null) 'peer_id': peerId,
+      if (peerNickname != null) 'peer_nickname': peerNickname,
+      if (peerAvatarUrl != null) 'peer_avatar_url': peerAvatarUrl,
       if (avatarUrl != null) 'avatar_url': avatarUrl,
       if (lastMessagePreview != null)
         'last_message_preview': lastMessagePreview,
@@ -547,6 +692,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     Value<String>? type,
     Value<String?>? name,
     Value<String?>? peerName,
+    Value<String?>? peerId,
+    Value<String?>? peerNickname,
+    Value<String?>? peerAvatarUrl,
     Value<String?>? avatarUrl,
     Value<String?>? lastMessagePreview,
     Value<int>? lastSeq,
@@ -560,6 +708,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
       type: type ?? this.type,
       name: name ?? this.name,
       peerName: peerName ?? this.peerName,
+      peerId: peerId ?? this.peerId,
+      peerNickname: peerNickname ?? this.peerNickname,
+      peerAvatarUrl: peerAvatarUrl ?? this.peerAvatarUrl,
       avatarUrl: avatarUrl ?? this.avatarUrl,
       lastMessagePreview: lastMessagePreview ?? this.lastMessagePreview,
       lastSeq: lastSeq ?? this.lastSeq,
@@ -584,6 +735,15 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     }
     if (peerName.present) {
       map['peer_name'] = Variable<String>(peerName.value);
+    }
+    if (peerId.present) {
+      map['peer_id'] = Variable<String>(peerId.value);
+    }
+    if (peerNickname.present) {
+      map['peer_nickname'] = Variable<String>(peerNickname.value);
+    }
+    if (peerAvatarUrl.present) {
+      map['peer_avatar_url'] = Variable<String>(peerAvatarUrl.value);
     }
     if (avatarUrl.present) {
       map['avatar_url'] = Variable<String>(avatarUrl.value);
@@ -616,6 +776,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
           ..write('type: $type, ')
           ..write('name: $name, ')
           ..write('peerName: $peerName, ')
+          ..write('peerId: $peerId, ')
+          ..write('peerNickname: $peerNickname, ')
+          ..write('peerAvatarUrl: $peerAvatarUrl, ')
           ..write('avatarUrl: $avatarUrl, ')
           ..write('lastMessagePreview: $lastMessagePreview, ')
           ..write('lastSeq: $lastSeq, ')
@@ -1862,6 +2025,9 @@ typedef $$LocalConversationsTableCreateCompanionBuilder =
       required String type,
       Value<String?> name,
       Value<String?> peerName,
+      Value<String?> peerId,
+      Value<String?> peerNickname,
+      Value<String?> peerAvatarUrl,
       Value<String?> avatarUrl,
       Value<String?> lastMessagePreview,
       Value<int> lastSeq,
@@ -1876,6 +2042,9 @@ typedef $$LocalConversationsTableUpdateCompanionBuilder =
       Value<String> type,
       Value<String?> name,
       Value<String?> peerName,
+      Value<String?> peerId,
+      Value<String?> peerNickname,
+      Value<String?> peerAvatarUrl,
       Value<String?> avatarUrl,
       Value<String?> lastMessagePreview,
       Value<int> lastSeq,
@@ -1911,6 +2080,21 @@ class $$LocalConversationsTableFilterComposer
 
   ColumnFilters<String> get peerName => $composableBuilder(
     column: $table.peerName,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get peerId => $composableBuilder(
+    column: $table.peerId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get peerNickname => $composableBuilder(
+    column: $table.peerNickname,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get peerAvatarUrl => $composableBuilder(
+    column: $table.peerAvatarUrl,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1974,6 +2158,21 @@ class $$LocalConversationsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get peerId => $composableBuilder(
+    column: $table.peerId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get peerNickname => $composableBuilder(
+    column: $table.peerNickname,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get peerAvatarUrl => $composableBuilder(
+    column: $table.peerAvatarUrl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get avatarUrl => $composableBuilder(
     column: $table.avatarUrl,
     builder: (column) => ColumnOrderings(column),
@@ -2025,6 +2224,19 @@ class $$LocalConversationsTableAnnotationComposer
 
   GeneratedColumn<String> get peerName =>
       $composableBuilder(column: $table.peerName, builder: (column) => column);
+
+  GeneratedColumn<String> get peerId =>
+      $composableBuilder(column: $table.peerId, builder: (column) => column);
+
+  GeneratedColumn<String> get peerNickname => $composableBuilder(
+    column: $table.peerNickname,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get peerAvatarUrl => $composableBuilder(
+    column: $table.peerAvatarUrl,
+    builder: (column) => column,
+  );
 
   GeneratedColumn<String> get avatarUrl =>
       $composableBuilder(column: $table.avatarUrl, builder: (column) => column);
@@ -2095,6 +2307,9 @@ class $$LocalConversationsTableTableManager
                 Value<String> type = const Value.absent(),
                 Value<String?> name = const Value.absent(),
                 Value<String?> peerName = const Value.absent(),
+                Value<String?> peerId = const Value.absent(),
+                Value<String?> peerNickname = const Value.absent(),
+                Value<String?> peerAvatarUrl = const Value.absent(),
                 Value<String?> avatarUrl = const Value.absent(),
                 Value<String?> lastMessagePreview = const Value.absent(),
                 Value<int> lastSeq = const Value.absent(),
@@ -2107,6 +2322,9 @@ class $$LocalConversationsTableTableManager
                 type: type,
                 name: name,
                 peerName: peerName,
+                peerId: peerId,
+                peerNickname: peerNickname,
+                peerAvatarUrl: peerAvatarUrl,
                 avatarUrl: avatarUrl,
                 lastMessagePreview: lastMessagePreview,
                 lastSeq: lastSeq,
@@ -2121,6 +2339,9 @@ class $$LocalConversationsTableTableManager
                 required String type,
                 Value<String?> name = const Value.absent(),
                 Value<String?> peerName = const Value.absent(),
+                Value<String?> peerId = const Value.absent(),
+                Value<String?> peerNickname = const Value.absent(),
+                Value<String?> peerAvatarUrl = const Value.absent(),
                 Value<String?> avatarUrl = const Value.absent(),
                 Value<String?> lastMessagePreview = const Value.absent(),
                 Value<int> lastSeq = const Value.absent(),
@@ -2133,6 +2354,9 @@ class $$LocalConversationsTableTableManager
                 type: type,
                 name: name,
                 peerName: peerName,
+                peerId: peerId,
+                peerNickname: peerNickname,
+                peerAvatarUrl: peerAvatarUrl,
                 avatarUrl: avatarUrl,
                 lastMessagePreview: lastMessagePreview,
                 lastSeq: lastSeq,

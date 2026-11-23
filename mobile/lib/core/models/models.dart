@@ -6,21 +6,83 @@ class User {
   const User({
     required this.id,
     required this.name,
+    this.nickname,
     this.avatarUrl,
     this.phoneOrEmail,
+    this.status,
+    this.effectiveStatus,
+    this.customStatus,
+    this.bio,
+    this.lastSeenAt,
   });
 
-  factory User.fromJson(Map<String, dynamic> json) => User(
-        id: json['id'] as String,
-        name: json['name'] as String,
-        avatarUrl: json['avatar_url'] as String?,
-        phoneOrEmail: json['phone_or_email'] as String?,
-      );
+  factory User.fromJson(Map<String, dynamic> json) {
+    final lastSeen = json['last_seen_at'];
+    final effective = json['effective_status'] as String?;
+    return User(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      nickname: json['nickname'] as String?,
+      avatarUrl: json['avatar_url'] as String?,
+      phoneOrEmail: json['phone_or_email'] as String?,
+      status: json['status'] as String?,
+      effectiveStatus: effective ?? (json['status'] as String?),
+      customStatus: json['custom_status'] as String?,
+      bio: json['bio'] as String?,
+      lastSeenAt: lastSeen is String ? DateTime.parse(lastSeen).toUtc() : null,
+    );
+  }
 
   final String id;
   final String name;
+  final String? nickname;
   final String? avatarUrl;
   final String? phoneOrEmail;
+
+  /// The presence preference (`online`/`idle`/`dnd`/`invisible`).
+  final String? status;
+
+  /// What peers actually see (`online`/`idle`/`dnd`/`offline`).
+  final String? effectiveStatus;
+
+  final String? customStatus;
+  final String? bio;
+  final DateTime? lastSeenAt;
+
+  /// "Name (nickname)" when a nickname is set, otherwise the plain name.
+  String get displayName {
+    final nick = nickname?.trim();
+    return nick != null && nick.isNotEmpty ? '$name ($nick)' : name;
+  }
+
+  /// Copy with a replacement presence preference, used after a profile edit.
+  User copyWith({
+    String? name,
+    String? nickname,
+    String? avatarUrl,
+    String? status,
+    String? effectiveStatus,
+    String? customStatus,
+    String? bio,
+    DateTime? lastSeenAt,
+    bool clearNickname = false,
+    bool clearCustomStatus = false,
+    bool clearBio = false,
+    bool clearAvatar = false,
+  }) {
+    return User(
+      id: id,
+      name: name ?? this.name,
+      nickname: clearNickname ? null : (nickname ?? this.nickname),
+      avatarUrl: clearAvatar ? null : (avatarUrl ?? this.avatarUrl),
+      phoneOrEmail: phoneOrEmail,
+      status: status ?? this.status,
+      effectiveStatus: effectiveStatus ?? this.effectiveStatus,
+      customStatus: clearCustomStatus ? null : (customStatus ?? this.customStatus),
+      bio: clearBio ? null : (bio ?? this.bio),
+      lastSeenAt: lastSeenAt ?? this.lastSeenAt,
+    );
+  }
 }
 
 class AuthSession {
@@ -177,7 +239,7 @@ class Conversation {
 
   String displayName(String selfId) {
     if (type == 'group') return name ?? 'Group';
-    return otherMember(selfId)?.user.name ?? 'Chat';
+    return otherMember(selfId)?.user.displayName ?? 'Chat';
   }
 }
 
@@ -266,21 +328,39 @@ class Presence {
   const Presence({
     required this.userId,
     required this.online,
+    this.status = '',
+    this.customStatus,
     this.lastSeenAt,
   });
 
   factory Presence.fromJson(Map<String, dynamic> json) {
     final lastSeen = json['last_seen_at'];
+    final status = json['status'] as String?;
+    final online = json['online'] as bool? ?? false;
     return Presence(
       userId: json['user_id'] as String,
-      online: json['online'] as bool? ?? false,
+      online: online,
+      // Fall back to online/offline for a server that predates Discord statuses.
+      status: status ?? (online ? 'online' : 'offline'),
+      customStatus: json['custom_status'] as String?,
       lastSeenAt: lastSeen is String ? DateTime.parse(lastSeen).toUtc() : null,
     );
   }
 
   final String userId;
   final bool online;
+
+  /// `online` | `idle` | `dnd` | `offline`, or empty when only [online] is known.
+  final String status;
+  final String? customStatus;
   final DateTime? lastSeenAt;
+
+  /// The Discord-style status, deriving it from [online] when absent.
+  String get resolvedStatus => status.isEmpty ? (online ? 'online' : 'offline') : status;
+
+  /// True for the three visible connected states.
+  bool get isActive =>
+      resolvedStatus == 'online' || resolvedStatus == 'idle' || resolvedStatus == 'dnd';
 }
 
 /// A message search hit. Carries the conversation it belongs to so global

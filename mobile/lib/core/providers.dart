@@ -249,6 +249,20 @@ class AuthController extends Notifier<AuthSession?> {
     await ref.read(chatDaoProvider).clearAll();
     state = null;
   }
+
+  /// Replaces the cached user after a profile edit so every screen reading
+  /// [currentUserProvider] (chat list avatar, headers) refreshes immediately,
+  /// without ending the session or re-fetching.
+  void applyUser(User user) {
+    final current = state;
+    if (current == null) return;
+    state = AuthSession(
+      user: user,
+      accessToken: current.accessToken,
+      refreshToken: current.refreshToken,
+      expiresIn: current.expiresIn,
+    );
+  }
 }
 
 final authControllerProvider =

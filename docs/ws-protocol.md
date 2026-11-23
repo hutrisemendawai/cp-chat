@@ -115,7 +115,9 @@ A message is stored once. The gateway then fans out on write:
 - **Groups** deliver the same frame to every other member in one pass. Member
   ids come from a Redis cache (`members:{conversation_id}`) that is invalidated
   on any membership change, so a removed member stops receiving immediately.
-- Members with no live gateway connection receive an FCM push instead.
+- Members with no live gateway connection receive an FCM push instead. A
+  recipient whose preference is `dnd` is skipped: the push is suppressed and the
+  message is delivered when a device reconnects (nothing is lost).
 
 Fan-out is best-effort per recipient: a member whose node is unreachable is
 still caught up by the `sync` endpoint on their next connect.
@@ -157,6 +159,21 @@ A user may hold several sockets (one per logged-in device). The gateway keeps a
 ```
 
 The server replies with `{ "type": "pong" }`.
+
+### `presence` — change your visible status
+
+```json
+{ "type": "presence", "status": "dnd", "custom_status": "heads down" }
+```
+
+- Updates the caller's own Discord-style preference and broadcasts a
+  [`presence`](#presence--presence-state-change) frame to peers. `status` is one
+  of `online`, `idle`, `dnd`, `invisible`. `custom_status` (≤120 chars) is
+  optional; omit it to leave it unchanged.
+- Equivalent to `PATCH /api/v1/users/me` for the two presence fields and is used
+  for a quick status change without a REST round trip.
+- An `invisible` update is broadcast to peers as `offline`, never as online.
+- An invalid `status` is rejected with a `validation_error` error frame.
 
 ## Server -> Client events
 
@@ -269,23 +286,33 @@ as the socket is up. A screen shows a reconnect banner while the socket is down.
   badge, so reading a chat on a phone also clears it on a tablet.
 - It carries no sender identity: it is only delivered to the same user.
 
-### `presence` — online state change
+### `presence` — presence state change
 
 ```json
 {
   "type": "presence",
   "user_id": "u1",
-  "online": false,
-  "last_seen_at": "2026-11-20T08:00:00Z"
+  "online": true,
+  "status": "dnd",
+  "custom_status": "heads down",
+  "last_seen_at": null
 }
 ```
 
 - Delivered to every user who shares at least one conversation with `user_id`.
-- `online: true` is broadcast when a user's *first* device connects;
-  `online: false` when their *last* device disconnects. A second device coming or
-  going does not change the state, so peers see no flapping.
-- `last_seen_at` is present on an offline transition and is the durable
-  `users.last_seen_at` value; it is `null` on the online transition.
+- `status` is the **effective visible** Discord state: `online`, `idle`, `dnd`,
+  or `offline`. A user whose preference is `invisible` is always reported as
+  `offline`, whatever their connection state, so the privacy setting never leaks.
+  A connected user set to `dnd` reports `dnd`.
+- `online` is kept as a backward-compatible alias for `status !== "offline"`.
+- `custom_status` is the user's free-text headline, or `null`.
+- A presence frame is emitted when a user's first device connects, when their
+  last device disconnects, and when they change their status over `PATCH
+  /api/v1/users/me` or the [`presence`](#presence--change-your-visible-status)
+  client frame. A second device connecting/disconnecting does not change the
+  state, so peers see no flapping.
+- `last_seen_at` is the durable `users.last_seen_at` value (the last
+  disconnection time), or `null` if the user has never disconnected.
 - Not replayed to late subscribers: a client opening a chat should fetch the
   current snapshot from `GET /api/v1/presence/{id}` (see the REST spec) and then
   apply subsequent frames.

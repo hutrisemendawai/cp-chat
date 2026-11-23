@@ -49,7 +49,10 @@ export function createContext(
     enabled: config.LOG_BUFFER_ENABLED,
   }),
 ): AppContext {
-  const conversations = new ConversationRepository(db);
+  const presence = new PresenceService(redis, db, config.PRESENCE_TTL_SECONDS);
+  // Member projections need presence for the status badge; pass the service so
+  // a conversation payload carries an accurate `effective_status`.
+  const conversations = new ConversationRepository(db, presence);
   const logger = createLogger(config, 'broker');
 
   // `MESSAGE_STORE=scylla` moves history reads to the wide-column store and
@@ -79,7 +82,7 @@ export function createContext(
     keys: new KeyRepository(db),
     media: new MediaRepository(db),
     members: new MemberCache(redis, conversations, config.MEMBERS_CACHE_TTL_SECONDS),
-    presence: new PresenceService(redis, db, config.PRESENCE_TTL_SECONDS),
+    presence,
     storage: new StorageService(config),
     logs,
   };

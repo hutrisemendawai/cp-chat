@@ -7,6 +7,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../shared/widgets/user_avatar.dart';
 
 import 'group_controller.dart';
 
@@ -273,15 +274,15 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
                     ),
                     for (final member in conversation.members)
                       ListTile(
-                        leading: CircleAvatar(
-                          child: Text(
-                            member.user.name.isEmpty
-                                ? '?'
-                                : member.user.name.characters.first.toUpperCase(),
-                          ),
+                        leading: UserAvatarWithStatus(
+                          avatarKey: member.user.avatarUrl,
+                          name: member.user.name,
+                          status: member.user.effectiveStatus,
                         ),
                         title: Text(
-                          member.user.id == selfId ? '${member.user.name} (you)' : member.user.name,
+                          member.user.id == selfId
+                              ? '${member.user.displayName} (you)'
+                              : member.user.displayName,
                         ),
                         subtitle: Text(member.role == 'admin' ? 'Admin' : 'Member'),
                         trailing: member.user.id == selfId || !_canRemove(conversation, selfId)

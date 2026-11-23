@@ -13,6 +13,7 @@ import 'features/chat/chat_screen.dart';
 import 'features/conversations/conversations_screen.dart';
 import 'features/groups/create_group_screen.dart';
 import 'features/groups/group_info_screen.dart';
+import 'features/profile/my_profile_screen.dart';
 import 'features/search/search_screen.dart';
 
 void main() async {
@@ -34,6 +35,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/search',
         builder: (context, state) => const SearchScreen(),
+      ),
+      GoRoute(
+        path: '/profile',
+        builder: (context, state) => const MyProfileScreen(),
       ),
       GoRoute(
         path: '/conversations',
