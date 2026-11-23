@@ -60,30 +60,10 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
     final current = _conversation;
     if (current == null) return;
 
-    final controller = TextEditingController(text: current.name ?? '');
     final name = await showDialog<String>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Rename group'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLength: 100,
-          decoration: const InputDecoration(labelText: 'Group name'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+      builder: (_) => _RenameGroupDialog(initialName: current.name ?? ''),
     );
-    controller.dispose();
 
     if (name == null || name.isEmpty || name == current.name) return;
     await _run(() async {
@@ -299,5 +279,49 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
   bool _canRemove(Conversation conversation, String? selfId) {
     if (selfId == null) return false;
     return conversation.isAdmin(selfId);
+  }
+}
+
+/// Owns its text controller for the lifetime of the route: disposing it as soon
+/// as `showDialog` resolves would run while the dialog is still animating out.
+class _RenameGroupDialog extends StatefulWidget {
+  const _RenameGroupDialog({required this.initialName});
+
+  final String initialName;
+
+  @override
+  State<_RenameGroupDialog> createState() => _RenameGroupDialogState();
+}
+
+class _RenameGroupDialogState extends State<_RenameGroupDialog> {
+  late final _controller = TextEditingController(text: widget.initialName);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.of(context).pop(_controller.text.trim());
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Rename group'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        maxLength: 100,
+        decoration: const InputDecoration(labelText: 'Group name'),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Save')),
+      ],
+    );
   }
 }

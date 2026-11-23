@@ -24,6 +24,7 @@ class _FakeApi extends ApiClient {
 
   final List<String> searchedQueries = [];
   int directChats = 0;
+  int addFriends = 0;
 
   @override
   Future<List<User>> friends() async => friendsList;
@@ -59,8 +60,10 @@ class _FakeApi extends ApiClient {
   }
 
   @override
-  Future<User> addFriend({String? userId, String? identifier}) async =>
-      profile.copyWith(isFriend: true);
+  Future<User> addFriend({String? userId, String? identifier}) async {
+    addFriends += 1;
+    return profile.copyWith(isFriend: true);
+  }
 
   @override
   Future<void> removeFriend(String friendId) async {}
@@ -170,5 +173,43 @@ void main() {
 
     expect(api.directChats, 1);
     expect(find.text('opened conv-direct'), findsOneWidget);
+  });
+
+  testWidgets('adding a friend by identifier closes the dialog cleanly',
+      (tester) async {
+    final alice = user('u1', name: 'Alice', nickname: 'Ali');
+    final api = _FakeApi(friendsList: [alice], profile: alice);
+
+    await pumpApp(tester, api);
+
+    await tester.tap(find.byTooltip('Add friend'));
+    await tester.pumpAndSettle();
+
+    final dialogField = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(dialogField, 'alice@example.com');
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+
+    expect(api.addFriends, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('adding a friend from their profile closes cleanly',
+      (tester) async {
+    final alice = user('u1', name: 'Alice', nickname: 'Ali');
+    final api = _FakeApi(friendsList: [alice], profile: alice);
+
+    await pumpApp(tester, api);
+
+    await tester.tap(find.text('Alice (Ali)'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add Friend'));
+    await tester.pumpAndSettle();
+
+    expect(api.addFriends, 1);
+    expect(tester.takeException(), isNull);
   });
 }
