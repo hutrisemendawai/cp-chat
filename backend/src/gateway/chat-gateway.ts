@@ -121,10 +121,18 @@ export class ChatGateway {
       const token = this.tokenFrom(request);
       const payload = verifyAccessToken(token, this.config);
       this.wss.handleUpgrade(request, socket, head, (ws) => {
+        this.logger.info(
+          { user_id: payload.sub, device_id: payload.device_id, node: this.config.gatewayNodeId },
+          'ws connected',
+        );
         this.track(this.onConnection(ws, payload.sub, payload.device_id));
       });
     } catch (error) {
       const status = error instanceof ApiError ? error.status : 401;
+      this.logger.warn(
+        { status_code: status, code: error instanceof ApiError ? error.code : 'unauthorized' },
+        'ws upgrade rejected',
+      );
       socket.write(`HTTP/1.1 ${status} ${status === 401 ? 'Unauthorized' : 'Error'}\r\n\r\n`);
       socket.destroy();
     }
@@ -243,6 +251,7 @@ export class ChatGateway {
     set?.delete(ws);
     if (set && set.size === 0) {
       this.sockets.delete(key);
+      this.logger.info({ user_id: userId, device_id: deviceId }, 'ws disconnected');
       await this.registry.unregister(userId, deviceId);
       // Presence is per user, not per device: going offline is a transition
       // only once the last device of the user has disconnected.
@@ -327,7 +336,10 @@ export class ChatGateway {
       }
     } catch (error) {
       const apiError = error instanceof ApiError ? error : null;
-      this.logger.warn({ err: error }, 'frame handling failed');
+      this.logger.warn(
+        { err: error, code: apiError?.code ?? 'internal_error', frame_type: frame.type },
+        'ws frame rejected',
+      );
       this.send(ws, {
         type: 'error',
         code: apiError?.code ?? 'internal_error',
@@ -465,6 +477,17 @@ export class ChatGateway {
       await this.routeToDevice(send.sender_id, send.device_id, ack);
     }
 
+    this.logger.info(
+      {
+        user_id: send.sender_id,
+        conversation_id: message.conversation_id,
+        seq: message.seq,
+        msg_type: message.type,
+        duplicate,
+      },
+      'ws send accepted',
+    );
+
     // A duplicate retry is already persisted and fanned out earlier, including
     // to the sender's other devices; re-broadcasting would deliver it twice.
     if (duplicate) return;
@@ -559,6 +582,16 @@ export class ChatGateway {
         ? await this.ctx.messages.markDeliveredBySeq(conversationId, seq, context.userId)
         : await this.ctx.messages.findBySeq(conversationId, seq);
     if (!message) return;
+
+    this.logger.info(
+      {
+        user_id: context.userId,
+        conversation_id: conversationId,
+        seq: message.seq,
+        receipt: status,
+      },
+      'ws ack accepted',
+    );
 
     let readSeq: number | null = null;
     if (status === 'read') {

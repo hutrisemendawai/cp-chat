@@ -5,6 +5,7 @@ import { createBroker, type Broker } from '../lib/broker.js';
 import type { Db } from '../lib/db.js';
 import { ApiError } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
+import { LogStore } from '../lib/log-store.js';
 import type { Cache } from '../lib/redis.js';
 import { verifyAccessToken } from '../lib/tokens.js';
 import { ConversationRepository } from '../domain/conversations.js';
@@ -35,9 +36,19 @@ export type AppContext = {
   broker: Broker;
   scylla: ScyllaMessageRepository | null;
   keys: KeyRepository;
+  logs: LogStore;
 };
 
-export function createContext(config: Config, db: Db, redis: Cache): AppContext {
+export function createContext(
+  config: Config,
+  db: Db,
+  redis: Cache,
+  logs: LogStore = new LogStore(redis, {
+    retentionSeconds: config.LOG_RETENTION_SECONDS,
+    maxEntries: config.LOG_MAX_ENTRIES,
+    enabled: config.LOG_BUFFER_ENABLED,
+  }),
+): AppContext {
   const conversations = new ConversationRepository(db);
   const logger = createLogger(config, 'broker');
 
@@ -70,6 +81,7 @@ export function createContext(config: Config, db: Db, redis: Cache): AppContext 
     members: new MemberCache(redis, conversations, config.MEMBERS_CACHE_TTL_SECONDS),
     presence: new PresenceService(redis, db, config.PRESENCE_TTL_SECONDS),
     storage: new StorageService(config),
+    logs,
   };
 }
 
@@ -77,6 +89,7 @@ declare module 'fastify' {
   interface FastifyRequest {
     userId: string;
     deviceId: string;
+    startTime?: bigint;
   }
 }
 

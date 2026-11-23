@@ -26,6 +26,7 @@ tags:
   - name: Presence
   - name: Search
   - name: Encryption
+  - name: Logging
 
 paths:
   /api/v1/auth/register:
@@ -793,6 +794,136 @@ paths:
         '422':
           $ref: '#/components/responses/ValidationError'
 
+  /api/v1/logs:
+    get:
+      tags: [Logging]
+      summary: Query the recent log timeline
+      description: >
+        Returns entries from the shared Redis-backed buffer. The buffer has a
+        hard 1-hour retention (`LOG_RETENTION_SECONDS`, capped at 3600) and is
+        pruned before every response, so an entry older than one hour is never
+        returned. Secret fields (authorization headers, passwords, refresh
+        tokens, JWTs, message plaintext) are redacted at write time. When
+        `LOG_VIEWER_TOKEN` is configured it must be presented as
+        `Authorization: Bearer <token>` (or `?token=`); otherwise the endpoint is
+        open on the LAN and a bearer access token is honoured when present.
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: '#/components/parameters/LogService'
+        - $ref: '#/components/parameters/LogLevel'
+        - $ref: '#/components/parameters/LogQuery'
+        - $ref: '#/components/parameters/LogSince'
+        - $ref: '#/components/parameters/LogLimit'
+      responses:
+        '200':
+          description: Oldest-first window of the retained entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags: [Logging]
+      summary: Clear the log buffer
+      description: Removes every buffered entry immediately. Useful between test runs.
+      security:
+        - bearerAuth: []
+        - {}
+      responses:
+        '204':
+          description: Buffer cleared
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/logs/stream:
+    get:
+      tags: [Logging]
+      summary: Stream new log entries (Server-Sent Events)
+      description: >
+        `text/event-stream` endpoint. Emits each new entry as a `data:` frame and
+        a `:keepalive` comment every 15 seconds. Entries arrive through Redis
+        Pub/Sub (`cpchat:logs:live`), so a stream sees both `rest` and `gateway`
+        output regardless of which process serves the request.
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: token
+          in: query
+          description: Viewer token, for EventSource clients that cannot set headers.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/logs/client:
+    post:
+      tags: [Logging]
+      summary: Submit a mobile diagnostic entry
+      description: >
+        Lets the Flutter app forward `warn`/`error` diagnostics into the same
+        timeline. The entry is tagged `service: mobile` and the caller's id;
+        entries are capped at 4 KB and rate-limited per user.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientLogRequest'
+      responses:
+        '202':
+          description: Entry buffered
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          description: Too many client log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /logs:
+    get:
+      tags: [Logging]
+      summary: Live log monitoring dashboard
+      description: >
+        Self-contained HTML + vanilla JS dashboard (no external CDN assets) with
+        service/level filter chips, keyword search, pause/resume auto-scroll, a
+        clear button, and an `EventSource` live tail. It shows the retention
+        badge (`Retention: 1 hour (auto-purge)`) and the current entry count.
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: token
+          in: query
+          description: Viewer token, for opening the page in a browser.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Dashboard HTML
+          content:
+            text/html:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -801,6 +932,40 @@ components:
       bearerFormat: JWT
 
   parameters:
+    LogService:
+      name: service
+      in: query
+      description: Filter by emitting service
+      schema:
+        type: string
+        enum: [rest, gateway, mobile]
+    LogLevel:
+      name: level
+      in: query
+      description: Minimum level (inclusive)
+      schema:
+        type: string
+        enum: [debug, info, warn, error, fatal]
+    LogQuery:
+      name: q
+      in: query
+      description: Case-insensitive substring over message, path, user id and meta
+      schema:
+        type: string
+    LogSince:
+      name: since
+      in: query
+      description: Only entries at or after this time. Accepts epoch ms or an ISO timestamp.
+      schema:
+        type: string
+    LogLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 200
     ConversationId:
       name: id
       in: path
@@ -1192,6 +1357,87 @@ components:
               type: string
         remaining_one_time_prekeys:
           type: integer
+
+    LogEntry:
+      type: object
+      required: [id, ts, service, level, message]
+      properties:
+        id:
+          type: string
+          format: uuid
+        ts:
+          type: integer
+          format: int64
+          description: Unix epoch milliseconds
+        service:
+          type: string
+          enum: [rest, gateway, mobile]
+        level:
+          type: string
+          enum: [debug, info, warn, error, fatal]
+        message:
+          type: string
+        user_id:
+          type: string
+          format: uuid
+        req_id:
+          type: string
+        method:
+          type: string
+        path:
+          type: string
+        status_code:
+          type: integer
+        duration_ms:
+          type: number
+        meta:
+          type: object
+          additionalProperties: true
+          description: Structured context, with secret keys replaced by `[redacted]`
+
+    LogPage:
+      type: object
+      required: [logs, count, retention_seconds]
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogEntry'
+        count:
+          type: integer
+          description: Total entries currently buffered (not just this page)
+        retention_seconds:
+          type: integer
+          example: 3600
+        viewer:
+          type: object
+          properties:
+            retention_seconds:
+              type: integer
+            enabled:
+              type: boolean
+
+    ClientLogRequest:
+      type: object
+      required: [message]
+      properties:
+        level:
+          type: string
+          enum: [debug, info, warn, error, fatal]
+          default: info
+        tag:
+          type: string
+          maxLength: 80
+        message:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        meta:
+          type: object
+          additionalProperties: true
+        ts:
+          type: integer
+          format: int64
 
 security:
   - bearerAuth: []

@@ -5,6 +5,7 @@ import { sendError } from './context.js';
 import { registerAuthRoutes } from './auth-routes.js';
 import { registerConversationRoutes } from './conversation-routes.js';
 import { registerKeyRoutes } from './key-routes.js';
+import { registerLogRoutes } from './log-routes.js';
 import { registerMediaRoutes } from './media-routes.js';
 import { registerMessageRoutes } from './message-routes.js';
 import { registerPresenceRoutes } from './presence-routes.js';
@@ -18,11 +19,36 @@ export function buildServer(ctx: AppContext, logger: Logger): FastifyInstance {
     loggerInstance: logger as unknown as FastifyBaseLogger,
     trustProxy: true,
     bodyLimit: 1024 * 1024,
+    // The `onResponse` hook below emits one enriched entry per request; Fastify's
+    // own "incoming request"/"request completed" pair would duplicate it in the
+    // shared timeline and split the fields across two entries.
+    disableRequestLogging: true,
   });
 
   app.addHook('onRequest', (request, _reply, done) => {
     request.userId = '';
     request.deviceId = '';
+    request.startTime = process.hrtime.bigint();
+    done();
+  });
+
+  // One structured line per completed request. It carries the fields the log
+  // buffer indexes on (method, path, status, duration, user) so the dashboard
+  // can filter without parsing the message. Streaming endpoints are skipped:
+  // their "completion" is the connection closing and would be noise.
+  app.addHook('onResponse', (request, reply, done) => {
+    if (!isStreamingPath(request.url)) {
+      request.log.info(
+        {
+          method: request.method,
+          path: request.url.split('?')[0],
+          status_code: reply.statusCode,
+          duration_ms: elapsedMs(request.startTime),
+          user_id: request.userId || undefined,
+        },
+        'request completed',
+      );
+    }
     done();
   });
 
@@ -66,6 +92,17 @@ export function buildServer(ctx: AppContext, logger: Logger): FastifyInstance {
   registerSearchRoutes(app, ctx);
   registerPresenceRoutes(app, ctx);
   registerKeyRoutes(app, ctx);
+  registerLogRoutes(app, ctx);
 
   return app;
+}
+
+function isStreamingPath(url: string): boolean {
+  const path = url.split('?')[0];
+  return path === '/api/v1/logs/stream';
+}
+
+function elapsedMs(start: number | bigint | undefined): number | undefined {
+  if (typeof start !== 'bigint') return undefined;
+  return Number(process.hrtime.bigint() - start) / 1_000_000;
 }

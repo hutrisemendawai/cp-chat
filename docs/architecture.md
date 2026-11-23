@@ -110,6 +110,8 @@ state, not the destination.
 | `gw:{node_id}` | pub/sub channel | Fan-out to sockets owned by another gateway node |
 | `members:{conversation_id}` | set | Group membership fan-out cache |
 | `ratelimit:{user_id}` | counter | Reserved for Phase 4 rate limiting |
+| `cpchat:logs` | sorted set + TTL | Shared 1-hour log timeline (score = epoch ms) |
+| `cpchat:logs:live` | pub/sub channel | Live tail for SSE clients on `/api/v1/logs/stream` |
 
 Both `conn:` keys carry a TTL refreshed by the heartbeat, so a crashed node
 stops receiving fan-out within `CONNECTION_TTL_SECONDS` instead of black-holing
@@ -202,6 +204,10 @@ with `withSpan` (`message.ingest`, `message.fanout`), so a single trace follows
 a message from the sender's WebSocket frame through the storage write to the
 recipient's node. Sampling is parent-based with a configurable root ratio.
 Health checks are excluded.
+
+Both processes also mirror their Pino output into a shared Redis buffer with a
+hard 1-hour retention, alongside mobile diagnostics forwarded from the app, and
+serve it live at `GET /logs`. See [logging.md](./logging.md).
 
 ## End-to-end encryption
 

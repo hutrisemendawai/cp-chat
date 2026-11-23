@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import 'database/app_database.dart';
 import 'database/chat_dao.dart';
 import 'crypto/e2ee_manager.dart';
+import 'logging/app_logger.dart';
 import 'media/media_service.dart';
 import 'models/models.dart';
 import 'network/api_client.dart';
@@ -27,6 +28,15 @@ final chatDaoProvider = Provider<ChatDao>((ref) {
 
 final tokenStoreProvider = Provider<TokenStore>((ref) => TokenStore());
 
+/// Client diagnostics with an in-memory ring buffer. Created before the network
+/// stack so early failures can be recorded; the API client is attached to it
+/// once constructed so `warn`/`error` entries can be forwarded to the server.
+final appLoggerProvider = Provider<AppLogger>((ref) {
+  final logger = AppLogger();
+  ref.onDispose(logger.clear);
+  return logger;
+});
+
 /// Stable per-install id, resolved during bootstrap. Immutable thereafter, so
 /// the client that depends on it is rebuilt exactly once.
 class DeviceIdNotifier extends Notifier<String?> {
@@ -40,14 +50,21 @@ final deviceIdProvider =
     NotifierProvider<DeviceIdNotifier, String?>(DeviceIdNotifier.new);
 
 final apiClientProvider = Provider<ApiClient>((ref) {
-  return ApiClient(
+  final logger = ref.watch(appLoggerProvider);
+  final api = ApiClient(
     ref.watch(tokenStoreProvider),
     deviceId: ref.watch(deviceIdProvider),
+    logger: logger,
   );
+  logger.attach(api);
+  return api;
 });
 
 final mediaServiceProvider = Provider<MediaService>((ref) {
-  return MediaService(ref.watch(apiClientProvider));
+  return MediaService(
+    ref.watch(apiClientProvider),
+    logger: ref.watch(appLoggerProvider),
+  );
 });
 
 /// End-to-end encryption for direct chats. Key material is generated lazily on
@@ -71,6 +88,7 @@ final chatSocketProvider = Provider<ChatSocket>((ref) {
     ref.watch(chatDaoProvider),
     ref.watch(apiClientProvider),
     ref.watch(tokenStoreProvider),
+    logger: ref.watch(appLoggerProvider),
     decrypt: (conversationId, clientMsgId, content) {
       return ref.read(e2eeManagerProvider).plaintextFor(
             clientMsgId,

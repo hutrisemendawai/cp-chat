@@ -53,6 +53,17 @@ const envSchema = z.object({
         'application/zip,application/octet-stream,video/mp4,audio/mpeg',
     ),
 
+  // ---- Phase 2: realtime log buffer ----
+  // Mirrors rest + gateway + mobile diagnostics into one Redis-backed timeline
+  // with a hard 1-hour retention. The buffer is in-memory-sized, never
+  // persisted, and pruned on a background interval and on every write.
+  LOG_BUFFER_ENABLED: booleanEnv(true),
+  LOG_RETENTION_SECONDS: z.coerce.number().int().positive().max(3600).default(3600),
+  LOG_MAX_ENTRIES: z.coerce.number().int().positive().max(100_000).default(5000),
+  // Optional shared secret for the /logs dashboard and the log API. Empty means
+  // the LAN/dev default: open access, but a bearer JWT is still honoured.
+  LOG_VIEWER_TOKEN: z.string().trim().max(200).optional(),
+
   // ---- Phase 4: broker ----
   // `redis` keeps the Phase 1-3 Pub/Sub transport; `kafka` switches realtime
   // fan-out to a durable, partitioned log (see lib/broker.ts).

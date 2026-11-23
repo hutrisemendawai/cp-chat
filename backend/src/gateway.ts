@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { createDb } from './lib/db.js';
 import { NotificationService } from './lib/fcm.js';
-import { createLogger } from './lib/logger.js';
+import { configureLogMirror, createLogger } from './lib/logger.js';
+import { LogStore } from './lib/log-store.js';
 import { createRedis } from './lib/redis.js';
 import { createContext } from './http/context.js';
 import { ChatGateway } from './gateway/chat-gateway.js';
@@ -11,12 +12,23 @@ import { startTracing, shutdownTracing } from './lib/tracing.js';
 
 async function main() {
   const config = loadConfig();
+  const db = createDb(config.DATABASE_URL);
+  const redis = createRedis(config.REDIS_URL);
+
+  // The gateway writes into the same Redis timeline as the REST process, so
+  // both containers show up interleaved on `/logs`.
+  const logs = new LogStore(redis, {
+    retentionSeconds: config.LOG_RETENTION_SECONDS,
+    maxEntries: config.LOG_MAX_ENTRIES,
+    enabled: config.LOG_BUFFER_ENABLED,
+  });
+  logs.start();
+  configureLogMirror(logs, 'gateway');
+
   const logger = createLogger(config, 'gateway');
   const tracing = await startTracing(config, 'gateway');
 
-  const db = createDb(config.DATABASE_URL);
-  const redis = createRedis(config.REDIS_URL);
-  const ctx = createContext(config, db, redis);
+  const ctx = createContext(config, db, redis, logs);
 
   const notifications = new NotificationService(config, logger);
   await notifications.initialize();
@@ -77,6 +89,7 @@ async function main() {
     await gateway.drain();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await gateway.stop();
+    await logs.stop();
     await ctx.broker.close();
     await ctx.scylla?.close();
     await tracing?.shutdown();

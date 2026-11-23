@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../config/app_config.dart';
 import '../crypto/e2ee_service.dart' show isEncryptedContent;
+import '../logging/app_logger.dart';
 import '../notifications/crash_reporter.dart';
 import '../database/chat_dao.dart';
 import '../models/models.dart';
@@ -54,6 +55,7 @@ class ChatSocket {
     this.heartbeatInterval = const Duration(seconds: 25),
     this.sendTimeout = const Duration(seconds: 10),
     this.decrypt,
+    this.logger,
   });
 
   final ChatDao _dao;
@@ -61,6 +63,7 @@ class ChatSocket {
   final TokenStore _tokenStore;
   final Duration heartbeatInterval;
   final Duration sendTimeout;
+  final AppLogger? logger;
 
   /// Decrypts an inbound E2EE body before it is persisted, so the local mirror
   /// (and therefore the UI) only ever holds plaintext. Returning null leaves the
@@ -124,6 +127,7 @@ class ChatSocket {
       }
     } catch (error) {
       debugPrint('ChatSocket connect failed: $error');
+      logger?.warn('ws', 'connect failed', meta: {'error': error.toString()});
       _onDisconnected(error);
     } finally {
       _connecting = false;
@@ -152,6 +156,7 @@ class ChatSocket {
     );
     _attempt = 0;
     connection.value = const SocketStatus(SocketState.connected);
+    logger?.info('ws', 'connected');
     _startHeartbeat();
 
     // Recover anything missed while offline before accepting live traffic.
@@ -459,6 +464,7 @@ class ChatSocket {
       return await decryptor(message.conversationId, message.clientMsgId, message.content);
     } catch (error, stack) {
       debugPrint('ChatSocket could not decrypt message: $error');
+      logger?.error('e2ee', 'decrypt failed', meta: {'error': error.toString()});
       CrashReporter.record(error, stack, reason: 'e2ee_decrypt_failed');
       return null;
     }
@@ -490,6 +496,10 @@ class ChatSocket {
     final code = frame['code'];
     final message = frame['message'];
     debugPrint('ChatSocket server error: $code $message');
+    logger?.warn('ws', 'server error frame', meta: {
+      if (code is String) 'code': code,
+      if (message is String) 'detail': message,
+    });
 
     final clientMsgId = frame['client_msg_id'];
     if (clientMsgId is String && clientMsgId.isNotEmpty) {
@@ -600,6 +610,9 @@ class ChatSocket {
     if (_disposed) return;
 
     connection.value = SocketStatus.disconnected(error?.toString());
+    if (error != null) {
+      logger?.warn('ws', 'disconnected', meta: {'error': error.toString()});
+    }
     final exponential = min(30, pow(2, _attempt).toInt());
     final jitterMs = _random.nextInt(1000);
     _attempt += 1;

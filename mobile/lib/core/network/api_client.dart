@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 
 import '../crypto/e2ee_service.dart' show PublicKeyBundle, PublicPrekey, RemotePrekeyBundle;
 import '../config/app_config.dart';
+import '../logging/app_logger.dart';
 import '../models/models.dart';
 import '../storage/token_store.dart';
 
@@ -20,7 +21,11 @@ class ApiClient {
     String baseUrl = AppConfig.apiBaseUrl,
     Dio? dio,
     this.deviceId,
-  }) : dio = dio ??
+    AppLogger? logger,
+  })  :
+        // ignore: prefer_initializing_formals
+        _logger = logger,
+        dio = dio ??
             Dio(
               BaseOptions(
                 baseUrl: baseUrl,
@@ -71,17 +76,44 @@ class ApiClient {
                 handler.reject(error is DioException ? error : DioException(requestOptions: retryOptions, error: error));
               }
             },
-            onError: (error, handler) => handler.next(error),
+            // Transport-level failures (offline, DNS, connection refused, time
+            // out) are recorded for the shared timeline. HTTP error statuses
+            // that reach a handler are normal domain responses and are not
+            // logged here — logging every 4xx would drown the useful signal.
+            //
+            // Requests carrying `kSkipLogging` are the log submissions
+            // themselves. Logging their failure would queue another submission,
+            // whose failure would queue another: an endless loop while the
+            // server is unreachable.
+            onError: (error, handler) {
+              if (error.requestOptions.extra[kSkipLogging] != true &&
+                  _isTransportError(error)) {
+                _logger?.networkError('dio', error);
+              }
+              handler.next(error);
+            },
           ),
         );
   }
 
+  /// True for failures in the request itself rather than a server response.
+  static bool _isTransportError(DioException error) =>
+      error.type == DioExceptionType.connectionError ||
+      error.type == DioExceptionType.connectionTimeout ||
+      error.type == DioExceptionType.receiveTimeout ||
+      error.type == DioExceptionType.sendTimeout ||
+      error.type == DioExceptionType.unknown;
+
   static const kSkipAuth = 'skip_auth';
   static const kRetried = 'retried';
+
+  /// Marks a request that must not itself be logged (the log submission path).
+  static const kSkipLogging = 'skip_logging';
 
   final TokenStore _tokenStore;
   final Dio dio;
   final String? deviceId;
+  final AppLogger? _logger;
 
   Future<bool>? _inFlightRefresh;
 
@@ -483,6 +515,27 @@ class ApiClient {
     );
     if (response.statusCode != 204 && response.statusCode != 200) {
       throw ApiException.fromResponse(response.statusCode ?? 0, _body(response.data));
+    }
+  }
+
+  /// Forwards a client diagnostic entry to the shared 1-hour log timeline.
+  ///
+  /// Returns `false` on any failure. The caller (AppLogger) is fire-and-forget,
+  /// so a failed submission must never surface as an error or be retried by the
+  /// logger itself.
+  Future<bool> logClientEntry(AppLogEntry entry) async {
+    try {
+      final response = await dio.post<dynamic>(
+        '/api/v1/logs/client',
+        data: entry.toRequestJson(),
+        options: Options(
+          extra: {kSkipLogging: true},
+          validateStatus: (status) => status != null && status < 500,
+        ),
+      );
+      return (response.statusCode ?? 0) >= 200 && (response.statusCode ?? 0) < 300;
+    } catch (_) {
+      return false;
     }
   }
 

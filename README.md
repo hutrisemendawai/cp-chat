@@ -15,7 +15,7 @@ For detailed architecture, technology stack, and development phases, see [AGENTS
 | `backend/test/` | Backend unit and integration tests (Vitest) |
 | `backend/migrations/` | PostgreSQL schema (golang-migrate) and CQL schema (ScyllaDB) |
 | `backend/scripts/` | Migration wrapper, Scylla backfill, live end-to-end smoke test |
-| `docs/` | [OpenAPI spec](./docs/api-spec.yaml), [WS protocol](./docs/ws-protocol.md), [architecture](./docs/architecture.md), [gateway scaling](./docs/gateway-scaling.md), [Kafka](./docs/kafka.md), [ScyllaDB](./docs/scylla.md), [E2EE](./docs/e2ee.md), [release](./docs/release.md) |
+| `docs/` | [OpenAPI spec](./docs/api-spec.yaml), [WS protocol](./docs/ws-protocol.md), [architecture](./docs/architecture.md), [gateway scaling](./docs/gateway-scaling.md), [Kafka](./docs/kafka.md), [ScyllaDB](./docs/scylla.md), [E2EE](./docs/e2ee.md), [realtime logs](./docs/logging.md), [release](./docs/release.md) |
 | `docker-compose.yml` | PostgreSQL 16, Redis 7, MinIO, Kafka, ScyllaDB, API, gateway, migration runner |
 | `.github/workflows/ci.yml` | Migrations, backend tests, contract, and Flutter checks |
 

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../logging/app_logger.dart';
 import '../models/models.dart';
 import '../network/api_client.dart';
 
@@ -14,9 +15,11 @@ import '../network/api_client.dart';
 /// connectivity to the API host. The API streams the bytes to object storage
 /// server-side; the device never has to reach MinIO/S3 directly.
 class MediaService {
-  MediaService(this._api);
+  // ignore: prefer_initializing_formals
+  MediaService(this._api, {AppLogger? logger}) : _logger = logger;
 
   final ApiClient _api;
+  final AppLogger? _logger;
 
   /// Compression target. Large camera photos are typically 3–8 MB; 1600 px at
   /// quality 80 lands well under a megabyte for most screenshots and photos.
@@ -71,13 +74,23 @@ class MediaService {
     void Function(int sent, int total)? onProgress,
   }) async {
     final bytes = await file.readAsBytes();
-    final uploaded = await _api.uploadMedia(
-      bytes: bytes,
-      filename: filename,
-      contentType: contentType,
-      onProgress: onProgress,
-    );
-    return uploaded.objectKey;
+    try {
+      final uploaded = await _api.uploadMedia(
+        bytes: bytes,
+        filename: filename,
+        contentType: contentType,
+        onProgress: onProgress,
+      );
+      return uploaded.objectKey;
+    } catch (error) {
+      _logger?.error('media', 'upload failed', meta: {
+        'filename': filename,
+        'content_type': contentType,
+        'size_bytes': bytes.length,
+        'error': error.toString(),
+      });
+      rethrow;
+    }
   }
 
   /// Compresses an image on-device. Falls back to the original file when the

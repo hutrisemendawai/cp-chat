@@ -176,6 +176,16 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
           originalName: filename,
         });
 
+        request.log.info(
+          {
+            user_id: request.userId,
+            path: `/api/v1/media/${objectKey}`,
+            status_code: 201,
+            meta: { media_id: record.id, content_type: contentType, size_bytes: body.length },
+          },
+          'media upload',
+        );
+
         reply.status(201).send({
           media_id: record.id,
           object_key: objectKey,
@@ -227,6 +237,10 @@ export function registerMediaRoutes(app: FastifyInstance, ctx: AppContext): void
     }
 
     await streamObject(storage, key, record.content_type, record.size_bytes, reply);
+    request.log.info(
+      { user_id: request.userId, path: `/api/v1/media/${key}`, status_code: 200 },
+      'media download',
+    );
   });
 }
 
