@@ -35,7 +35,12 @@ server.
 
 The initiator fetches `GET /api/v1/keys/{id}`. The server **consumes** one
 one-time prekey with `DELETE ... RETURNING`, so two initiators can never receive
-the same key. The four DH outputs are concatenated and expanded with HKDF-SHA256:
+the same key. Publishing a *different* identity key (a reinstall) also deletes
+every one-time prekey on file for that user: their private halves belonged to the
+previous install, so handing one out would create a session the recipient could
+never derive. Republishing the same identity keeps the supply intact.
+
+The four DH outputs are concatenated and expanded with HKDF-SHA256:
 
 ```
 DH1 = DH(IK_A, SPK_B)      // identity A, signed prekey B
@@ -87,10 +92,35 @@ below its cursor, which stops replay.
 ```
 
 The body stored in the message is `e2ee:v1:` followed by this JSON. `ek`, `spk`,
-and `opk` are only present on the message that opens a session; a reply omits
-them because the peer already holds the session. The server validates that `v`,
-`ik`, `ct`, `n`, and `m` are present and correctly typed, and rejects a malformed
-prefixed body instead of delivering it as text (`backend/src/lib/e2ee.ts`).
+and `opk` open a session, so an initiator attaches them to **every** message it
+sends until the peer answers; after that they are omitted. Re-attaching is what
+lets a peer that lost its session (restart without persisted state, reinstall,
+cleared app data) rebuild it from any later message instead of being stuck. The
+server validates that `v`, `ik`, `ct`, `n`, and `m` are present and correctly
+typed, and rejects a malformed prefixed body instead of delivering it as text
+(`backend/src/lib/e2ee.ts`).
+
+### Session identification and recovery
+
+`ek` is also the session's identity, so a receiver can tell a repeated initiation
+apart from a genuinely new one:
+
+- A body whose `ek` matches a known session is decrypted under that session.
+- A body with an unknown `ek` derives the responder side of X3DH and is adopted
+  only if it authenticates. A replayed initiation cannot displace a working
+  session, and a genuine re-initiation (the peer lost its state) is picked up
+  instead of being ignored in favour of a stale chain.
+- **Session glare** — both sides open a session before either reads the other's
+  — is broken deterministically: the two initiating ephemeral keys are compared
+  and the smaller one wins on both devices. The losing session is retained as an
+  alternate so its in-flight messages still decrypt.
+- Up to three sessions per peer are kept and persisted, which covers reordering
+  within a session, a reinstall, and a simultaneous initiation.
+
+A body that fails to decrypt leaves the receiving chain where it was: the
+skip-ahead runs on a copy and is committed only after the GCM tag verifies.
+Otherwise a corrupted or stale frame would advance the cursor past valid
+messages and make them permanently unreadable.
 
 ## Ordering and the outbox
 
@@ -105,8 +135,19 @@ stores two values:
 
 Inbound bodies are decrypted in `ChatSocket._handleMessage` before persistence,
 so the local mirror and every reader of it (bubbles, previews, search) only ever
-see plaintext. A body that cannot be decrypted is stored as-is and rendered as a
-placeholder, so one unreadable message never breaks a conversation.
+see plaintext. Decryption happens once per message: a row that already holds its
+plaintext is never decrypted again when the same message arrives over REST, so a
+sync cannot advance the chain a second time. A body that cannot be decrypted is
+stored as-is and rendered as a placeholder, so one unreadable message never
+breaks a conversation.
+
+A failed decryption is reported once per message to the client log timeline
+(tag `e2ee`) with `reason`, `message_id`, `conversation_id`, `sender_id`, the
+exception type, and the non-secret session state (`present`, `initiator`,
+`confirmed`, chain indices, alternate count). Plaintext and key material are
+never logged. Send-side encryption failures are never downgraded to plaintext:
+the message is refused and the user is told, because sending it unencrypted
+would silently break the conversation's confidentiality.
 
 ## Trust on first use
 
@@ -124,8 +165,11 @@ and tested rather than approximated:
 - **No DH ratchet.** Chains are not re-keyed on each round-trip, so
   *post-compromise* security (healing after a key leak) is weaker than Signal's.
 - **No skipped-message key storage.** Loss within a chain is tolerated by index
-  advance, but a message that arrives after the chain has moved past it (beyond
-  the current cursor) cannot be decrypted.
+  advance, but a message that arrives *after* a later one has been decrypted
+  (beyond the current cursor) cannot be recovered. In-order and out-of-order
+  delivery within the cursor window works; a gap noticed only after the chain has
+  moved on does not. A failed decryption never moves the cursor, so a transient
+  failure does not create such a gap.
 - **No multi-device fan-out.** A user's other devices cannot read a session
   started with one device; multi-device E2EE needs per-device sessions.
 - **Direct chats only.**
@@ -136,8 +180,12 @@ sender keys and the safety-number UI.
 ## Testing
 
 - `backend/test/keys.test.ts` — registry, atomic prekey consumption (including
-  a concurrent-fetch race), envelope validation.
+  a concurrent-fetch race), envelope validation, and prekey cleanup on identity
+  rotation.
 - `mobile/test/e2ee_test.dart` — both directions, out-of-order delivery, replay
-  rejection, tamper rejection, signature substitution, key export/import.
-- `mobile/test/e2ee_manager_test.dart` — persistence round-trips and restored
-  sessions.
+  rejection, tamper rejection, signature substitution, key export/import, peer
+  re-initiation recovery, session glare, and non-destructive failed decryption.
+- `mobile/test/e2ee_manager_test.dart` — persistence round-trips, restored
+  sessions, stale-session recovery, and failure logging.
+- `mobile/test/e2ee_delivery_test.dart` — a live `message` frame followed by a
+  REST sync decrypts the body exactly once.

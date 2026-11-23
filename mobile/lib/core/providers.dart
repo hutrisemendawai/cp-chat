@@ -73,6 +73,7 @@ final e2eeManagerProvider = Provider<E2eeManager>((ref) {
   return E2eeManager(
     tokenStore: ref.watch(tokenStoreProvider),
     api: ref.watch(apiClientProvider),
+    logger: ref.watch(appLoggerProvider),
   );
 });
 

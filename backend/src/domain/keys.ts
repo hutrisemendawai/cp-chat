@@ -1,5 +1,8 @@
 import { ApiError } from '../lib/errors.js';
-import type { Db } from '../lib/db.js';
+import { withTransaction, type Db } from '../lib/db.js';
+
+/** Anything that can run a query: the pool, or a transaction's client. */
+type Queryable = Pick<Db, 'query'>;
 
 /**
  * Public key registry for end-to-end encrypted direct chats.
@@ -49,7 +52,15 @@ export class KeyRepository {
   constructor(private readonly db: Db) {}
 
   async identity(userId: string): Promise<IdentityKeyRow | null> {
-    const { rows } = await this.db.query<IdentityKeyRow>(
+    return this.identityWith(this.db, userId);
+  }
+
+  /** [identity] against an explicit connection, so a transaction sees its own writes. */
+  private async identityWith(
+    client: Queryable,
+    userId: string,
+  ): Promise<IdentityKeyRow | null> {
+    const { rows } = await client.query<IdentityKeyRow>(
       `SELECT user_id, identity_public_key, signing_public_key, created_at, updated_at
          FROM user_identity_keys WHERE user_id = $1`,
       [userId],
@@ -61,23 +72,45 @@ export class KeyRepository {
    * Publishes or rotates the identity keys. Changing the identity key is how a
    * device re-installs, so it is allowed — peers see the new key on their next
    * bundle fetch and must re-verify it out of band (the safety number changes).
+   *
+   * A rotation also discards every one-time prekey already on file. Their
+   * private halves lived on the device that just went away, so keeping them
+   * would let `takeBundle` hand a peer a key nobody can answer for: the peer
+   * would build a session the recipient cannot derive, and every message
+   * encrypted against it would be undecryptable.
+   *
+   * Both writes share one transaction so a bundle fetch can never observe the
+   * new identity alongside the previous device's prekeys.
    */
   async upsertIdentity(input: {
     userId: string;
     identityPublicKey: string;
     signingPublicKey: string;
   }): Promise<IdentityKeyRow> {
-    const { rows } = await this.db.query<IdentityKeyRow>(
-      `INSERT INTO user_identity_keys (user_id, identity_public_key, signing_public_key)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (user_id) DO UPDATE
-         SET identity_public_key = EXCLUDED.identity_public_key,
-             signing_public_key = EXCLUDED.signing_public_key,
-             updated_at = NOW()
-       RETURNING user_id, identity_public_key, signing_public_key, created_at, updated_at`,
-      [input.userId, input.identityPublicKey, input.signingPublicKey],
-    );
-    return rows[0]!;
+    return withTransaction(this.db, async (client) => {
+      const previous = await this.identityWith(client, input.userId);
+
+      const { rows } = await client.query<IdentityKeyRow>(
+        `INSERT INTO user_identity_keys (user_id, identity_public_key, signing_public_key)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO UPDATE
+           SET identity_public_key = EXCLUDED.identity_public_key,
+               signing_public_key = EXCLUDED.signing_public_key,
+               updated_at = NOW()
+         RETURNING user_id, identity_public_key, signing_public_key, created_at, updated_at`,
+        [input.userId, input.identityPublicKey, input.signingPublicKey],
+      );
+
+      // A routine republish (same device, same identity) keeps its supply; only
+      // an actual rotation orphans the stored prekeys.
+      if (previous !== null && previous.identity_public_key !== input.identityPublicKey) {
+        await client.query(`DELETE FROM user_one_time_prekeys WHERE user_id = $1`, [
+          input.userId,
+        ]);
+      }
+
+      return rows[0]!;
+    });
   }
 
   async upsertSignedPrekey(input: {

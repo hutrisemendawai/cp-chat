@@ -413,5 +413,33 @@ void main() {
       final row = (await dao.watchMessages('conv-1').first).single;
       expect(row.content, 'readable');
     });
+
+    test('a successful late decrypt replaces an earlier placeholder', () async {
+      // The reverse order: a sync stored the placeholder because the session was
+      // not ready, and the next attempt decrypted successfully. The plaintext
+      // must win, so the bubble recovers instead of staying broken.
+      await dao.upsertServerMessage(
+        message('a', conversationId: 'conv-1', seq: 1, content: undecryptableContent),
+      );
+
+      await dao.upsertServerMessage(
+        message('a', conversationId: 'conv-1', seq: 1, content: 'recovered'),
+      );
+
+      final row = (await dao.watchMessages('conv-1').first).single;
+      expect(row.content, 'recovered');
+    });
+
+    test('looks up a stored message by client id', () async {
+      expect(await dao.message('missing'), isNull);
+
+      await dao.upsertServerMessage(
+        message('a', conversationId: 'conv-1', seq: 1, content: 'hello'),
+      );
+
+      final row = await dao.message('a');
+      expect(row, isNotNull);
+      expect(row!.content, 'hello');
+    });
   });
 }

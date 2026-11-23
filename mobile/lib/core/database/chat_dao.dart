@@ -47,6 +47,13 @@ class ChatDao {
         .watch();
   }
 
+  /// The local row for a message, or `null` when it has not been stored yet.
+  Future<LocalMessage?> message(String clientMsgId) {
+    return (db.select(db.localMessages)
+          ..where((table) => table.clientMsgId.equals(clientMsgId)))
+        .getSingleOrNull();
+  }
+
   Future<int> localMaxSeq(String conversationId) async {
     final row = await (db.selectOnly(db.localMessages)
           ..addColumns([db.localMessages.seq.max()])

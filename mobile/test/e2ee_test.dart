@@ -361,4 +361,219 @@ void main() {
       );
     });
   });
+
+  /// The physical-device symptom: a peer's later messages stopped decrypting
+  /// after an earlier one had worked, with no error visible anywhere.
+  group('session recovery after a peer loses its state', () {
+    Future<E2eeService> bobAfterLoss() async {
+      // Same identity keys, fresh service: exactly what a reinstall/restart with
+      // no persisted session looks like.
+      final restarted = E2eeService(prekeyCount: 3);
+      return restarted;
+    }
+
+    test('a re-initiation is accepted while the old session is still held', () async {
+      final first = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'before restart',
+        local: aliceKeys,
+        bundle: await bundleFor(bobKeys),
+      );
+      await bob.decrypt(peerId: 'alice', envelope: first, local: bobKeys);
+
+      // Bob lost his sessions and opens a new one to the same Alice.
+      final restarted = await bobAfterLoss();
+      final reopened = await restarted.encrypt(
+        peerId: 'alice',
+        plaintext: 'after restart',
+        local: bobKeys,
+        bundle: await bundleFor(aliceKeys, userId: 'alice'),
+      );
+
+      // Alice still holds the old session. This used to throw a MAC error and
+      // render every later message as a placeholder.
+      final received = await alice.decrypt(
+        peerId: 'bob',
+        envelope: reopened,
+        local: aliceKeys,
+      );
+      expect(received.plaintext, 'after restart');
+    });
+
+    test('follow-up messages flow on the new session in both directions', () async {
+      final opening = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'one',
+        local: aliceKeys,
+        bundle: await bundleFor(bobKeys),
+      );
+      await bob.decrypt(peerId: 'alice', envelope: opening, local: bobKeys);
+
+      final restarted = await bobAfterLoss();
+      final reopen = await restarted.encrypt(
+        peerId: 'alice',
+        plaintext: 'two',
+        local: bobKeys,
+        bundle: await bundleFor(aliceKeys, userId: 'alice'),
+      );
+      expect(
+        (await alice.decrypt(peerId: 'bob', envelope: reopen, local: aliceKeys)).plaintext,
+        'two',
+      );
+
+      // Alice replies on the promoted session; Bob reads it.
+      final reply = await alice.encrypt(peerId: 'bob', plaintext: 'three', local: aliceKeys);
+      expect(
+        (await restarted.decrypt(peerId: 'alice', envelope: reply, local: bobKeys)).plaintext,
+        'three',
+      );
+
+      // And Bob's next message continues the same session.
+      final next = await restarted.encrypt(peerId: 'alice', plaintext: 'four', local: bobKeys);
+      expect(
+        (await alice.decrypt(peerId: 'bob', envelope: next, local: aliceKeys)).plaintext,
+        'four',
+      );
+    });
+
+    test('an unconfirmed initiation re-attaches its X3DH context', () async {
+      // A peer that lost the session must be able to rebuild it from any later
+      // message, not only the first one after the loss.
+      final opening = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'zero',
+        local: aliceKeys,
+        bundle: await bundleFor(bobKeys),
+      );
+      expect(opening.ephemeralKey, isNotNull);
+
+      // Nothing came back yet, so Alice keeps describing the session.
+      final second = await alice.encrypt(peerId: 'bob', plaintext: 'one', local: aliceKeys);
+      expect(second.ephemeralKey, isNotNull);
+      expect(second.ephemeralKey, opening.ephemeralKey);
+      expect(second.oneTimePrekeyId, opening.oneTimePrekeyId);
+
+      // A peer that has never seen Alice's session can start from `second`.
+      final freshBob = E2eeService(prekeyCount: 3);
+      expect(
+        (await freshBob.decrypt(peerId: 'alice', envelope: second, local: bobKeys)).plaintext,
+        'one',
+      );
+    });
+
+    test('the context stops being sent once the peer has answered', () async {
+      final bundle = await bundleFor(bobKeys);
+      final opening = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'open',
+        local: aliceKeys,
+        bundle: bundle,
+      );
+      await bob.decrypt(peerId: 'alice', envelope: opening, local: bobKeys);
+      final reply = await bob.encrypt(peerId: 'alice', plaintext: 'ack', local: bobKeys);
+      await alice.decrypt(peerId: 'bob', envelope: reply, local: aliceKeys);
+
+      final later = await alice.encrypt(peerId: 'bob', plaintext: 'steady', local: aliceKeys);
+      expect(later.ephemeralKey, isNull);
+      expect(later.signedPrekeyId, isNull);
+      expect(
+        (await bob.decrypt(peerId: 'alice', envelope: later, local: bobKeys)).plaintext,
+        'steady',
+      );
+    });
+
+    test('a failed out-of-order decryption does not consume the skipped message', () async {
+      final bundle = await bundleFor(bobKeys);
+      final m0 = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'zero',
+        local: aliceKeys,
+        bundle: bundle,
+      );
+      final m1 = await alice.encrypt(peerId: 'bob', plaintext: 'one', local: aliceKeys);
+      final m2 = await alice.encrypt(peerId: 'bob', plaintext: 'two', local: aliceKeys);
+      await bob.decrypt(peerId: 'alice', envelope: m0, local: bobKeys);
+
+      // A corrupted copy of m2 arrives before m1; its index forces the receiver
+      // to skip past m1. If that skip were committed before the MAC check, the
+      // genuine m1 would be permanently unreachable.
+      final corrupt = EncryptedEnvelope(
+        identityKey: m2.identityKey,
+        index: m2.index,
+        ciphertext: m2.ciphertext,
+        nonce: m2.nonce,
+        mac: '${m2.mac.substring(0, m2.mac.length - 4)}AAAA',
+      );
+      await expectLater(
+        bob.decrypt(peerId: 'alice', envelope: corrupt, local: bobKeys),
+        throwsA(anything),
+      );
+
+      expect(
+        (await bob.decrypt(peerId: 'alice', envelope: m1, local: bobKeys)).plaintext,
+        'one',
+      );
+      expect(
+        (await bob.decrypt(peerId: 'alice', envelope: m2, local: bobKeys)).plaintext,
+        'two',
+      );
+    });
+
+    test('a replayed opening message does not rewind the cursor', () async {
+      final bundle = await bundleFor(bobKeys);
+      final opening = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'zero',
+        local: aliceKeys,
+        bundle: bundle,
+      );
+      final next = await alice.encrypt(peerId: 'bob', plaintext: 'one', local: aliceKeys);
+      await bob.decrypt(peerId: 'alice', envelope: opening, local: bobKeys);
+      await bob.decrypt(peerId: 'alice', envelope: next, local: bobKeys);
+
+      await expectLater(
+        bob.decrypt(peerId: 'alice', envelope: opening, local: bobKeys),
+        throwsA(isA<E2eeException>()),
+      );
+    });
+
+    test('simultaneous initiation settles on one session for both peers', () async {
+      // Both sides open a session at once, each using the other's bundle.
+      final aliceToBob = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'from alice',
+        local: aliceKeys,
+        bundle: await bundleFor(bobKeys),
+      );
+      final bobToAlice = await bob.encrypt(
+        peerId: 'alice',
+        plaintext: 'from bob',
+        local: bobKeys,
+        bundle: await bundleFor(aliceKeys, userId: 'alice'),
+      );
+
+      // Each reads the other's opening message.
+      expect(
+        (await bob.decrypt(peerId: 'alice', envelope: aliceToBob, local: bobKeys)).plaintext,
+        'from alice',
+      );
+      expect(
+        (await alice.decrypt(peerId: 'bob', envelope: bobToAlice, local: aliceKeys)).plaintext,
+        'from bob',
+      );
+
+      // Both keep working: the loser's chain is retained as an alternate, and
+      // each side's next message is readable by the other.
+      final aliceNext = await alice.encrypt(peerId: 'bob', plaintext: 'a2', local: aliceKeys);
+      expect(
+        (await bob.decrypt(peerId: 'alice', envelope: aliceNext, local: bobKeys)).plaintext,
+        'a2',
+      );
+      final bobNext = await bob.encrypt(peerId: 'alice', plaintext: 'b2', local: bobKeys);
+      expect(
+        (await alice.decrypt(peerId: 'bob', envelope: bobNext, local: aliceKeys)).plaintext,
+        'b2',
+      );
+    });
+  });
 }

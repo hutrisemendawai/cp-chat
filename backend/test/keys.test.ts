@@ -242,6 +242,80 @@ describe('e2ee key registry', () => {
     });
     expect(JSON.stringify(response.json())).not.toContain('private');
   });
+
+  it('discards orphaned one-time prekeys when the identity key rotates', async () => {
+    // A reinstall publishes a fresh identity; the old prekeys' private halves
+    // are gone with the previous install, so handing one out would let a peer
+    // build a session the recipient can never derive.
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    await publish(bob, { prekeys: 3 });
+
+    const rotated = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/keys',
+      headers: auth(bob),
+      payload: {
+        identity_key: fakeKey('rotated-identity'),
+        signing_key: fakeKey('rotated-signing'),
+        signed_prekey: {
+          key_id: 9,
+          public_key: fakeKey('rotated-signed'),
+          signature: fakeKey('rotated-signature'),
+        },
+        one_time_prekeys: [
+          { key_id: 100, public_key: fakeKey('rotated-otp-100') },
+          { key_id: 101, public_key: fakeKey('rotated-otp-101') },
+        ],
+      },
+    });
+    expect(rotated.statusCode).toBe(201);
+
+    // Only the fresh batch survives, so the first bundle can never reference a
+    // prekey from the previous device.
+    expect(await keys.countOneTimePrekeys(bob.id)).toBe(2);
+
+    const bundle = await harness.app.inject({
+      method: 'GET',
+      url: `/api/v1/keys/${bob.id}`,
+      headers: auth(alice),
+    });
+    expect(bundle.statusCode).toBe(200);
+    expect(bundle.json().identity_key).toBe(fakeKey('rotated-identity'));
+    expect(bundle.json().one_time_prekey.key_id).toBe(100);
+  });
+
+  it('keeps the one-time prekey supply on a republish by the same device', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    await publish(bob, { prekeys: 3 });
+
+    // Same identity, republished (e.g. app restart). The supply must survive,
+    // otherwise every foreground start would throw away unclaimed prekeys.
+    const republished = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/keys',
+      headers: auth(bob),
+      payload: {
+        identity_key: fakeKey(`identity-${bob.id}`),
+        signing_key: fakeKey(`signing-${bob.id}`),
+        signed_prekey: {
+          key_id: 7,
+          public_key: fakeKey(`signed-${bob.id}`),
+          signature: fakeKey(`signature-${bob.id}`),
+        },
+      },
+    });
+    expect(republished.statusCode).toBe(201);
+    expect(await keys.countOneTimePrekeys(bob.id)).toBe(3);
+
+    const bundle = await harness.app.inject({
+      method: 'GET',
+      url: `/api/v1/keys/${bob.id}`,
+      headers: auth(alice),
+    });
+    expect(bundle.json().one_time_prekey.key_id).toBe(1);
+  });
 });
 
 describe('e2ee envelope', () => {

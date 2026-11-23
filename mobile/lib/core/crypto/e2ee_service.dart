@@ -27,6 +27,13 @@ import 'package:cryptography/cryptography.dart';
 /// messages it already decrypted or that arrived out of order.
 const String e2eePrefix = 'e2ee:v1:';
 
+/// How many concurrent sessions are kept per peer.
+///
+/// One is the active session; the rest cover messages still in flight after a
+/// reinstall or a simultaneous initiation. Bounding the list keeps a repeatedly
+/// reinstalling peer from growing it without limit.
+const int maxSessionsPerPeer = 3;
+
 final Uint8List _rootInfo = Uint8List.fromList(utf8.encode('cpchat-x3dh-v1'));
 final Uint8List _initiatorSendInfo = Uint8List.fromList(utf8.encode('cpchat-chain-initiator-send'));
 final Uint8List _responderSendInfo = Uint8List.fromList(utf8.encode('cpchat-chain-responder-send'));
@@ -129,6 +136,13 @@ class RatchetChain {
   SecretKeyData key;
   int index;
 
+  /// A copy that can be advanced speculatively: a failed decryption must not
+  /// move the live chain past messages it skipped.
+  RatchetChain clone() => RatchetChain(
+        key: SecretKeyData(Uint8List.fromList(key.bytes)),
+        index: index,
+      );
+
   Map<String, dynamic> toJson() => {'key': base64Encode(key.bytes), 'index': index};
 }
 
@@ -142,12 +156,53 @@ class E2eeSession {
     required this.peerId,
     required RatchetChain sending,
     required RatchetChain receiving,
+    this.peerEphemeral,
+    this.localEphemeral,
+    this.signedPrekeyId,
+    this.oneTimePrekeyId,
+    this.confirmed = false,
     // ignore: prefer_initializing_formals
   })  : _sending = sending,
         // ignore: prefer_initializing_formals
         _receiving = receiving;
 
   final String peerId;
+
+  /// The ephemeral public key the peer used to open this session, or `null`
+  /// when *we* opened it.
+  ///
+  /// It identifies the session, so a replayed opening message is matched to the
+  /// session it belongs to instead of deriving a new one and rewinding the
+  /// cursor, and a genuinely new peer session can be told apart from a repeat.
+  final String? peerEphemeral;
+
+  /// Our own ephemeral public key, base64, when we opened the session. It is
+  /// re-attached to outgoing bodies until the peer answers, so a peer that lost
+  /// the session (restart, reinstall, cleared data) can rebuild its side instead
+  /// of being stuck with unreadable messages.
+  final String? localEphemeral;
+
+  /// Prekey ids the peer handed out in the bundle this session was opened with,
+  /// resent alongside [localEphemeral] so the peer can rebuild its side.
+  final int? signedPrekeyId;
+  final int? oneTimePrekeyId;
+
+  /// True once a body has been decrypted under this session.
+  bool confirmed;
+
+  /// Whether this device opened the session (and the peer is the responder).
+  bool get isInitiator => localEphemeral != null || peerEphemeral == null;
+
+  /// True while an initiator should still attach the X3DH context.
+  bool get needsOriginContext => localEphemeral != null && !confirmed;
+
+  /// Identity used to de-duplicate the per-peer session list. Two sessions are
+  /// the same when they share the peer's ephemeral or, for our own initiation,
+  /// our ephemeral.
+  bool sameSessionAs(E2eeSession other) {
+    if (peerEphemeral != null && peerEphemeral == other.peerEphemeral) return true;
+    return localEphemeral != null && localEphemeral == other.localEphemeral;
+  }
 
   /// Chain state. The chain objects are mutated in place (key and index
   /// advance) as messages are sent and received; the references never change.
@@ -161,12 +216,24 @@ class E2eeSession {
         'peer_id': peerId,
         'sending': _sending.toJson(),
         'receiving': _receiving.toJson(),
+        if (peerEphemeral != null) 'peer_ephemeral': peerEphemeral,
+        if (localEphemeral != null) 'local_ephemeral': localEphemeral,
+        if (signedPrekeyId != null) 'signed_prekey_id': signedPrekeyId,
+        if (oneTimePrekeyId != null) 'one_time_prekey_id': oneTimePrekeyId,
+        'confirmed': confirmed,
       };
 
   static E2eeSession fromJson(Map<String, dynamic> json) => E2eeSession(
         peerId: json['peer_id'] as String,
         sending: _chainFromJson(json['sending'] as Map<String, dynamic>),
         receiving: _chainFromJson(json['receiving'] as Map<String, dynamic>),
+        peerEphemeral: json['peer_ephemeral'] as String?,
+        localEphemeral: json['local_ephemeral'] as String?,
+        signedPrekeyId: (json['signed_prekey_id'] as num?)?.toInt(),
+        oneTimePrekeyId: (json['one_time_prekey_id'] as num?)?.toInt(),
+        // Blobs written before the flag existed already behaved as confirmed:
+        // they never resent the X3DH context after a restart.
+        confirmed: json['confirmed'] as bool? ?? true,
       );
 }
 
@@ -257,20 +324,17 @@ class E2eeException implements Exception {
   String toString() => message;
 }
 
-/// Values an envelope needs to let the *receiver* build its side of a session.
-/// They are only consumed on the first message of a session; afterwards the
-/// receiver already has the session and ignores them.
-class _SessionOrigin {
-  const _SessionOrigin({
-    required this.ephemeral,
-    required this.signedPrekeyId,
-    this.oneTimePrekeyId,
-  });
-
-  final SimpleKeyPair ephemeral;
-  final int signedPrekeyId;
-  final int? oneTimePrekeyId;
-}
+/// What a receiver could establish about a peer session, for diagnostics only.
+/// Never includes key material.
+typedef SessionSnapshot = ({
+  bool present,
+  bool initiator,
+  bool confirmed,
+  int sendingIndex,
+  int receivingIndex,
+  bool hasOriginContext,
+  int alternates,
+});
 
 class E2eeService {
   E2eeService({
@@ -293,33 +357,65 @@ class E2eeService {
   final int _prekeyCount;
   final Hmac _chainHmac = Hmac.sha256();
 
-  final Map<String, E2eeSession> _sessions = {};
-  final Map<String, _SessionOrigin> _originFor = {};
+  /// Sessions per peer. Index 0 is the one used for sending; every entry is a
+  /// decryption candidate, so messages still in flight under a replaced session
+  /// stay readable.
+  final Map<String, List<E2eeSession>> _peerSessions = {};
 
-  bool hasSession(String peerId) => _sessions.containsKey(peerId);
+  bool hasSession(String peerId) => _peerSessions[peerId]?.isNotEmpty ?? false;
 
-  E2eeSession? session(String peerId) => _sessions[peerId];
+  E2eeSession? session(String peerId) {
+    final list = _peerSessions[peerId];
+    return list == null || list.isEmpty ? null : list.first;
+  }
 
   /// Every established session, so all of them can be persisted — including
   /// sessions learned from an inbound message before the chat was ever opened.
-  Iterable<E2eeSession> get sessions => _sessions.values;
+  Iterable<E2eeSession> get sessions =>
+      _peerSessions.values.expand((list) => list);
 
-  /// Preloads a fetched bundle's origin so envelopes carry the right prekey
-  /// ids. Sessions started via [initiateSession] record this automatically;
-  /// this exists for callers that restore a session from storage.
-  void rememberBundle(RemotePrekeyBundle bundle, {SimpleKeyPair? ephemeral}) {
-    if (_originFor.containsKey(bundle.userId) || ephemeral == null) return;
-    _originFor[bundle.userId] = _SessionOrigin(
-      ephemeral: ephemeral,
-      signedPrekeyId: bundle.signedPrekeyId,
-      oneTimePrekeyId: bundle.oneTimePrekeyId,
+  /// Sessions known for one peer, newest primary first.
+  List<E2eeSession> sessionsFor(String peerId) =>
+      List.unmodifiable(_peerSessions[peerId] ?? const <E2eeSession>[]);
+
+  /// Non-secret session state for a decryption diagnosis. Logging this on a
+  /// failure tells a stuck chain apart from a missing or stale session without
+  /// ever recording a key.
+  SessionSnapshot snapshot(String peerId) {
+    final primary = session(peerId);
+    if (primary == null) {
+      return (
+        present: false,
+        initiator: false,
+        confirmed: false,
+        sendingIndex: 0,
+        receivingIndex: 0,
+        hasOriginContext: false,
+        alternates: 0,
+      );
+    }
+    return (
+      present: true,
+      initiator: primary.isInitiator,
+      confirmed: primary.confirmed,
+      sendingIndex: primary.sendingIndex,
+      receivingIndex: primary.receivingIndex,
+      hasOriginContext: primary.localEphemeral != null,
+      alternates: (_peerSessions[peerId]?.length ?? 1) - 1,
     );
   }
 
   /// Restores a persisted session (from secure storage on app start).
+  ///
+  /// The first session restored for a peer becomes primary; later ones are
+  /// alternates, which is the order the persistence layer writes them in.
   void restoreSession(E2eeSession session) {
-    _sessions[session.peerId] = session;
+    _putSession(session, makePrimary: !hasSession(session.peerId));
   }
+
+  /// Clears every in-memory session, used on logout so state from one account
+  /// cannot be reused by the next one signing in on this device.
+  void reset() => _peerSessions.clear();
 
   /// Generates a fresh identity, signing key, signed prekey, and one-time
   /// prekeys. The signed prekey is signed with the identity signing key so a
@@ -446,20 +542,19 @@ class E2eeService {
     }
 
     final root = await _derive(secrets, _rootInfo);
+    final ephemeralPublic = await ephemeral.extractPublicKey();
     // The initiator's sending chain is the responder's receiving chain and vice
     // versa, so the two peers agree while keeping the directions independent.
     final session = E2eeSession(
       peerId: bundle.userId,
       sending: RatchetChain(key: await _deriveKey(root, _initiatorSendInfo), index: 0),
       receiving: RatchetChain(key: await _deriveKey(root, _responderSendInfo), index: 0),
-    );
-
-    _sessions[bundle.userId] = session;
-    _originFor[bundle.userId] = _SessionOrigin(
-      ephemeral: ephemeral,
+      localEphemeral: base64Encode(ephemeralPublic.bytes),
       signedPrekeyId: bundle.signedPrekeyId,
       oneTimePrekeyId: bundle.oneTimePrekeyId,
     );
+
+    _putSession(session, makePrimary: true);
     return session;
   }
 
@@ -471,7 +566,7 @@ class E2eeService {
     required LocalKeyMaterial local,
     RemotePrekeyBundle? bundle,
   }) async {
-    var session = _sessions[peerId];
+    var session = this.session(peerId);
     if (session == null) {
       if (bundle == null) {
         throw const E2eeException('No session and no prekey bundle to start one');
@@ -479,12 +574,10 @@ class E2eeService {
       session = await initiateSession(local: local, bundle: bundle);
     }
 
-    final origin = _originFor[peerId];
-    // A session started by the peer (we are the responder) has no initiator
-    // ephemeral of ours; the envelope then omits the X3DH initiation fields.
-    final ephemeralPublic = origin == null
-        ? null
-        : await origin.ephemeral.extractPublicKey();
+    // The X3DH context is re-attached until the peer answers. Without it, a peer
+    // that lost the session (restart, reinstall, cleared data) could never
+    // rebuild its side and would render every new message as undecryptable.
+    final ephemeralPublic = session.needsOriginContext ? session.localEphemeral : null;
 
     final index = session._sending.index;
     final messageKey = await _messageKey(session._sending.key);
@@ -500,9 +593,9 @@ class E2eeService {
 
     return EncryptedEnvelope(
       identityKey: base64Encode((await local.identityKeyPair.extractPublicKey()).bytes),
-      ephemeralKey: ephemeralPublic == null ? null : base64Encode(ephemeralPublic.bytes),
-      signedPrekeyId: origin?.signedPrekeyId,
-      oneTimePrekeyId: origin?.oneTimePrekeyId,
+      ephemeralKey: ephemeralPublic,
+      signedPrekeyId: ephemeralPublic == null ? null : session.signedPrekeyId,
+      oneTimePrekeyId: ephemeralPublic == null ? null : session.oneTimePrekeyId,
       index: index,
       ciphertext: base64Encode(box.cipherText),
       nonce: base64Encode(box.nonce),
@@ -512,70 +605,173 @@ class E2eeService {
 
   /// Decrypts an inbound body.
   ///
-  /// The first message of a session (no stored session yet) runs the responder
-  /// side of X3DH from our private keys and the sender's ephemeral key. Later
-  /// messages advance the receiving chain to the envelope's `i`, which tolerates
-  /// messages we never saw (they are skipped) and a replay we already handled.
+  /// A body that opens a session (it carries an ephemeral key) is matched to a
+  /// session for that exact key, or used to derive the responder side of X3DH
+  /// when the peer is opening a session we do not hold. That second case is
+  /// what lets a peer recover after losing its session: a receiver that already
+  /// holds an older session must not ignore the new one.
+  ///
+  /// Later bodies omit the X3DH context, so every session known for the peer is
+  /// tried. AES-GCM's tag is the oracle, and a failed attempt leaves that
+  /// chain untouched because the advance happens on a clone.
   Future<DecryptedMessage> decrypt({
     required String peerId,
     required EncryptedEnvelope envelope,
     required LocalKeyMaterial local,
     SimpleKeyPair? oneTimePrekey,
   }) async {
-    var session = _sessions[peerId];
+    final ephemeralKey = envelope.ephemeralKey;
 
-    if (session == null) {
-      // Only the session-opening message carries the X3DH context needed to
-      // build the responder's state; without it we cannot derive any key.
-      if (envelope.ephemeralKey == null) {
-        throw const E2eeException('No session and the message does not open one');
-      }
-      final ephemeralPublic = SimplePublicKey(
-        base64Decode(envelope.ephemeralKey!),
-        type: KeyPairType.x25519,
-      );
-      final senderIdentity = SimplePublicKey(
-        base64Decode(envelope.identityKey),
-        type: KeyPairType.x25519,
-      );
-      // Use the one-time prekey the envelope says was consumed; fall back to a
-      // stored key with the same id when the caller did not pass one.
-      final oneTime = oneTimePrekey ?? local.prekey(envelope.oneTimePrekeyId ?? -1);
+    if (ephemeralKey != null) {
+      final known = _sessionForEphemeral(peerId, ephemeralKey);
+      if (known != null) return _decryptWith(known, envelope);
 
-      final secrets = <Uint8List>[
-        await _dh(local.signedPrekeyKeyPair, senderIdentity),
-        await _dh(local.identityKeyPair, ephemeralPublic),
-        await _dh(local.signedPrekeyKeyPair, ephemeralPublic),
-      ];
-      if (oneTime != null) {
-        secrets.add(await _dh(oneTime, ephemeralPublic));
-      }
-
-      final root = await _derive(secrets, _rootInfo);
-      session = E2eeSession(
+      // A new session opened by the peer. Keep it only if the body
+      // authenticates under it, so a replayed initiation cannot displace a
+      // working session.
+      final derived = await _responderSession(
         peerId: peerId,
-        // We are the responder: our sending chain is the initiator's receiving
-        // chain, and our receiving chain is the initiator's sending chain.
-        sending: RatchetChain(key: await _deriveKey(root, _responderSendInfo), index: 0),
-        receiving: RatchetChain(key: await _deriveKey(root, _initiatorSendInfo), index: 0),
+        envelope: envelope,
+        local: local,
+        oneTimePrekey: oneTimePrekey,
       );
-      _sessions[peerId] = session;
+      final decrypted = await _decryptWith(derived, envelope);
+      _putSession(derived, makePrimary: _shouldPromote(peerId, derived));
+      return decrypted;
     }
 
-    if (envelope.index < session._receiving.index) {
+    final candidates = sessionsFor(peerId);
+    if (candidates.isEmpty) {
+      throw const E2eeException('No session and the message does not open one');
+    }
+    Object? lastError;
+    for (final candidate in candidates) {
+      try {
+        return await _decryptWith(candidate, envelope);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw E2eeException('No known session could decrypt this message: $lastError');
+  }
+
+  /// Whether a freshly derived inbound session should become the sending
+  /// session for the peer.
+  ///
+  /// A peer that re-opens a session always wins: it only does so after losing
+  /// the previous one, so replying on the old chains would leave its messages
+  /// unreadable for us / its reading of ours impossible.
+  ///
+  /// The exception is session glare: both sides opened a session before either
+  /// had read the other's. Both devices then hold the same two sessions, so the
+  /// tie is broken by comparing the two initiating ephemeral keys — the smaller
+  /// one wins on both sides. Without a shared rule each device would keep
+  /// replacing the session the other is still using.
+  bool _shouldPromote(String peerId, E2eeSession derived) {
+    final incumbent = session(peerId);
+    if (incumbent == null) return true;
+
+    final mine = incumbent.localEphemeral;
+    final theirs = derived.peerEphemeral;
+    final glare = incumbent.isInitiator && !incumbent.confirmed;
+    if (!glare || mine == null || theirs == null) return true;
+
+    return theirs.compareTo(mine) < 0;
+  }
+
+  E2eeSession? _sessionForEphemeral(String peerId, String ephemeralKey) {
+    for (final candidate in _peerSessions[peerId] ?? const <E2eeSession>[]) {
+      if (candidate.peerEphemeral == ephemeralKey) return candidate;
+    }
+    return null;
+  }
+
+  /// Adds [session] to the peer's list, de-duplicating by peer ephemeral key and
+  /// keeping the list bounded: only a handful of sessions can realistically be
+  /// in flight, and an unbounded list would grow with every reinstall.
+  void _putSession(E2eeSession session, {required bool makePrimary}) {
+    final list = _peerSessions.putIfAbsent(session.peerId, () => <E2eeSession>[]);
+    // Replace a session we already track for the same negotiation instead of
+    // duplicating it: the repeat carries the same chains, and a stale copy would
+    // only confuse the decryption candidates.
+    final index = list.indexWhere((existing) => existing.sameSessionAs(session));
+    if (index >= 0) {
+      list[index] = session;
+      if (makePrimary && index != 0) list.insert(0, list.removeAt(index));
+      return;
+    }
+    if (makePrimary) {
+      list.insert(0, session);
+    } else {
+      list.add(session);
+    }
+    if (list.length > maxSessionsPerPeer) {
+      list.removeRange(maxSessionsPerPeer, list.length);
+    }
+  }
+
+  /// Derives the responder side of X3DH from an opening envelope.
+  Future<E2eeSession> _responderSession({
+    required String peerId,
+    required EncryptedEnvelope envelope,
+    required LocalKeyMaterial local,
+    SimpleKeyPair? oneTimePrekey,
+  }) async {
+    final ephemeralPublic = SimplePublicKey(
+      base64Decode(envelope.ephemeralKey!),
+      type: KeyPairType.x25519,
+    );
+    final senderIdentity = SimplePublicKey(
+      base64Decode(envelope.identityKey),
+      type: KeyPairType.x25519,
+    );
+    // Use the one-time prekey the envelope says was consumed; fall back to a
+    // stored key with the same id when the caller did not pass one.
+    final oneTime = oneTimePrekey ?? local.prekey(envelope.oneTimePrekeyId ?? -1);
+
+    final secrets = <Uint8List>[
+      await _dh(local.signedPrekeyKeyPair, senderIdentity),
+      await _dh(local.identityKeyPair, ephemeralPublic),
+      await _dh(local.signedPrekeyKeyPair, ephemeralPublic),
+    ];
+    if (oneTime != null) {
+      secrets.add(await _dh(oneTime, ephemeralPublic));
+    }
+
+    final root = await _derive(secrets, _rootInfo);
+    return E2eeSession(
+      peerId: peerId,
+      // We are the responder: our sending chain is the initiator's receiving
+      // chain, and our receiving chain is the initiator's sending chain.
+      sending: RatchetChain(key: await _deriveKey(root, _responderSendInfo), index: 0),
+      receiving: RatchetChain(key: await _deriveKey(root, _initiatorSendInfo), index: 0),
+      peerEphemeral: envelope.ephemeralKey,
+    );
+  }
+
+  /// Decrypts [envelope] with [session], advancing the chain only on success.
+  ///
+  /// Advancing a clone matters: a body that fails (a stale key, a tampered
+  /// frame, or a wrong session) must not move the cursor past the messages it
+  /// skipped, or those become permanently unreadable.
+  Future<DecryptedMessage> _decryptWith(
+    E2eeSession session,
+    EncryptedEnvelope envelope,
+  ) async {
+    final position = session.receivingIndex;
+    if (envelope.index < position) {
       throw E2eeException(
-        'Message ${envelope.index} predates the current chain position '
-        '${session._receiving.index}',
+        'Message ${envelope.index} predates the current chain position $position',
       );
     }
 
-    // Advance past any messages not delivered to this device.
-    while (session._receiving.index < envelope.index) {
-      session._receiving.key = await _nextChainKey(session._receiving.key);
-      session._receiving.index += 1;
+    final chain = session._receiving.clone();
+    while (chain.index < envelope.index) {
+      chain.key = await _nextChainKey(chain.key);
+      chain.index += 1;
     }
 
-    final messageKey = await _messageKey(session._receiving.key);
+    final messageKey = await _messageKey(chain.key);
     final clear = await _aesGcm.decrypt(
       SecretBox(
         base64Decode(envelope.ciphertext),
@@ -585,8 +781,11 @@ class E2eeService {
       secretKey: messageKey,
     );
 
-    session._receiving.key = await _nextChainKey(session._receiving.key);
-    session._receiving.index += 1;
+    chain.key = await _nextChainKey(chain.key);
+    chain.index += 1;
+    session._receiving.key = chain.key;
+    session._receiving.index = chain.index;
+    session.confirmed = true;
 
     return DecryptedMessage(plaintext: utf8.decode(clear), envelope: envelope);
   }

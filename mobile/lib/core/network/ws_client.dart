@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../config/app_config.dart';
-import '../crypto/e2ee_service.dart' show isEncryptedContent;
+import '../crypto/e2ee_service.dart' show isEncryptedContent, undecryptableContent;
 import '../logging/app_logger.dart';
 import '../notifications/crash_reporter.dart';
 import '../database/chat_dao.dart';
@@ -243,10 +243,26 @@ class ChatSocket {
   /// Decrypts and stores messages fetched outside the live stream (sync and
   /// history pagination), so a 1:1 ciphertext never reaches the local mirror
   /// raw and overwrites the plaintext an optimistic send created.
+  ///
+  /// A message already stored as plaintext is never decrypted again. The
+  /// receiving chain has moved past it, so a second attempt would fail and
+  /// (before) could leave the chain in a worse position than it started.
   Future<void> storeServerMessages(List<Message> messages) async {
     for (final message in messages) {
+      if (await _alreadyReadable(message.clientMsgId)) {
+        await _dao.upsertServerMessage(message, status: 'sent');
+        continue;
+      }
       await _persistServerMessage(message);
     }
+  }
+
+  /// True when the local row for this message already holds its plaintext, so
+  /// re-decrypting the server body would only move (or break) the ratchet.
+  Future<bool> _alreadyReadable(String clientMsgId) async {
+    final existing = await _dao.message(clientMsgId);
+    if (existing == null) return false;
+    return !isEncryptedContent(existing.content) && existing.content != undecryptableContent;
   }
 
   /// Adds a message to the outbox and sends it if the socket is up.
@@ -456,6 +472,14 @@ class ChatSocket {
   /// Persists one server message after decrypting an E2EE body, so every reader
   /// of the local row (bubbles, previews, search) sees plaintext.
   Future<void> _persistServerMessage(Message message) async {
+    // Already-decrypted content must not be decrypted a second time: the
+    // receiving chain has advanced past this message, so the retry fails and
+    // the local bubble would regress to a placeholder.
+    if (await _alreadyReadable(message.clientMsgId)) {
+      await _dao.upsertServerMessage(message, status: 'sent');
+      return;
+    }
+
     final plaintext = await _decryptForStorage(message);
     final stored = plaintext == null || plaintext == message.content
         ? message
@@ -489,7 +513,12 @@ class ChatSocket {
       );
     } catch (error, stack) {
       debugPrint('ChatSocket could not decrypt message: $error');
-      logger?.error('e2ee', 'decrypt failed', meta: {'error': error.toString()});
+      logger?.error('e2ee', 'decrypt threw', meta: {
+        'message_id': message.clientMsgId,
+        'conversation_id': message.conversationId,
+        'sender_id': message.senderId,
+        'exception': error.runtimeType.toString(),
+      });
       CrashReporter.record(error, stack, reason: 'e2ee_decrypt_failed');
       return null;
     }

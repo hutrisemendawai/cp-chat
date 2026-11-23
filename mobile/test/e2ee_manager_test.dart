@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:cp_chat/core/crypto/e2ee_manager.dart';
 import 'package:cp_chat/core/crypto/e2ee_service.dart';
+import 'package:cp_chat/core/logging/app_logger.dart';
 import 'package:cp_chat/core/models/models.dart';
 import 'package:cp_chat/core/network/api_client.dart';
 import 'package:cp_chat/core/storage/token_store.dart';
@@ -268,12 +271,12 @@ void main() {
       );
 
       // The peer is passed explicitly, so no UI registration is needed.
-      final content = await alice.encryptForConversation(
+      final content = (await alice.encryptForConversation(
         conversationId: 'conv-1',
         plaintext: 'hello bob',
         isGroup: false,
         peerId: 'bob',
-      );
+      ))!;
       expect(isEncryptedContent(content), isTrue);
       expect(decodeEnvelope(content)!.ephemeralKey, isNotNull);
 
@@ -288,12 +291,12 @@ void main() {
       expect(plaintext, 'hello bob');
 
       // And the reply returns on Bob's own sending chain.
-      final reply = await bob.manager.encryptForConversation(
+      final reply = (await bob.manager.encryptForConversation(
         conversationId: 'conv-1',
         plaintext: 'hi alice',
         isGroup: false,
         peerId: 'alice',
-      );
+      ))!;
       expect(
         await alice.plaintextFor('m-2', 'conv-1', reply, isGroup: false, senderId: 'bob'),
         'hi alice',
@@ -310,12 +313,12 @@ void main() {
         _FakeApi(aliceStore, bundles: {'bob': _bundleFor(bobPublic)}),
       );
 
-      final first = await alice.encryptForConversation(
+      final first = (await alice.encryptForConversation(
         conversationId: 'conv-1',
         plaintext: 'first',
         isGroup: false,
         peerId: 'bob',
-      );
+      ))!;
       expect(
         await bob.manager.plaintextFor('m-1', 'conv-1', first, isGroup: false, senderId: 'alice'),
         'first',
@@ -330,12 +333,12 @@ void main() {
       );
       await restored.bootstrap();
 
-      final second = await alice.encryptForConversation(
+      final second = (await alice.encryptForConversation(
         conversationId: 'conv-1',
         plaintext: 'second',
         isGroup: false,
         peerId: 'bob',
-      );
+      ))!;
       expect(
         await restored.plaintextFor('m-2', 'conv-1', second, isGroup: false, senderId: 'alice'),
         'second',
@@ -413,12 +416,12 @@ void main() {
         aliceStore,
         _FakeApi(aliceStore, bundles: {'bob': _bundleFor(bobPublic)}),
       );
-      final content = await alice.encryptForConversation(
+      final content = (await alice.encryptForConversation(
         conversationId: 'conv-1',
         plaintext: 'mine',
         isGroup: false,
         peerId: 'bob',
-      );
+      ))!;
 
       expect(
         await bob.manager.plaintextFor('m-1', 'conv-1', content, isGroup: false, senderId: 'bob'),
@@ -426,4 +429,233 @@ void main() {
       );
     });
   });
+
+  /// Reproduces the physical-device report: an earlier message rendered, then
+  /// later messages from the same peer became "Unable to decrypt this message".
+  group('peer session recovery', () {
+    /// A manager for a peer whose identity keys exist but whose session store is
+    /// empty — what a restart without persisted sessions (or a reinstall that
+    /// restored only the key blob) looks like.
+    Future<E2eeManager> restartedPeer({
+      required _MemoryTokenStore store,
+      required Map<String, RemotePrekeyBundle> bundles,
+    }) async {
+      final manager = E2eeManager(
+        tokenStore: store,
+        api: _FakeApi(store, bundles: bundles),
+        service: E2eeService(prekeyCount: 3),
+      );
+      // bootstrap() would restore the persisted sessions; clearing the blob
+      // first models a peer that lost them.
+      store.sessionBlob = null;
+      await manager.bootstrap();
+      return manager;
+    }
+
+    test('decrypts a peer re-initiation after the stored session is stale', () async {
+      final bob = await _recipient(userId: 'bob');
+      final bobPublic = await bob.service.buildPublicBundle(bob.keys);
+
+      final aliceStore = _MemoryTokenStore(userId: 'alice');
+      final alice = await _sender(
+        aliceStore,
+        _FakeApi(aliceStore, bundles: {'bob': _bundleFor(bobPublic)}),
+      );
+
+      // 1. The message that worked ("masih encrypt").
+      final first = (await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'masih encrypt',
+        isGroup: false,
+        peerId: 'bob',
+      ))!;
+      expect(
+        await bob.manager.plaintextFor('m-1', 'conv-1', first, isGroup: false, senderId: 'alice'),
+        'masih encrypt',
+      );
+
+      // 2. Bob restarts with the same identity keys but no sessions, then sends.
+      //    Alice still holds the session this message was encrypted against.
+      final alicePublic = await E2eeService()
+          .importKeyMaterial((await aliceStore.readE2eeKeys())!)
+          .then((keys) => E2eeService().buildPublicBundle(keys));
+      final restartedBob = await restartedPeer(
+        store: bob.store,
+        bundles: {'alice': _bundleFor(alicePublic, userId: 'alice')},
+      );
+      final reopened = (await restartedBob.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'setelah restart',
+        isGroup: false,
+        peerId: 'alice',
+      ))!;
+
+      final plaintext = await alice.plaintextFor(
+        'm-2',
+        'conv-1',
+        reopened,
+        isGroup: false,
+        senderId: 'bob',
+      );
+      expect(plaintext, 'setelah restart');
+      expect(plaintext, isNot(undecryptableContent));
+
+      // 3. Alice's reply is readable by the restarted peer.
+      final reply = (await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'ok',
+        isGroup: false,
+        peerId: 'bob',
+      ))!;
+      expect(
+        await restartedBob.plaintextFor('m-3', 'conv-1', reply, isGroup: false, senderId: 'alice'),
+        'ok',
+      );
+    });
+
+    test('decrypting the same message twice reuses the cached plaintext', () async {
+      // A live frame followed by a REST sync must not decrypt twice: the chain
+      // has already advanced, so the second attempt would fail.
+      final bob = await _recipient(userId: 'bob');
+      final bobPublic = await bob.service.buildPublicBundle(bob.keys);
+      final aliceStore = _MemoryTokenStore(userId: 'alice');
+      final alice = await _sender(
+        aliceStore,
+        _FakeApi(aliceStore, bundles: {'bob': _bundleFor(bobPublic)}),
+      );
+      final content = (await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'only once',
+        isGroup: false,
+        peerId: 'bob',
+      ))!;
+
+      for (var attempt = 0; attempt < 2; attempt += 1) {
+        expect(
+          await bob.manager.plaintextFor(
+            'm-1',
+            'conv-1',
+            content,
+            isGroup: false,
+            senderId: 'alice',
+          ),
+          'only once',
+        );
+      }
+    });
+
+    test('a decryption failure is reported once with non-secret context', () async {
+      final logger = AppLogger();
+      final bob = await _recipient(userId: 'bob');
+      final manager = E2eeManager(
+        tokenStore: bob.store,
+        api: bob.api,
+        service: E2eeService(prekeyCount: 3),
+        logger: logger,
+      );
+      await manager.bootstrap();
+
+      // A body whose authentication tag was replaced: well-formed envelope that
+      // cannot decrypt. This is the shape a stale key produces in the field.
+      final bobPublic = await E2eeService()
+          .importKeyMaterial((await bob.store.readE2eeKeys())!)
+          .then((keys) => E2eeService().buildPublicBundle(keys));
+      final alice = E2eeService(prekeyCount: 1);
+      final aliceKeys = await alice.generateKeyMaterial(startPrekeyId: 700);
+      final valid = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'unreadable',
+        local: aliceKeys,
+        bundle: RemotePrekeyBundle(
+          userId: 'bob',
+          identityKey: bobPublic.identityKey,
+          signingKey: bobPublic.signingKey,
+          signedPrekeyId: bobPublic.signedPrekeyId,
+          signedPrekey: bobPublic.signedPrekey,
+          signedPrekeySignature: bobPublic.signedPrekeySignature,
+          oneTimePrekeyId: bobPublic.prekeys.first.keyId,
+          oneTimePrekey: bobPublic.prekeys.first.publicKey,
+        ),
+      );
+      final envelope = EncryptedEnvelope(
+        identityKey: valid.identityKey,
+        ephemeralKey: valid.ephemeralKey,
+        signedPrekeyId: valid.signedPrekeyId,
+        oneTimePrekeyId: valid.oneTimePrekeyId,
+        index: valid.index,
+        ciphertext: valid.ciphertext,
+        nonce: valid.nonce,
+        mac: base64Encode(List<int>.filled(16, 0)),
+      );
+
+      for (var attempt = 0; attempt < 2; attempt += 1) {
+        expect(
+          await manager.plaintextFor(
+            'm-bad',
+            'conv-1',
+            envelope.toContent(),
+            isGroup: false,
+            senderId: 'alice',
+          ),
+          undecryptableContent,
+        );
+      }
+
+      final warnings = logger.entries.where((entry) => entry.level == AppLogLevel.warn).toList();
+      expect(warnings, hasLength(1), reason: 'a repeated failure must not be re-reported');
+      expect(warnings.single.message, contains('decrypt failed'));
+      expect(warnings.single.meta, containsPair('message_id', 'm-bad'));
+      expect(warnings.single.meta, containsPair('conversation_id', 'conv-1'));
+      expect(warnings.single.meta, containsPair('sender_id', 'alice'));
+      expect(warnings.single.meta, contains('reason'));
+      expect(warnings.single.meta, contains('session_present'));
+      // Never the plaintext.
+      expect(warnings.single.meta.toString(), isNot(contains('unreadable')));
+    });
+
+    test('an unencryptable send returns null instead of leaking plaintext', () async {
+      // The peer published a bundle but encryption fails, so falling back to
+      // plaintext would silently downgrade the conversation.
+      final store = _MemoryTokenStore(userId: 'alice');
+      final bob = await _recipient(userId: 'bob');
+      final bobPublic = await bob.service.buildPublicBundle(bob.keys);
+
+      final sender = E2eeManager(
+        tokenStore: store,
+        api: _FailingApi(store, bundles: {'bob': _bundleFor(bobPublic)}),
+      );
+      await sender.bootstrap();
+
+      expect(
+        await sender.encryptForConversation(
+          conversationId: 'conv-1',
+          plaintext: 'must not leak',
+          isGroup: false,
+          peerId: 'bob',
+        ),
+        isNull,
+      );
+    });
+  });
+}
+
+/// Serves a bundle but breaks its signature, so the service refuses to start a
+/// session — the "direct chat is encrypted but encryption failed" path.
+class _FailingApi extends _FakeApi {
+  _FailingApi(super.tokenStore, {required super.bundles});
+
+  @override
+  Future<RemotePrekeyBundle> prekeyBundle(String userId) async {
+    final bundle = await super.prekeyBundle(userId);
+    return RemotePrekeyBundle(
+      userId: bundle.userId,
+      identityKey: bundle.identityKey,
+      signingKey: bundle.signingKey,
+      signedPrekeyId: bundle.signedPrekeyId,
+      signedPrekey: bundle.signedPrekey,
+      signedPrekeySignature: bundle.signedPrekeySignature.substring(0, 8),
+      oneTimePrekeyId: bundle.oneTimePrekeyId,
+      oneTimePrekey: bundle.oneTimePrekey,
+    );
+  }
 }

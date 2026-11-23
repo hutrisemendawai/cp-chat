@@ -81,6 +81,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       await ref.read(chatControllerProvider(widget.conversationId)).sendText(text);
       await _scrollToBottom();
+    } on E2eeSendException catch (error) {
+      // Nothing left the device, so give the text back to the user instead of
+      // losing it.
+      if (mounted) {
+        _composer.text = text;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.toString())),
+        );
+      }
     } finally {
       if (mounted) setState(() => _sending = false);
     }

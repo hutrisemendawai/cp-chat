@@ -10,6 +10,18 @@ import '../../core/network/api_client.dart';
 import '../../core/network/ws_client.dart';
 import '../../core/providers.dart';
 
+/// Thrown when a direct chat could not be encrypted for delivery.
+///
+/// The message is not sent at all: transmitting it as plaintext would silently
+/// downgrade the conversation even though the peer has published keys.
+class E2eeSendException implements Exception {
+  const E2eeSendException();
+
+  @override
+  String toString() => 'This chat is end-to-end encrypted and the message '
+      'could not be encrypted. Nothing was sent.';
+}
+
 /// Sending, retrying and read-acknowledging for a single conversation.
 class ChatController {
   ChatController(this._ref, this._conversationId);
@@ -44,6 +56,11 @@ class ChatController {
           isGroup: isGroup,
           peerId: conversation?.peerId,
         );
+    // A null body means the direct chat is encrypted but this message could not
+    // be: refuse to send rather than leak the plaintext to the server.
+    if (body == null) {
+      throw const E2eeSendException();
+    }
 
     await _socket.send(
       conversationId: _conversationId,
