@@ -14,6 +14,7 @@ class User {
     this.customStatus,
     this.bio,
     this.lastSeenAt,
+    this.isFriend = false,
   });
 
   factory User.fromJson(Map<String, dynamic> json) {
@@ -30,6 +31,7 @@ class User {
       customStatus: json['custom_status'] as String?,
       bio: json['bio'] as String?,
       lastSeenAt: lastSeen is String ? DateTime.parse(lastSeen).toUtc() : null,
+      isFriend: json['is_friend'] as bool? ?? false,
     );
   }
 
@@ -48,6 +50,9 @@ class User {
   final String? customStatus;
   final String? bio;
   final DateTime? lastSeenAt;
+
+  /// Whether the current caller has this user in their friends list.
+  final bool isFriend;
 
   /// "Name (nickname)" when a nickname is set, otherwise the plain name.
   String get displayName {
@@ -81,6 +86,7 @@ class User {
       customStatus: clearCustomStatus ? null : (customStatus ?? this.customStatus),
       bio: clearBio ? null : (bio ?? this.bio),
       lastSeenAt: lastSeenAt ?? this.lastSeenAt,
+      isFriend: isFriend,
     );
   }
 }

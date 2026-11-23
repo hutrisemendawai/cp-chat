@@ -224,6 +224,51 @@ class ApiClient {
     return User.fromJson(_ok(response));
   }
 
+  /// Directory search by name or email/phone. Never searches by UUID.
+  Future<List<User>> searchUsers(String query, {int limit = 20}) async {
+    final response = await dio.get<dynamic>(
+      '/api/v1/users/search',
+      queryParameters: {'q': query, 'limit': limit},
+    );
+    final body = _ok(response);
+    return (body['users'] as List<dynamic>)
+        .map((item) => User.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// The caller's friends, ordered online first then by name.
+  Future<List<User>> friends() async {
+    final response = await dio.get<dynamic>('/api/v1/friends');
+    final body = _ok(response);
+    return (body['friends'] as List<dynamic>)
+        .map((item) => User.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Adds a friend by directory `userId` or by an email/phone/name
+  /// `identifier`. Idempotent on the server.
+  Future<User> addFriend({String? userId, String? identifier}) async {
+    final response = await dio.post<dynamic>(
+      '/api/v1/friends',
+      data: {
+        'user_id': ?userId,
+        'identifier': ?identifier,
+      },
+    );
+    return User.fromJson(_ok(response, expected: 201));
+  }
+
+  Future<void> removeFriend(String friendId) async {
+    final response = await dio.delete<dynamic>(
+      '/api/v1/friends/$friendId',
+      options: Options(validateStatus: (status) => status != null && status < 500),
+    );
+    final status = response.statusCode ?? 0;
+    if (status != 204) {
+      throw ApiException.fromResponse(status, _body(response.data));
+    }
+  }
+
   /// Updates the caller's profile.
   ///
   /// Omitted arguments are left unchanged. Pass [clearAvatar],

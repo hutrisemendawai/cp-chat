@@ -25,8 +25,13 @@ const profileSchema = z
     message: 'Provide at least one profile field to update',
   });
 
+const searchSchema = z.object({
+  q: z.string().trim().min(1).max(100),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
 export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { config, users, devices, presence } = ctx;
+  const { config, users, devices, presence, friends } = ctx;
 
   app.get('/api/v1/users/me', async (request) => {
     requireAuth(request, config);
@@ -73,6 +78,29 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
     return toOwnUser(updated, await presence.isOnline(updated.id));
   });
 
+  /**
+   * Directory search over name and email/phone. Registered before the `:id`
+   * route conceptually, but Fastify always prefers a static segment anyway.
+   * The caller is excluded and each result reports whether they are already a
+   * friend so the picker can render the relationship.
+   */
+  app.get('/api/v1/users/search', async (request) => {
+    requireAuth(request, config);
+    const result = searchSchema.safeParse(request.query);
+    if (!result.success) {
+      throw new ApiError('validation_error', 'Request failed validation', {
+        issues: result.error.issues.map((issue) => ({
+          path: issue.path.join('.'),
+          message: issue.message,
+        })),
+      });
+    }
+
+    const { q, limit } = result.data;
+    const found = await friends.search(request.userId, q.trim(), limit);
+    return { users: found };
+  });
+
   app.get('/api/v1/users/:id', async (request) => {
     requireAuth(request, config);
     const { id } = request.params as { id: string };
@@ -90,6 +118,7 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
       online: snapshot?.online ?? false,
       last_seen_at: snapshot?.last_seen_at ?? user.last_seen_at,
       custom_status: snapshot?.custom_status ?? user.custom_status,
+      is_friend: await friends.isFriend(request.userId, id),
     };
   });
 

@@ -110,14 +110,22 @@ export class PresenceService {
     return rows[0]?.last_seen_at ?? new Date();
   }
 
-  /** Distinct users who share at least one conversation with `userId`. */
+  /**
+   * Distinct users who should receive this user's presence updates: everyone
+   * who shares a conversation with them *and* everyone who has added them as a
+   * friend, so the People/Friends list updates live even before a chat exists.
+   */
   async sharedPeerIds(userId: string): Promise<string[]> {
     const { rows } = await this.db.query<{ user_id: string }>(
       `SELECT DISTINCT peer.user_id
          FROM conversation_members mine
          JOIN conversation_members peer
            ON peer.conversation_id = mine.conversation_id
-        WHERE mine.user_id = $1 AND peer.user_id <> $1`,
+        WHERE mine.user_id = $1 AND peer.user_id <> $1
+        UNION
+       SELECT f.user_id
+         FROM user_friends f
+        WHERE f.friend_id = $1`,
       [userId],
     );
     return rows.map((row) => row.user_id);

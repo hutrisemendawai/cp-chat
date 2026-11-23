@@ -526,7 +526,7 @@ export class ConversationRepository {
             last_seen_at: row.last_seen_at,
             created_at: row.created_at,
           },
-          false,
+          true,
           online.has(row.id),
         ),
         role: row.role,

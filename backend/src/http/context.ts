@@ -10,6 +10,7 @@ import type { Cache } from '../lib/redis.js';
 import { verifyAccessToken } from '../lib/tokens.js';
 import { ConversationRepository } from '../domain/conversations.js';
 import { DeviceRepository } from '../domain/devices.js';
+import { FriendRepository } from '../domain/friends.js';
 import { KeyRepository } from '../domain/keys.js';
 import { MediaRepository } from '../domain/media.js';
 import { MemberCache } from '../domain/member-cache.js';
@@ -25,6 +26,7 @@ export type AppContext = {
   db: Db;
   redis: Cache;
   users: UserRepository;
+  friends: FriendRepository;
   refreshTokens: RefreshTokenRepository;
   conversations: ConversationRepository;
   messages: MessageRepository;
@@ -72,6 +74,7 @@ export function createContext(
     broker: createBroker(config, redis, config.gatewayNodeId, logger),
     scylla,
     users: new UserRepository(db),
+    friends: new FriendRepository(db, presence),
     refreshTokens: new RefreshTokenRepository(db, config.REFRESH_TOKEN_TTL_SECONDS),
     conversations,
     messages: new MessageRepository(db, {

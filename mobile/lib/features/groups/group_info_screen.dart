@@ -8,6 +8,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
 import '../../shared/widgets/user_avatar.dart';
+import '../../shared/widgets/user_search_picker.dart';
 
 import 'group_controller.dart';
 
@@ -113,38 +114,18 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
     final selfId = ref.read(currentUserProvider)?.id;
     if (selfId == null) return;
 
-    final controller = TextEditingController();
-    final userId = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Add member'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'User id',
-            helperText: 'Paste the user id to add.',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+    final existing = _conversation?.members.map((member) => member.user.id).toSet() ?? {};
+    final picked = await showUserSearchSheet(
+      context,
+      multiSelect: true,
+      excludeIds: {...existing, selfId},
     );
-    controller.dispose();
+    if (picked.isEmpty || !mounted) return;
 
-    if (userId == null || userId.isEmpty) return;
     await _run(() async {
       final updated = await ref
           .read(groupControllerProvider)
-          .addMembers(widget.conversationId, [userId]);
+          .addMembers(widget.conversationId, picked.map((user) => user.id).toList());
       if (mounted) setState(() => _conversation = updated);
     });
   }
@@ -284,7 +265,12 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
                               ? '${member.user.displayName} (you)'
                               : member.user.displayName,
                         ),
-                        subtitle: Text(member.role == 'admin' ? 'Admin' : 'Member'),
+                        subtitle: Text(
+                          [
+                            member.role == 'admin' ? 'Admin' : 'Member',
+                            if (member.user.phoneOrEmail != null) member.user.phoneOrEmail!,
+                          ].join(' · '),
+                        ),
                         trailing: member.user.id == selfId || !_canRemove(conversation, selfId)
                             ? null
                             : IconButton(

@@ -129,8 +129,8 @@ export async function createGroup(
 
 export async function truncateAll(db: Db): Promise<void> {
   await db.query(
-    `TRUNCATE media_objects, message_receipts, messages, conversation_members, conversations,
-              device_tokens, refresh_tokens, users RESTART IDENTITY CASCADE`,
+    `TRUNCATE user_friends, media_objects, message_receipts, messages, conversation_members,
+              conversations, device_tokens, refresh_tokens, users RESTART IDENTITY CASCADE`,
   );
 }
 

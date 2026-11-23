@@ -4,11 +4,13 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../shared/widgets/user_avatar.dart';
+import '../../shared/widgets/user_search_picker.dart';
 
 import 'group_controller.dart';
 
-/// Creates a group: name plus one or more member ids. The creator becomes the
-/// sole admin, matching the backend contract.
+/// Creates a group: name plus one or more members chosen by name or email. The
+/// creator becomes the sole admin, matching the backend contract.
 class CreateGroupScreen extends ConsumerStatefulWidget {
   const CreateGroupScreen({super.key});
 
@@ -18,7 +20,6 @@ class CreateGroupScreen extends ConsumerStatefulWidget {
 
 class _CreateGroupScreenState extends ConsumerState<CreateGroupScreen> {
   final _nameController = TextEditingController();
-  final _memberController = TextEditingController();
   final List<User> _members = [];
   bool _busy = false;
   String? _error;
@@ -26,41 +27,29 @@ class _CreateGroupScreenState extends ConsumerState<CreateGroupScreen> {
   @override
   void dispose() {
     _nameController.dispose();
-    _memberController.dispose();
     super.dispose();
   }
 
-  Future<void> _addMember() async {
-    final query = _memberController.text.trim();
-    if (query.isEmpty) return;
+  Future<void> _addMembers() async {
+    final selfId = ref.read(currentUserProvider)?.id;
+    final picked = await showUserSearchSheet(
+      context,
+      multiSelect: true,
+      excludeIds: {
+        ..._members.map((member) => member.id),
+        ?selfId,
+      },
+    );
+    if (picked.isEmpty || !mounted) return;
 
     setState(() {
-      _busy = true;
       _error = null;
-    });
-
-    try {
-      final user = await ref.read(apiClientProvider).user(query);
-      final selfId = ref.read(currentUserProvider)?.id;
-      if (user.id == selfId) {
-        setState(() => _error = 'You are already in the group.');
-      } else if (_members.any((member) => member.id == user.id)) {
-        setState(() => _error = '${user.name} is already added.');
-      } else {
-        setState(() {
+      for (final user in picked) {
+        if (!_members.any((member) => member.id == user.id)) {
           _members.add(user);
-          _memberController.clear();
-        });
+        }
       }
-    } on ApiException catch (error) {
-      setState(() => _error = error.code == 'not_found'
-          ? 'No user with that id.'
-          : error.message);
-    } catch (_) {
-      setState(() => _error = 'Lookup failed. Check your connection.');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    });
   }
 
   Future<void> _create() async {
@@ -116,27 +105,10 @@ class _CreateGroupScreenState extends ConsumerState<CreateGroupScreen> {
             ),
           ),
           const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _memberController,
-                  enabled: !_busy,
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) => _addMember(),
-                  decoration: const InputDecoration(
-                    labelText: 'Add member by user id',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
-                onPressed: _busy ? null : _addMember,
-                tooltip: 'Add member',
-                icon: const Icon(Icons.person_add_alt),
-              ),
-            ],
+          OutlinedButton.icon(
+            onPressed: _busy ? null : _addMembers,
+            icon: const Icon(Icons.person_add_alt),
+            label: const Text('Add members by name or email'),
           ),
           if (_error != null) ...[
             const SizedBox(height: 12),
@@ -144,20 +116,24 @@ class _CreateGroupScreenState extends ConsumerState<CreateGroupScreen> {
           ],
           const SizedBox(height: 16),
           if (_members.isNotEmpty) ...[
-            Text('Members', style: theme.textTheme.titleMedium),
+            Text('Members (${_members.length})', style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),
             for (final member in _members)
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: CircleAvatar(
-                  child: Text(member.name.characters.first.toUpperCase()),
+                leading: UserAvatarWithStatus(
+                  avatarKey: member.avatarUrl,
+                  name: member.displayName,
+                  status: member.effectiveStatus,
                 ),
-                title: Text(member.name),
-                subtitle: Text(member.id),
+                title: Text(member.displayName),
+                subtitle: member.phoneOrEmail == null ? null : Text(member.phoneOrEmail!),
                 trailing: IconButton(
                   onPressed: _busy
                       ? null
-                      : () => setState(() => _members.removeWhere((item) => item.id == member.id)),
+                      : () => setState(
+                            () => _members.removeWhere((item) => item.id == member.id),
+                          ),
                   tooltip: 'Remove',
                   icon: const Icon(Icons.close),
                 ),

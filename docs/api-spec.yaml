@@ -189,6 +189,122 @@ paths:
         '422':
           $ref: '#/components/responses/ValidationError'
 
+  /api/v1/users/search:
+    get:
+      tags: [Users]
+      summary: Search users by name or email/phone
+      description: >
+        Case-insensitive substring search over `name` and `phone_or_email`. The
+        caller is excluded. Exact email/name and prefix matches sort first, then
+        alphabetical by name. `nickname` is returned for display as
+        "Name (nickname)"; the user is always identified by name/email, never by
+        a UUID the client asks the user to type.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 100
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: Matching users with presence and friend state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/friends:
+    get:
+      tags: [Friends]
+      summary: List the caller's friends
+      description: Ordered online first, then alphabetically by name, with live presence.
+      responses:
+        '200':
+          description: Friend list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [friends]
+                properties:
+                  friends:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Friends]
+      summary: Add a friend
+      description: >
+        Accepts either an `identifier` (email/phone or exact name) or a
+        `user_id` from a search result. Adding an existing friend is idempotent.
+        Adding yourself is rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                identifier:
+                  type: string
+                  maxLength: 200
+                user_id:
+                  type: string
+                  format: uuid
+      responses:
+        '201':
+          description: The added friend's public profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/friends/{friendId}:
+    parameters:
+      - name: friendId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [Friends]
+      summary: Remove a friend
+      responses:
+        '204':
+          description: Friend removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
   /api/v1/devices/fcm-token:
     post:
       tags: [Devices]
@@ -1146,6 +1262,12 @@ components:
           type: string
           enum: [online, idle, dnd, offline]
           description: What peers currently see, derived from preference and connection
+        online:
+          type: boolean
+          description: True when `effective_status` is not `offline`
+        is_friend:
+          type: boolean
+          description: Whether the caller has this user in their friends list
         custom_status:
           type: string
           nullable: true

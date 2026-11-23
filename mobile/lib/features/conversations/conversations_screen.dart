@@ -8,6 +8,7 @@ import '../../core/models/models.dart';
 import '../../core/providers.dart';
 import '../../core/widgets/connection_banner.dart';
 import '../../shared/widgets/user_avatar.dart';
+import '../../shared/widgets/user_search_picker.dart';
 import '../chat/media_message.dart';
 import '../presence/presence_controller.dart';
 
@@ -58,12 +59,9 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
   }
 
   Future<void> _startDirectChat() async {
-    final userId = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => const _NewChatSheet(),
-    );
-    if (userId == null || !mounted) return;
+    final picked = await showUserSearchSheet(context);
+    if (picked.isEmpty || !mounted) return;
+    final userId = picked.first.id;
 
     try {
       final conversation = await ref.read(apiClientProvider).createDirectConversation(userId);
@@ -264,115 +262,6 @@ class _ConversationTile extends ConsumerWidget {
     }
     if (difference.inDays < 7) return '${difference.inDays}d';
     return '${local.day}/${local.month}';
-  }
-}
-
-/// Looks up a user by exact phone/email or user id, then starts a direct chat.
-class _NewChatSheet extends ConsumerStatefulWidget {
-  const _NewChatSheet();
-
-  @override
-  ConsumerState<_NewChatSheet> createState() => _NewChatSheetState();
-}
-
-class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
-  final _controller = TextEditingController();
-  bool _busy = false;
-  User? _found;
-  String? _error;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _lookup() async {
-    final query = _controller.text.trim();
-    if (query.isEmpty) return;
-
-    setState(() {
-      _busy = true;
-      _error = null;
-      _found = null;
-    });
-
-    try {
-      final api = ref.read(apiClientProvider);
-      // The REST contract exposes lookup by id; an email is not resolvable
-      // without a directory endpoint, so tell the user what to provide.
-      final user = await api.user(query);
-      if (user.id == ref.read(currentUserProvider)?.id) {
-        setState(() => _error = 'That is you. Pick someone else.');
-      } else {
-        setState(() => _found = user);
-      }
-    } on ApiException catch (error) {
-      setState(() => _error = error.code == 'not_found'
-          ? 'No user with that id. Ask them for their user id.'
-          : error.message);
-    } catch (_) {
-      setState(() => _error = 'Lookup failed. Check your connection.');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final insets = MediaQuery.viewInsetsOf(context);
-
-    return Padding(
-      padding: EdgeInsets.only(bottom: insets.bottom),
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text('New chat', style: theme.textTheme.titleLarge),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _controller,
-              enabled: !_busy,
-              autofocus: true,
-              textInputAction: TextInputAction.search,
-              onSubmitted: (_) => _lookup(),
-              decoration: InputDecoration(
-                labelText: 'User id',
-                helperText: 'Paste the user id of the person you want to chat with.',
-                border: const OutlineInputBorder(),
-                suffixIcon: IconButton(
-                  icon: const Icon(Icons.search),
-                  onPressed: _busy ? null : _lookup,
-                ),
-              ),
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 12),
-              Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
-            ],
-            if (_found != null) ...[
-              const SizedBox(height: 16),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: CircleAvatar(
-                  child: Text(_found!.name.characters.first.toUpperCase()),
-                ),
-                title: Text(_found!.name),
-                subtitle: Text(_found!.id),
-              ),
-              const SizedBox(height: 8),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(_found!.id),
-                child: Text('Chat with ${_found!.name}'),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
   }
 }
 
