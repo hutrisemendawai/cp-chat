@@ -4,6 +4,8 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_theme.dart';
+import '../../shared/widgets/app_widgets.dart';
 import '../../shared/widgets/user_avatar.dart';
 import '../../shared/widgets/user_search_picker.dart';
 
@@ -88,58 +90,134 @@ class _CreateGroupScreenState extends ConsumerState<CreateGroupScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
 
     return Scaffold(
       appBar: AppBar(title: const Text('New group')),
       body: ListView(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.fromLTRB(
+          AppSpacing.pageMargin,
+          AppSpacing.lg,
+          AppSpacing.pageMargin,
+          AppSpacing.section,
+        ),
         children: [
+          Text(
+            'Group name',
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.xs),
           TextField(
             controller: _nameController,
             enabled: !_busy,
             textCapitalization: TextCapitalization.sentences,
             maxLength: 100,
-            decoration: const InputDecoration(
-              labelText: 'Group name',
-              border: OutlineInputBorder(),
+            decoration: InputDecoration(
+              hintText: 'e.g. Project team',
+              filled: false,
+              counterText: '${_nameController.text.characters.length}/100',
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(AppRadius.card),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(AppRadius.card),
+                borderSide: BorderSide(color: scheme.outlineVariant),
+              ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: AppSpacing.lg),
           OutlinedButton.icon(
             onPressed: _busy ? null : _addMembers,
-            icon: const Icon(Icons.person_add_alt),
+            icon: const Icon(Icons.person_add_alt_1, size: 18),
             label: const Text('Add members by name or email'),
           ),
           if (_error != null) ...[
-            const SizedBox(height: 12),
-            Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
+            const SizedBox(height: AppSpacing.md),
+            Container(
+              padding: const EdgeInsets.all(AppSpacing.md),
+              decoration: BoxDecoration(
+                color: scheme.errorContainer,
+                borderRadius: BorderRadius.circular(AppRadius.card),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.error_outline, size: 18, color: scheme.onErrorContainer),
+                  const SizedBox(width: AppSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
-          const SizedBox(height: 16),
           if (_members.isNotEmpty) ...[
-            Text('Members (${_members.length})', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 8),
-            for (final member in _members)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: UserAvatarWithStatus(
-                  avatarKey: member.avatarUrl,
-                  name: member.displayName,
-                  status: member.effectiveStatus,
+            const SizedBox(height: AppSpacing.xl),
+            SectionLabel(
+              text: 'Members (${_members.length})',
+              trailing: Text(
+                '${_members.length}',
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
                 ),
-                title: Text(member.displayName),
-                subtitle: member.phoneOrEmail == null ? null : Text(member.phoneOrEmail!),
-                trailing: IconButton(
-                  onPressed: _busy
-                      ? null
-                      : () => setState(
-                            () => _members.removeWhere((item) => item.id == member.id),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            for (final member in _members)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+                child: Row(
+                  children: [
+                    UserAvatarWithStatus(
+                      avatarKey: member.avatarUrl,
+                      name: member.displayName,
+                      status: member.effectiveStatus,
+                      radius: 20,
+                    ),
+                    const SizedBox(width: AppSpacing.md),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            member.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleMedium,
                           ),
-                  tooltip: 'Remove',
-                  icon: const Icon(Icons.close),
+                          if (member.phoneOrEmail != null)
+                            Text(
+                              member.phoneOrEmail!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: _busy
+                          ? null
+                          : () => setState(
+                                () => _members.removeWhere((item) => item.id == member.id),
+                              ),
+                      tooltip: 'Remove',
+                      icon: const Icon(Icons.close, size: 18),
+                    ),
+                  ],
                 ),
               ),
           ],
-          const SizedBox(height: 24),
+          const SizedBox(height: AppSpacing.xl),
           FilledButton(
             onPressed: _busy ? null : _create,
             child: _busy

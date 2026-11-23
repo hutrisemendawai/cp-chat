@@ -8,6 +8,7 @@ import 'core/notifications/crash_reporter.dart';
 import 'core/notifications/fcm_service.dart';
 import 'core/models/models.dart';
 import 'core/providers.dart';
+import 'core/theme/app_theme.dart';
 import 'features/auth/auth_screen.dart';
 import 'features/chat/chat_screen.dart';
 import 'features/conversations/conversations_screen.dart';
@@ -195,17 +196,8 @@ class _CpChatAppState extends ConsumerState<CpChatApp> {
       title: 'CP Chat',
       debugShowCheckedModeBanner: false,
       routerConfig: router,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2563EB)),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF2563EB),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: AppTheme.light,
+      darkTheme: AppTheme.dark,
     );
   }
 }

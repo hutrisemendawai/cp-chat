@@ -4,14 +4,18 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/database/app_database.dart';
 import '../../core/models/models.dart';
-
 import '../../core/providers.dart';
+import '../../core/theme/app_theme.dart';
 import '../../core/widgets/connection_banner.dart';
+import '../../shared/widgets/app_widgets.dart';
 import '../../shared/widgets/user_avatar.dart';
 import '../../shared/widgets/user_search_picker.dart';
 import '../chat/media_message.dart';
 import '../presence/presence_controller.dart';
 
+/// The conversation list, styled after the Stitch "Chats" screen:
+/// a `surface-container-low` app bar, `list-two-line` rows on hairline
+/// dividers, an emerald new-chat FAB and the pill-indicator bottom bar.
 class ConversationsScreen extends ConsumerStatefulWidget {
   const ConversationsScreen({super.key});
 
@@ -81,6 +85,7 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
   Widget build(BuildContext context) {
     final conversations = ref.watch(conversationsProvider);
     final user = ref.watch(currentUserProvider);
+    final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(
@@ -91,16 +96,19 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
             icon: const Icon(Icons.search),
             onPressed: () => context.push('/search'),
           ),
-          IconButton(
-            tooltip: 'My profile',
-            icon: UserAvatarWithStatus(
-              avatarKey: user?.avatarUrl,
-              name: user?.name ?? '?',
-              status: user?.effectiveStatus,
-              radius: 14,
-              showStatus: false,
+          Padding(
+            padding: const EdgeInsets.only(right: AppSpacing.md, left: AppSpacing.xs),
+            child: IconButton(
+              tooltip: 'My profile',
+              icon: UserAvatarWithStatus(
+                avatarKey: user?.avatarUrl,
+                name: user?.name ?? '?',
+                status: user?.effectiveStatus,
+                radius: 18,
+                showStatus: false,
+              ),
+              onPressed: () => context.go('/profile'),
             ),
-            onPressed: () => context.go('/profile'),
           ),
         ],
       ),
@@ -112,12 +120,14 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
                 ? const Center(child: CircularProgressIndicator())
                 : conversations.when(
                     loading: () => const Center(child: CircularProgressIndicator()),
-                    error: (error, _) => _EmptyState(
+                    error: (error, _) => EmptyState(
                       icon: Icons.error_outline,
                       title: 'Something went wrong',
                       message: '$error',
-                      actionLabel: 'Retry',
-                      onAction: _refresh,
+                      action: FilledButton.tonal(
+                        onPressed: _refresh,
+                        child: const Text('Retry'),
+                      ),
                     ),
                     data: (items) {
                       if (items.isEmpty) {
@@ -125,12 +135,15 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
                           onRefresh: _refresh,
                           child: ListView(
                             children: [
-                              _EmptyState(
+                              EmptyState(
                                 icon: Icons.forum_outlined,
                                 title: 'No conversations yet',
-                                message: 'Start a 1:1 chat to get going.',
-                                actionLabel: 'New chat',
-                                onAction: _startNewChat,
+                                message: 'Start a 1:1 chat or create a group to get going.',
+                                action: FilledButton.icon(
+                                  onPressed: _startNewChat,
+                                  icon: const Icon(Icons.add_comment_outlined),
+                                  label: const Text('New chat'),
+                                ),
                               ),
                             ],
                           ),
@@ -140,8 +153,14 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
                       return RefreshIndicator(
                         onRefresh: _refresh,
                         child: ListView.separated(
+                          padding: EdgeInsets.zero,
                           itemCount: items.length,
-                          separatorBuilder: (_, _) => const Divider(height: 1),
+                          separatorBuilder: (_, _) => Divider(
+                            height: 1,
+                            indent: AppSpacing.lg,
+                            endIndent: AppSpacing.lg,
+                            color: scheme.outlineVariant,
+                          ),
                           itemBuilder: (context, index) {
                             final conversation = items[index];
                             return _ConversationTile(
@@ -160,12 +179,13 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
       floatingActionButton: FloatingActionButton(
         onPressed: _refreshing ? null : _startNewChat,
         tooltip: 'New chat',
-        child: const Icon(Icons.edit_outlined),
+        child: const Icon(Icons.add_comment_outlined),
       ),
     );
   }
 }
 
+/// One `list-two-line` row: avatar, title + timestamp, preview + unread badge.
 class _ConversationTile extends ConsumerWidget {
   const _ConversationTile({
     required this.conversation,
@@ -180,10 +200,9 @@ class _ConversationTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final isGroup = conversation.type == 'group';
-    final title = isGroup
-        ? (conversation.name ?? 'Group')
-        : _peerLabel(conversation);
+    final title = isGroup ? (conversation.name ?? 'Group') : _peerLabel(conversation);
     final unread = conversation.unreadCount;
 
     // A direct chat shows the peer's live presence dot; a group has no single
@@ -192,47 +211,76 @@ class _ConversationTile extends ConsumerWidget {
         ? null
         : ref.watch(presenceProvider(conversation.peerId!));
 
-    return ListTile(
+    return InkWell(
       onTap: onTap,
-      leading: isGroup
-          ? MediaAvatar(
-              objectKey: conversation.avatarUrl,
-              fallback: Icon(Icons.groups, color: theme.colorScheme.onPrimaryContainer),
-            )
-          : UserAvatarWithStatus(
-              avatarKey: conversation.peerAvatarUrl,
-              name: conversation.peerName ?? title,
-              status: presence?.resolvedStatus,
-            ),
-      title: Text(
-        title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: theme.textTheme.titleMedium?.copyWith(
-          fontWeight: unread > 0 ? FontWeight.w700 : FontWeight.w500,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
         ),
-      ),
-      subtitle: Text(
-        _subtitle(),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      trailing: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Text(
-            _relativeTime(conversation.updatedAt),
-            style: theme.textTheme.labelSmall,
-          ),
-          const SizedBox(height: 4),
-          if (unread > 0)
-            Badge(
-              label: Text(unread > 99 ? '99+' : '$unread'),
-            )
-          else
-            const SizedBox(height: 16),
-        ],
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            isGroup
+                ? _GroupAvatar(avatarKey: conversation.avatarUrl)
+                : UserAvatarWithStatus(
+                    avatarKey: conversation.peerAvatarUrl,
+                    name: conversation.peerName ?? title,
+                    status: presence?.resolvedStatus,
+                    radius: 24,
+                  ),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.titleMedium,
+                        ),
+                      ),
+                      const SizedBox(width: AppSpacing.sm),
+                      Text(
+                        _relativeTime(conversation.updatedAt),
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _subtitle(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                      if (unread > 0) ...[
+                        const SizedBox(width: AppSpacing.sm),
+                        _UnreadBadge(count: unread),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -265,37 +313,56 @@ class _ConversationTile extends ConsumerWidget {
   }
 }
 
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({
-    required this.icon,
-    required this.title,
-    required this.message,
-    required this.actionLabel,
-    required this.onAction,
-  });
+/// Group avatars use `surface-container-highest` with a muted group glyph.
+class _GroupAvatar extends ConsumerWidget {
+  const _GroupAvatar({required this.avatarKey});
 
-  final IconData icon;
-  final String title;
-  final String message;
-  final String actionLabel;
-  final VoidCallback onAction;
+  final String? avatarKey;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final fallback = Icon(Icons.group, color: scheme.onSurfaceVariant);
+
+    if (avatarKey == null) {
+      return Container(
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest,
+          shape: BoxShape.circle,
+        ),
+        child: fallback,
+      );
+    }
+    return MediaAvatar(objectKey: avatarKey, radius: 24, fallback: fallback);
+  }
+}
+
+/// Emerald unread counter from the design system's primary accent.
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({required this.count});
+
+  final int count;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 64),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, size: 56, color: theme.colorScheme.primary),
-          const SizedBox(height: 16),
-          Text(title, style: theme.textTheme.titleLarge),
-          const SizedBox(height: 8),
-          Text(message, textAlign: TextAlign.center, style: theme.textTheme.bodyMedium),
-          const SizedBox(height: 20),
-          FilledButton.tonal(onPressed: onAction, child: Text(actionLabel)),
-        ],
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      constraints: const BoxConstraints(minWidth: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: scheme.primaryContainer,
+        borderRadius: BorderRadius.circular(AppRadius.full),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: scheme.onPrimaryContainer,
+              fontWeight: FontWeight.w700,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
       ),
     );
   }
@@ -309,22 +376,31 @@ class _ComposeSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.sm),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('New chat', style: theme.textTheme.titleLarge),
+            ),
+          ),
           ListTile(
             leading: const Icon(Icons.person_outline),
-            title: const Text('New chat'),
+            title: const Text('Direct message'),
             subtitle: const Text('Message one person'),
             onTap: () => Navigator.of(context).pop(_ComposeChoice.direct),
           ),
           ListTile(
-            leading: const Icon(Icons.groups_outlined),
+            leading: const Icon(Icons.group_outlined),
             title: const Text('New group'),
             subtitle: const Text('Up to 500 members'),
             onTap: () => Navigator.of(context).pop(_ComposeChoice.group),
           ),
+          const SizedBox(height: AppSpacing.sm),
         ],
       ),
     );

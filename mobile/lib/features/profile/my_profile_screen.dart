@@ -7,12 +7,13 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
-import '../../shared/widgets/status_badge.dart';
+import '../../core/theme/app_theme.dart';
 import '../../shared/widgets/status_colors.dart';
 import '../../shared/widgets/user_avatar.dart';
 
-/// View and edit the signed-in user's profile: avatar, name, nickname,
-/// Discord-style status, custom status and bio.
+/// View and edit the signed-in user's profile, styled after the Stitch
+/// "My Profile" screen: a large status-rimmed avatar, outlined gallery/camera
+/// pills, labelled text fields with counters, and a grouped status radio list.
 class MyProfileScreen extends ConsumerStatefulWidget {
   const MyProfileScreen({super.key});
 
@@ -191,174 +192,403 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
       appBar: AppBar(
         title: const Text('My Profile'),
         actions: [
-          TextButton(
-            onPressed: _saving ? null : () => _save(showConfirmation: true),
-            child: _saving
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('Save'),
+          Padding(
+            padding: const EdgeInsets.only(right: AppSpacing.sm),
+            child: TextButton(
+              onPressed: _saving ? null : () => _save(showConfirmation: true),
+              child: _saving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Save'),
+            ),
           ),
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.fromLTRB(
+          AppSpacing.pageMargin,
+          AppSpacing.xl,
+          AppSpacing.pageMargin,
+          AppSpacing.section,
+        ),
         children: [
           if (_error != null) ...[
-            Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
-            const SizedBox(height: 12),
+            _ErrorBanner(message: _error!),
+            const SizedBox(height: AppSpacing.lg),
           ],
-          Center(
-            child: Column(
-              children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    UserAvatarWithStatus(
-                      avatarKey: _avatarKey,
-                      name: _previewName,
-                      status: _status == 'invisible' ? 'offline' : _status,
-                      radius: 44,
-                    ),
-                    if (_uploadingAvatar)
-                      const Positioned.fill(
-                        child: CircleAvatar(
-                          backgroundColor: Colors.black45,
-                          child: CircularProgressIndicator(color: Colors.white),
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Text(_previewName, style: theme.textTheme.titleLarge),
-                if (_user?.phoneOrEmail != null)
-                  Text(
-                    _user!.phoneOrEmail!,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: _uploadingAvatar
-                          ? null
-                          : () => _pickAvatar(ImageSource.gallery),
-                      icon: const Icon(Icons.photo_library_outlined, size: 18),
-                      label: const Text('Gallery'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: _uploadingAvatar
-                          ? null
-                          : () => _pickAvatar(ImageSource.camera),
-                      icon: const Icon(Icons.photo_camera_outlined, size: 18),
-                      label: const Text('Camera'),
-                    ),
-                    if (_avatarKey != null)
-                      TextButton(
-                        onPressed: _uploadingAvatar ? null : _removeAvatar,
-                        child: const Text('Remove'),
-                      ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 24),
-          TextField(
+          _identityHeader(theme),
+          const SizedBox(height: AppSpacing.xl),
+          _labelledField(
+            label: 'Name',
             controller: _name,
             maxLength: 100,
-            textCapitalization: TextCapitalization.words,
-            decoration: const InputDecoration(
-              labelText: 'Name',
-              border: OutlineInputBorder(),
-            ),
+            hint: 'Enter your name',
+            capitalization: TextCapitalization.words,
           ),
-          const SizedBox(height: 8),
-          TextField(
+          const SizedBox(height: AppSpacing.lg),
+          _labelledField(
+            label: 'Nickname',
             controller: _nickname,
             maxLength: 60,
-            decoration: const InputDecoration(
-              labelText: 'Nickname',
-              helperText: 'Shown as "Name (nickname)"',
-              border: OutlineInputBorder(),
-            ),
+            hint: 'Enter a nickname',
+            hintBelow: 'Shown as "Name (nickname)"',
           ),
-          const SizedBox(height: 8),
-          Text('Status', style: theme.textTheme.titleMedium),
-          const SizedBox(height: 8),
-          ..._statusOptions.map(
-            (option) => RadioListTile<String>(
-              value: option.value,
-              // ignore: deprecated_member_use
-              groupValue: _status,
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              // ignore: deprecated_member_use
-              onChanged: (value) {
-                if (value == null) return;
-                setState(() => _status = value);
-                _save();
-              },
-              secondary: StatusBadge(status: option.value, size: 14),
-              title: Text(option.label),
-              subtitle: Text(
-                option.description,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _customStatus,
-            maxLength: 120,
-            decoration: InputDecoration(
-              labelText: 'Custom status',
-              hintText: 'What are you up to?',
-              border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
-                tooltip: 'Clear',
-                icon: const Icon(Icons.clear),
-                onPressed: () {
-                  _customStatus.clear();
-                  setState(() {});
-                },
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          TextField(
+          const SizedBox(height: AppSpacing.xl),
+          _statusSection(theme),
+          const SizedBox(height: AppSpacing.xl),
+          _customStatusField(theme),
+          const SizedBox(height: AppSpacing.lg),
+          _labelledField(
+            label: 'Bio',
             controller: _bio,
             maxLength: 2000,
+            hint: 'Tell people a little about yourself',
+            capitalization: TextCapitalization.sentences,
             minLines: 3,
             maxLines: 6,
-            textCapitalization: TextCapitalization.sentences,
-            decoration: const InputDecoration(
-              labelText: 'Bio',
-              alignLabelWithHint: true,
-              border: OutlineInputBorder(),
-            ),
           ),
-          const SizedBox(height: 16),
-          FilledButton.icon(
-            onPressed: _saving ? null : () => _save(showConfirmation: true),
-            icon: const Icon(Icons.save_outlined),
-            label: const Text('Save changes'),
-          ),
-          const SizedBox(height: 24),
+          const SizedBox(height: AppSpacing.xl),
           OutlinedButton.icon(
             style: OutlinedButton.styleFrom(
               foregroundColor: StatusColors.dnd,
+              side: BorderSide(color: theme.colorScheme.errorContainer),
             ),
             onPressed: _signOut,
-            icon: const Icon(Icons.logout),
+            icon: const Icon(Icons.logout, size: 18),
             label: const Text('Sign out'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Large avatar with a presence rim, display name, contact line and the two
+  /// outlined media pills from the design system.
+  Widget _identityHeader(ThemeData theme) {
+    final scheme = theme.colorScheme;
+
+    return Column(
+      children: [
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            UserAvatarWithStatus(
+              avatarKey: _avatarKey,
+              name: _previewName,
+              status: _status,
+              radius: 40,
+            ),
+            if (_uploadingAvatar)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black45,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Center(
+                    child: SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: AppSpacing.md),
+        Text(
+          _previewName,
+          textAlign: TextAlign.center,
+          style: theme.textTheme.headlineLarge,
+        ),
+        if (_user?.phoneOrEmail != null) ...[
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            _user!.phoneOrEmail!,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+        const SizedBox(height: AppSpacing.md),
+        Wrap(
+          spacing: AppSpacing.sm,
+          runSpacing: AppSpacing.sm,
+          alignment: WrapAlignment.center,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _uploadingAvatar
+                  ? null
+                  : () => _pickAvatar(ImageSource.gallery),
+              icon: const Icon(Icons.photo_library_outlined, size: 18),
+              label: const Text('Gallery'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _uploadingAvatar
+                  ? null
+                  : () => _pickAvatar(ImageSource.camera),
+              icon: const Icon(Icons.photo_camera_outlined, size: 18),
+              label: const Text('Camera'),
+            ),
+            if (_avatarKey != null)
+              TextButton(
+                onPressed: _uploadingAvatar ? null : _removeAvatar,
+                child: const Text('Remove'),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// Grouped radio list, matching the design system's status selector.
+  Widget _statusSection(ThemeData theme) {
+    final scheme = theme.colorScheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Status', style: theme.textTheme.titleMedium),
+        const SizedBox(height: AppSpacing.sm),
+        Container(
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(AppRadius.card),
+            border: Border.all(color: scheme.outlineVariant),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              for (var index = 0; index < _statusOptions.length; index++) ...[
+                if (index > 0)
+                  Divider(height: 1, color: scheme.outlineVariant),
+                _StatusOptionTile(
+                  option: _statusOptions[index],
+                  selected: _status == _statusOptions[index].value,
+                  onTap: _saving
+                      ? null
+                      : () {
+                          setState(() => _status = _statusOptions[index].value);
+                          _save();
+                        },
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _customStatusField(ThemeData theme) {
+    final scheme = theme.colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Custom status',
+          style: theme.textTheme.labelMedium?.copyWith(
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        TextField(
+          controller: _customStatus,
+          maxLength: 120,
+          decoration: InputDecoration(
+            hintText: 'Set a custom status',
+            filled: false,
+            counterText: '${_customStatus.text.characters.length}/120',
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(AppRadius.card),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(AppRadius.card),
+              borderSide: BorderSide(color: scheme.outlineVariant),
+            ),
+            suffixIcon: _customStatus.text.isEmpty
+                ? null
+                : IconButton(
+                    tooltip: 'Clear',
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () {
+                      _customStatus.clear();
+                      setState(() {});
+                    },
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// A labelled input with a triangular counter, per the design system's
+  /// `input-field-text` component.
+  Widget _labelledField({
+    required String label,
+    required TextEditingController controller,
+    required int maxLength,
+    required String hint,
+    TextCapitalization capitalization = TextCapitalization.none,
+    String? hintBelow,
+    int minLines = 1,
+    int maxLines = 1,
+  }) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: theme.textTheme.labelMedium?.copyWith(
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        TextField(
+          controller: controller,
+          maxLength: maxLength,
+          minLines: minLines,
+          maxLines: maxLines,
+          textCapitalization: capitalization,
+          decoration: InputDecoration(
+            hintText: hint,
+            filled: false,
+            counterText: '${controller.text.characters.length}/$maxLength',
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(AppRadius.card),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(AppRadius.card),
+              borderSide: BorderSide(color: scheme.outlineVariant),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(AppRadius.card),
+              borderSide: const BorderSide(
+                color: Color(0xFF00A884),
+                width: 1.5,
+              ),
+            ),
+          ),
+        ),
+        if (hintBelow != null)
+          Padding(
+            padding: const EdgeInsets.only(top: AppSpacing.xs),
+            child: Text(
+              hintBelow,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// One row of the grouped status selector: label, description and presence dot.
+class _StatusOptionTile extends StatelessWidget {
+  const _StatusOptionTile({
+    required this.option,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final ({String value, String label, String description}) option;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              selected ? Icons.radio_button_checked : Icons.radio_button_off,
+              size: 20,
+              color: selected ? scheme.primary : scheme.outline,
+            ),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(option.label, style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 2),
+                  Text(
+                    option.description,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: StatusColors.of(option.value),
+                shape: BoxShape.circle,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Inline error banner using the design system's error container tones.
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: scheme.errorContainer,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.error_outline, size: 18, color: scheme.onErrorContainer),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Text(
+              message,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onErrorContainer,
+              ),
+            ),
           ),
         ],
       ),

@@ -3,8 +3,11 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_theme.dart';
+import '../../shared/widgets/app_widgets.dart';
 
-/// In-chat search: narrows results to the open conversation server-side.
+/// In-chat search, styled after the Stitch "Search this chat" sheet: a prominent
+/// rounded field pinned at the top, with a centred empty state below it.
 class ChatSearchSheet extends ConsumerStatefulWidget {
   const ChatSearchSheet({super.key, required this.conversationId});
 
@@ -54,56 +57,80 @@ class _ChatSearchSheetState extends ConsumerState<ChatSearchSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
 
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: SizedBox(
         height: MediaQuery.sizeOf(context).height * 0.75,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: TextField(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.pageMargin,
+            AppSpacing.sm,
+            AppSpacing.pageMargin,
+            AppSpacing.lg,
+          ),
+          child: Column(
+            children: [
+              SearchField(
                 controller: _controller,
+                hintText: 'Search this chat',
                 autofocus: true,
-                textInputAction: TextInputAction.search,
                 onSubmitted: (_) => _run(),
-                decoration: InputDecoration(
-                  hintText: 'Search this chat',
-                  border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.search),
-                    onPressed: _busy ? null : _run,
+                onClear: () {
+                  _controller.clear();
+                  _run();
+                },
+              ),
+              if (_busy) ...[
+                const SizedBox(height: AppSpacing.md),
+                const LinearProgressIndicator(),
+              ],
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.all(AppSpacing.lg),
+                  child: Text(
+                    _error!,
+                    style: theme.textTheme.bodyMedium?.copyWith(color: scheme.error),
                   ),
                 ),
+              Expanded(
+                child: _results.isEmpty
+                    ? const EmptyState(
+                        icon: Icons.search,
+                        title: 'No matches',
+                        message: 'Search this conversation for text.',
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
+                        itemCount: _results.length,
+                        separatorBuilder: (_, _) => Divider(
+                          height: 1,
+                          color: scheme.outlineVariant,
+                        ),
+                        itemBuilder: (context, index) {
+                          final message = _results[index];
+                          return ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(
+                              message.type == 'text' ? message.content : 'Attachment',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodyMedium,
+                            ),
+                            subtitle: Text(
+                              '#${message.seq}',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                fontFamily: AppTypography.mono,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
               ),
-            ),
-            if (_busy) const LinearProgressIndicator(),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
-              ),
-            Expanded(
-              child: _results.isEmpty
-                  ? Center(child: Text('No matches', style: theme.textTheme.bodyLarge))
-                  : ListView.separated(
-                      itemCount: _results.length,
-                      separatorBuilder: (_, _) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final message = _results[index];
-                        return ListTile(
-                          title: Text(
-                            message.type == 'text' ? message.content : 'Attachment',
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text('#${message.seq}'),
-                        );
-                      },
-                    ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

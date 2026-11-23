@@ -5,6 +5,8 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_theme.dart';
+import 'app_widgets.dart';
 import 'user_avatar.dart';
 
 /// Opens the Name/Email search picker in a bottom sheet.
@@ -253,33 +255,27 @@ class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-          child: TextField(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.xl,
+            AppSpacing.sm,
+            AppSpacing.xl,
+            AppSpacing.sm,
+          ),
+          child: SearchField(
             controller: _controller,
+            hintText: 'Search by name or email',
             autofocus: widget.autofocus,
-            textInputAction: TextInputAction.search,
             onChanged: _onQueryChanged,
-            decoration: InputDecoration(
-              hintText: 'Search by name or email',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: query.isEmpty
-                  ? null
-                  : IconButton(
-                      tooltip: 'Clear',
-                      icon: const Icon(Icons.clear),
-                      onPressed: () {
-                        _controller.clear();
-                        _onQueryChanged('');
-                        setState(() {});
-                      },
-                    ),
-              border: const OutlineInputBorder(),
-            ),
+            onClear: () {
+              _controller.clear();
+              _onQueryChanged('');
+              setState(() {});
+            },
           ),
         ),
         if (_error != null)
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
             child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
           ),
         Expanded(

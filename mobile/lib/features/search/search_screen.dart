@@ -6,6 +6,8 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_theme.dart';
+import '../../shared/widgets/app_widgets.dart';
 
 /// Global message search across every conversation the user belongs to.
 ///
@@ -72,28 +74,21 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: TextField(
-          controller: _controller,
-          autofocus: true,
-          textInputAction: TextInputAction.search,
-          onChanged: _onChanged,
-          onSubmitted: (value) => _run(value.trim()),
-          decoration: const InputDecoration(
+        titleSpacing: 0,
+        title: Padding(
+          padding: const EdgeInsets.only(right: AppSpacing.md),
+          child: SearchField(
+            controller: _controller,
             hintText: 'Search messages',
-            border: InputBorder.none,
+            autofocus: true,
+            onChanged: _onChanged,
+            onSubmitted: (value) => _run(value.trim()),
+            onClear: () {
+              _controller.clear();
+              _run('');
+            },
           ),
         ),
-        actions: [
-          if (_controller.text.isNotEmpty)
-            IconButton(
-              tooltip: 'Clear',
-              icon: const Icon(Icons.close),
-              onPressed: () {
-                _controller.clear();
-                _run('');
-              },
-            ),
-        ],
       ),
       body: _body(theme),
     );
@@ -101,31 +96,57 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
 
   Widget _body(ThemeData theme) {
     if (_error != null) {
-      return Center(child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)));
+      return EmptyState(
+        icon: Icons.error_outline,
+        title: 'Search failed',
+        message: _error!,
+      );
     }
     if (_busy && _results.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_query.isEmpty) {
-      return Center(
-        child: Text('Search across all your chats', style: theme.textTheme.bodyLarge),
+      return const EmptyState(
+        icon: Icons.search,
+        title: 'Search your chats',
+        message: 'Find any message across your conversations.',
       );
     }
     if (_results.isEmpty) {
-      return Center(child: Text('No messages match "$_query"', style: theme.textTheme.bodyLarge));
+      return EmptyState(
+        icon: Icons.search_off,
+        title: 'No matches',
+        message: 'Nothing matches "$_query".',
+      );
     }
 
+    final scheme = theme.colorScheme;
     return ListView.separated(
+      padding: const EdgeInsets.only(bottom: AppSpacing.section),
       itemCount: _results.length,
-      separatorBuilder: (_, _) => const Divider(height: 1),
+      separatorBuilder: (_, _) => Divider(
+        height: 1,
+        indent: AppSpacing.lg + 40 + AppSpacing.md,
+        endIndent: AppSpacing.lg,
+        color: scheme.outlineVariant,
+      ),
       itemBuilder: (context, index) {
         final hit = _results[index];
         return ListTile(
-          leading: const Icon(Icons.chat_bubble_outline),
+          leading: CircleAvatar(
+            radius: 20,
+            backgroundColor: scheme.secondaryContainer,
+            child: Icon(
+              Icons.chat_bubble_outline,
+              size: 18,
+              color: scheme.onSecondaryContainer,
+            ),
+          ),
           title: Text(
             hit.message.type == 'text' ? hit.message.content : 'Attachment',
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodyMedium,
           ),
           subtitle: Text(_relativeTime(hit.message.createdAt)),
           onTap: () => context.push('/conversations/${hit.message.conversationId}'),

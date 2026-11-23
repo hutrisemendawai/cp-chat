@@ -4,9 +4,13 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_colors.dart';
+import '../../core/theme/app_theme.dart';
 
 enum AuthMode { login, register }
 
+/// Sign-in / sign-up, styled after the Stitch design system: emerald brand
+/// mark, Mulish headline, rounded filled inputs and a stadium primary button.
 class AuthScreen extends ConsumerStatefulWidget {
   const AuthScreen({super.key, this.initialMode = AuthMode.login});
 
@@ -72,12 +76,13 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
 
     return Scaffold(
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(AppSpacing.xl),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 420),
               child: AutofillGroup(
@@ -86,18 +91,39 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Icon(
-                        Icons.chat_bubble_rounded,
-                        size: 64,
-                        color: theme.colorScheme.primary,
+                      // Brand mark on the design system's emerald container.
+                      Center(
+                        child: Container(
+                          width: 72,
+                          height: 72,
+                          decoration: const BoxDecoration(
+                            color: AppColors.whatsappEmerald,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            Icons.chat_bubble_rounded,
+                            size: 34,
+                            color: scheme.onPrimaryContainer,
+                          ),
+                        ),
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: AppSpacing.lg),
                       Text(
                         _isRegister ? 'Create your account' : 'Welcome back',
                         textAlign: TextAlign.center,
-                        style: theme.textTheme.headlineSmall,
+                        style: theme.textTheme.headlineLarge,
                       ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: AppSpacing.xs),
+                      Text(
+                        _isRegister
+                            ? 'Join CP Chat to start messaging.'
+                            : 'Sign in to continue your conversations.',
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.xl),
                       TextFormField(
                         controller: _emailController,
                         enabled: !_busy,
@@ -112,8 +138,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         textCapitalization: TextCapitalization.none,
                         decoration: const InputDecoration(
                           labelText: 'Phone or email',
-                          prefixIcon: Icon(Icons.person_outline),
-                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.person_outline, size: 20),
                         ),
                         validator: (value) {
                           final text = value?.trim() ?? '';
@@ -123,7 +148,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         },
                       ),
                       if (_isRegister) ...[
-                        const SizedBox(height: 16),
+                        const SizedBox(height: AppSpacing.md),
                         TextFormField(
                           controller: _nameController,
                           enabled: !_busy,
@@ -132,8 +157,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                           textCapitalization: TextCapitalization.words,
                           decoration: const InputDecoration(
                             labelText: 'Display name',
-                            prefixIcon: Icon(Icons.badge_outlined),
-                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.badge_outlined, size: 20),
                           ),
                           validator: (value) {
                             final text = value?.trim() ?? '';
@@ -143,7 +167,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                           },
                         ),
                       ],
-                      const SizedBox(height: 16),
+                      const SizedBox(height: AppSpacing.md),
                       TextFormField(
                         controller: _passwordController,
                         enabled: !_busy,
@@ -156,11 +180,13 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         onFieldSubmitted: (_) => _submit(),
                         decoration: InputDecoration(
                           labelText: 'Password',
-                          prefixIcon: const Icon(Icons.lock_outline),
-                          border: const OutlineInputBorder(),
+                          prefixIcon: const Icon(Icons.lock_outline, size: 20),
                           suffixIcon: IconButton(
                             tooltip: _obscure ? 'Show password' : 'Hide password',
-                            icon: Icon(_obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined),
+                            icon: Icon(
+                              _obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                              size: 20,
+                            ),
                             onPressed: () => setState(() => _obscure = !_obscure),
                           ),
                         ),
@@ -174,10 +200,10 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         },
                       ),
                       if (_error != null) ...[
-                        const SizedBox(height: 16),
+                        const SizedBox(height: AppSpacing.lg),
                         _ErrorBanner(message: _error!),
                       ],
-                      const SizedBox(height: 24),
+                      const SizedBox(height: AppSpacing.xl),
                       FilledButton(
                         onPressed: _busy ? null : _submit,
                         child: _busy
@@ -188,7 +214,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                               )
                             : Text(_isRegister ? 'Create account' : 'Sign in'),
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: AppSpacing.sm),
                       TextButton(
                         onPressed: _busy
                             ? null
@@ -214,6 +240,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   }
 }
 
+/// Inline error banner using the design system's error container tones.
 class _ErrorBanner extends StatelessWidget {
   const _ErrorBanner({required this.message});
 
@@ -222,20 +249,23 @@ class _ErrorBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(AppSpacing.md),
       decoration: BoxDecoration(
-        color: theme.colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(8),
+        color: scheme.errorContainer,
+        borderRadius: BorderRadius.circular(AppRadius.card),
       ),
       child: Row(
         children: [
-          Icon(Icons.error_outline, color: theme.colorScheme.onErrorContainer),
-          const SizedBox(width: 8),
+          Icon(Icons.error_outline, size: 18, color: scheme.onErrorContainer),
+          const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
               message,
-              style: TextStyle(color: theme.colorScheme.onErrorContainer),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onErrorContainer,
+              ),
             ),
           ),
         ],

@@ -524,3 +524,35 @@ on by default for direct-chat text and has no server fallback that can read it.
 - **End-to-End Encryption:** Direct-chat text is encrypted on the device; the server stores only public prekeys and relays ciphertext. See `docs/e2ee.md`.
 - **Abuse Prevention:** Apply Redis-backed token-bucket rate limiting at the API Gateway and Chat Gateway (e.g., max messages per second per user).
 - **Data Protection:** Encrypt database volumes and S3 buckets at rest; never log raw message contents in server logs. Android cloud backup and device transfer are disabled so E2EE keys cannot leave the device.
+
+---
+
+## 10. Google Stitch (frontend design reference)
+
+This repository is bound to **exactly one** Stitch project:
+
+| Field | Value |
+| :--- | :--- |
+| Project ID | `14662638851741478393` |
+| Title | `WhatsApp Clone UI Theme` |
+| URL | https://stitch.google.com/projects/14662638851741478393 |
+| Device type | `MOBILE` |
+| Design system | `assets/canvas_node_node_7972721565232412322` — "CP Chat (WhatsApp Theme) - Design System" |
+
+Screens: Chats, People, My Profile, Personal Chat, Search This Chat, Contact
+Profile, Group Chat, Group Info. Exact IDs live in `.stitch/metadata.json`.
+
+**Rules:**
+
+- Always pass `projectId: "14662638851741478393"` to every Stitch MCP tool.
+- Never call `create_project` for this repository.
+- Never read from or write to any other Stitch project, even when
+  `list_projects` returns more (e.g. `CP Talk Prototype`). If a task appears to
+  require a different project, stop and ask.
+- Downloaded screens and HTML go under `.stitch/designs/`.
+- Stitch emits HTML/CSS while the client is Flutter: treat Stitch output as the
+  visual source of truth and port it into `mobile/lib/features/`, unless a
+  separate web frontend is explicitly requested.
+- Stitch tooling is provided by the `stitch-*` skills in `.agents/skills/` (16
+  skills). The Stitch MCP server is registered at `local` scope
+  (`~/.commandcode/projects/.../mcp.json`) so its API key is never committed.

@@ -92,6 +92,30 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # Typefaces from the Google Stitch design system
+  # (`projects/14662638851741478393`). Mulish carries headings and titles,
+  # Instrument Sans carries body/label text, Source Code Pro carries encrypted
+  # payloads and tabular timestamps.
+  fonts:
+    - family: Mulish
+      fonts:
+        - asset: assets/fonts/Mulish-600.ttf
+          weight: 600
+        - asset: assets/fonts/Mulish-700.ttf
+          weight: 700
+    - family: InstrumentSans
+      fonts:
+        - asset: assets/fonts/InstrumentSans-400.ttf
+          weight: 400
+        - asset: assets/fonts/InstrumentSans-500.ttf
+          weight: 500
+        - asset: assets/fonts/InstrumentSans-600.ttf
+          weight: 600
+    - family: SourceCodePro
+      fonts:
+        - asset: assets/fonts/SourceCodePro-400.ttf
+          weight: 400
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

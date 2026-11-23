@@ -8,6 +8,9 @@ import '../../core/providers.dart';
 
 /// Circular avatar backed by a private media object. Falls back to [fallback]
 /// when no avatar is set or the image cannot be loaded.
+///
+/// Drawn on the design system's `secondary-container` tone so initials and the
+/// image share one surface.
 class MediaAvatar extends ConsumerWidget {
   const MediaAvatar({
     super.key,
@@ -22,28 +25,38 @@ class MediaAvatar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    Widget circle(Widget child) => Container(
+          width: radius * 2,
+          height: radius * 2,
+          decoration: BoxDecoration(
+            color: scheme.secondaryContainer,
+            shape: BoxShape.circle,
+          ),
+          clipBehavior: Clip.antiAlias,
+          alignment: Alignment.center,
+          child: child,
+        );
+
     final key = objectKey;
-    if (key == null) {
-      return CircleAvatar(radius: radius, child: fallback);
-    }
+    if (key == null) return circle(fallback);
 
     final api = ref.watch(apiClientProvider);
     final token = ref.watch(accessTokenProvider).value;
     final headers =
         token == null ? const <String, String>{} : {'Authorization': 'Bearer $token'};
 
-    return CircleAvatar(
-      radius: radius,
-      child: ClipOval(
-        child: CachedNetworkImage(
-          imageUrl: api.mediaUrl(key),
-          httpHeaders: headers,
-          fit: BoxFit.cover,
-          width: radius * 2,
-          height: radius * 2,
-          placeholder: (context, url) => const SizedBox.shrink(),
-          errorWidget: (context, url, error) => Center(child: fallback),
-        ),
+    return circle(
+      CachedNetworkImage(
+        imageUrl: api.mediaUrl(key),
+        httpHeaders: headers,
+        fit: BoxFit.cover,
+        width: radius * 2,
+        height: radius * 2,
+        placeholder: (context, url) => const SizedBox.shrink(),
+        errorWidget: (context, url, error) => Center(child: fallback),
       ),
     );
   }

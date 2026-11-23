@@ -4,14 +4,17 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_theme.dart';
+import '../../shared/widgets/app_widgets.dart';
 import '../../shared/widgets/direct_chat.dart';
 import '../../shared/widgets/status_badge.dart';
 import '../../shared/widgets/user_avatar.dart';
 import '../people/people_controller.dart';
 import '../presence/presence_controller.dart';
 
-/// A Discord-inspired public profile for any user, with a one-tap direct chat
-/// and friend toggle. Opened from People results, chat headers and group info.
+/// Another user's profile, styled after the Stitch "Contact Profile" screen:
+/// a compact centred identity block (no tall banner), a Message button beside
+/// an outlined remove-friend action, and a grouped contact/bio card.
 class UserProfileScreen extends ConsumerStatefulWidget {
   const UserProfileScreen({super.key, required this.userId});
 
@@ -29,6 +32,7 @@ class _UserProfileScreenState extends ConsumerState<UserProfileScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final profile = ref.watch(userProfileProvider(widget.userId));
     final presence = ref.watch(presenceProvider(widget.userId));
     final selfId = ref.watch(currentUserProvider)?.id;
@@ -37,9 +41,14 @@ class _UserProfileScreenState extends ConsumerState<UserProfileScreen> {
       appBar: AppBar(title: const Text('Profile')),
       body: profile.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, _) => _ErrorState(
+        error: (error, _) => EmptyState(
+          icon: Icons.error_outline,
+          title: 'Could not load profile',
           message: '$error',
-          onRetry: () => ref.invalidate(userProfileProvider(widget.userId)),
+          action: FilledButton.tonal(
+            onPressed: () => ref.invalidate(userProfileProvider(widget.userId)),
+            child: const Text('Retry'),
+          ),
         ),
         data: (user) {
           final snapshot = presence ??
@@ -54,214 +63,157 @@ class _UserProfileScreenState extends ConsumerState<UserProfileScreen> {
               );
           final isSelf = selfId == user.id;
           final isFriend = _friendOverride ?? user.isFriend;
+          final customStatus = snapshot.customStatus?.trim();
+          final bio = user.bio?.trim();
 
           return ListView(
-            padding: EdgeInsets.zero,
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.pageMargin,
+              AppSpacing.lg,
+              AppSpacing.pageMargin,
+              AppSpacing.section,
+            ),
             children: [
-              _header(context, user, snapshot.resolvedStatus),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+              // Compact identity block.
+              Center(
                 child: Column(
                   children: [
-                    _title(theme, user),
-                    const SizedBox(height: 10),
-                    _statusRow(theme, snapshot),
-                    if (snapshot.customStatus?.trim().isNotEmpty ?? false) ...[
-                      const SizedBox(height: 10),
-                      _customStatusBubble(theme, snapshot.customStatus!.trim()),
-                    ],
-                    if (!isSelf) ...[
-                      const SizedBox(height: 24),
-                      _actions(context, user, isFriend),
-                    ] else ...[
-                      const SizedBox(height: 24),
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton.tonalIcon(
-                          onPressed: () => context.go('/profile'),
-                          icon: const Icon(Icons.edit_outlined),
-                          label: const Text('Edit Profile'),
+                    GestureDetector(
+                      onTap: () => _previewAvatar(context, user),
+                      child: UserAvatarWithStatus(
+                        avatarKey: user.avatarUrl,
+                        name: user.displayName,
+                        status: snapshot.resolvedStatus,
+                        radius: 32,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.md),
+                    Text(
+                      user.displayName,
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.headlineMedium,
+                    ),
+                    const SizedBox(height: AppSpacing.xs),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        StatusBadge(
+                          status: snapshot.resolvedStatus,
+                          size: 8,
+                          borderColor: Colors.transparent,
+                        ),
+                        const SizedBox(width: AppSpacing.xs),
+                        Flexible(
+                          child: Text(
+                            formatPresence(snapshot) ?? 'Offline',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (customStatus != null && customStatus.isNotEmpty) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.md,
+                          vertical: AppSpacing.xs,
+                        ),
+                        decoration: BoxDecoration(
+                          color: scheme.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(AppRadius.full),
+                        ),
+                        child: Text(
+                          customStatus,
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
                         ),
                       ),
                     ],
-                    if (user.phoneOrEmail != null) ...[
-                      const SizedBox(height: 24),
-                      _card(
-                        theme,
-                        icon: Icons.alternate_email,
-                        label: 'Contact',
-                        child: Text(user.phoneOrEmail!),
-                      ),
-                    ],
-                    if (user.bio?.trim().isNotEmpty ?? false) ...[
-                      const SizedBox(height: 12),
-                      _card(
-                        theme,
-                        icon: Icons.notes_outlined,
-                        label: 'Bio',
-                        child: Text(user.bio!.trim()),
-                      ),
-                    ],
                   ],
                 ),
               ),
+              const SizedBox(height: AppSpacing.lg),
+
+              // Action row: emerald Message pill plus a destructive outline.
+              if (isSelf)
+                FilledButton.tonalIcon(
+                  onPressed: () => context.go('/profile'),
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  label: const Text('Edit profile'),
+                )
+              else
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: scheme.primaryContainer,
+                          foregroundColor: scheme.onPrimaryContainer,
+                        ),
+                        onPressed: _busy ? null : () => openDirectChat(context, ref, user),
+                        icon: const Icon(Icons.chat, size: 18),
+                        label: const Text('Message'),
+                      ),
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          foregroundColor: isFriend ? scheme.error : scheme.primary,
+                          side: BorderSide(color: scheme.outlineVariant),
+                          shape: const CircleBorder(),
+                        ),
+                        onPressed: _busy ? null : () => _toggleFriend(user, isFriend),
+                        child: Icon(
+                          isFriend ? Icons.person_remove : Icons.person_add_alt_1,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+
+              // Grouped contact + bio details card.
+              if (user.phoneOrEmail != null || (bio != null && bio.isNotEmpty)) ...[
+                const SizedBox(height: AppSpacing.lg),
+                Container(
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(AppRadius.card),
+                    border: Border.all(color: scheme.outlineVariant),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(
+                    children: [
+                      if (user.phoneOrEmail != null)
+                        _DetailRow(
+                          icon: Icons.alternate_email,
+                          label: 'Contact',
+                          value: user.phoneOrEmail!,
+                        ),
+                      if (user.phoneOrEmail != null &&
+                          bio != null &&
+                          bio.isNotEmpty)
+                        Divider(height: 1, color: scheme.outlineVariant),
+                      if (bio != null && bio.isNotEmpty)
+                        _DetailRow(
+                          icon: Icons.notes,
+                          label: 'Bio',
+                          value: bio,
+                        ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           );
         },
-      ),
-    );
-  }
-
-  Widget _header(BuildContext context, User user, String status) {
-    final theme = Theme.of(context);
-    return SizedBox(
-      height: 180,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: Container(
-              height: 120,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    theme.colorScheme.primary,
-                    theme.colorScheme.primaryContainer,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          Positioned(
-            top: 62,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: GestureDetector(
-                onTap: () => _previewAvatar(context, user),
-                child: Container(
-                  padding: const EdgeInsets.all(5),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surface,
-                    shape: BoxShape.circle,
-                  ),
-                  child: UserAvatarWithStatus(
-                    avatarKey: user.avatarUrl,
-                    name: user.displayName,
-                    status: status,
-                    radius: 44,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _title(ThemeData theme, User user) {
-    return Text(
-      user.displayName,
-      textAlign: TextAlign.center,
-      style: theme.textTheme.headlineSmall,
-    );
-  }
-
-  Widget _statusRow(ThemeData theme, Presence snapshot) {
-    final status = snapshot.resolvedStatus;
-    final label = snapshot.isActive
-        ? statusLabel(status)
-        : (formatPresence(snapshot) ?? 'Offline');
-
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        StatusBadge(status: status, size: 14),
-        const SizedBox(width: 8),
-        Flexible(
-          child: Text(
-            label,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: snapshot.isActive
-                  ? theme.colorScheme.onSurface
-                  : theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _customStatusBubble(ThemeData theme, String customStatus) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(customStatus, textAlign: TextAlign.center),
-    );
-  }
-
-  Widget _actions(BuildContext context, User user, bool isFriend) {
-    return Row(
-      children: [
-        Expanded(
-          child: FilledButton.icon(
-            onPressed: _busy ? null : () => openDirectChat(context, ref, user),
-            icon: const Icon(Icons.chat),
-            label: const Text('Message'),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: OutlinedButton.icon(
-            onPressed: _busy ? null : () => _toggleFriend(user, isFriend),
-            icon: Icon(isFriend ? Icons.person_remove_outlined : Icons.person_add_alt_1),
-            label: Text(isFriend ? 'Remove Friend' : 'Add Friend'),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _card(ThemeData theme, {
-    required IconData icon,
-    required String label,
-    required Widget child,
-  }) {
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(icon, size: 20, color: theme.colorScheme.onSurfaceVariant),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    label,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  child,
-                ],
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -319,27 +271,50 @@ class _UserProfileScreenState extends ConsumerState<UserProfileScreen> {
   }
 }
 
-class _ErrorState extends StatelessWidget {
-  const _ErrorState({required this.message, required this.onRetry});
+/// One labelled detail row inside the grouped card.
+class _DetailRow extends StatelessWidget {
+  const _DetailRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
 
-  final String message;
-  final VoidCallback onRetry;
+  final IconData icon;
+  final String label;
+  final String value;
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline, size: 48),
-            const SizedBox(height: 12),
-            Text(message, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            FilledButton.tonal(onPressed: onRetry, child: const Text('Retry')),
-          ],
-        ),
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.lg,
+        vertical: AppSpacing.md,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20, color: scheme.primary),
+          const SizedBox(width: AppSpacing.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(value, style: theme.textTheme.bodyMedium),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

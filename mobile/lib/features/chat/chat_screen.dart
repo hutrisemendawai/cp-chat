@@ -7,10 +7,12 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/crypto/e2ee_service.dart' show isEncryptedContent, undecryptableContent;
 import '../../core/database/app_database.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_colors.dart';
+import '../../core/theme/app_theme.dart';
 import '../../core/widgets/connection_banner.dart';
-import '../../shared/widgets/status_badge.dart';
 import '../../shared/widgets/user_avatar.dart';
 import '../presence/presence_controller.dart';
 import 'chat_controller.dart';
@@ -218,52 +220,55 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
 
     return Scaffold(
+      // The message feed sits on the design system's chat wallpaper.
+      backgroundColor: context.chatTheme.wallpaper,
       appBar: AppBar(
+        titleSpacing: AppSpacing.xs,
         title: InkWell(
           onTap: peerUserId == null ? null : () => context.push('/users/$peerUserId'),
-          borderRadius: BorderRadius.circular(8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: isGroup
-                        ? MediaAvatar(
-                            objectKey: cached?.avatarUrl,
-                            radius: 16,
-                            fallback: const Icon(Icons.groups),
-                          )
-                        : UserAvatarWithStatus(
-                            avatarKey: peer?.user.avatarUrl ?? cached?.peerAvatarUrl,
-                            name: peer?.user.name ?? cached?.peerName ?? title,
-                            status: presence?.resolvedStatus,
-                            radius: 16,
-                            showStatus: false,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.xs,
+              vertical: AppSpacing.xs,
+            ),
+            child: Row(
+              children: [
+                isGroup
+                    ? MediaAvatar(
+                        objectKey: cached?.avatarUrl,
+                        radius: 18,
+                        fallback: const Icon(Icons.group, size: 18),
+                      )
+                    : UserAvatarWithStatus(
+                        avatarKey: peer?.user.avatarUrl ?? cached?.peerAvatarUrl,
+                        name: peer?.user.name ?? cached?.peerName ?? title,
+                        status: presence?.resolvedStatus,
+                        radius: 18,
+                      ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      if (presenceLabel != null)
+                        Text(
+                          presenceLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: presence?.isActive == true
+                                ? theme.colorScheme.primary
+                                : theme.colorScheme.onSurfaceVariant,
                           ),
-                  ),
-                  if (!isGroup && presence != null)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: StatusBadge(status: presence.resolvedStatus, size: 10),
-                    ),
-                  Flexible(
-                    child: Text(title, overflow: TextOverflow.ellipsis),
-                  ),
-                ],
-              ),
-              if (presenceLabel != null)
-                Text(
-                  presenceLabel,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: presence?.isActive == true
-                        ? theme.colorScheme.primary
-                        : theme.colorScheme.onSurfaceVariant,
+                        ),
+                    ],
                   ),
                 ),
-            ],
+              ],
+            ),
           ),
         ),
         actions: [
@@ -297,14 +302,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 if (items.isEmpty) {
                   return Center(
                     child: Text(
-                      'Say hello 👋',
-                      style: theme.textTheme.bodyLarge,
+                      'No messages yet',
+                      style: theme.textTheme.bodyLarge?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                     ),
                   );
                 }
                 return ListView.builder(
                   controller: _scrollController,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.pageMargin,
+                    vertical: AppSpacing.lg,
+                  ),
                   itemCount: items.length + (_hasMoreHistory ? 1 : 0),
                   itemBuilder: (context, index) {
                     if (_hasMoreHistory && index == 0) {
@@ -333,50 +343,126 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               },
             ),
           ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  IconButton(
-                    onPressed: _uploading ? null : _pickImage,
-                    tooltip: 'Send photo',
-                    icon: const Icon(Icons.image_outlined),
-                  ),
-                  IconButton(
-                    onPressed: _uploading ? null : _pickFile,
-                    tooltip: 'Send file',
-                    icon: const Icon(Icons.attach_file),
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: _composer,
-                      minLines: 1,
-                      maxLines: 5,
-                      textCapitalization: TextCapitalization.sentences,
-                      textInputAction: TextInputAction.newline,
-                      decoration: const InputDecoration(
-                        hintText: 'Message',
-                        border: OutlineInputBorder(),
-                        contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton.filled(
-                    onPressed: _composer.text.trim().isEmpty || _sending || _uploading
-                        ? null
-                        : _send,
-                    tooltip: 'Send',
-                    icon: const Icon(Icons.send),
-                  ),
-                ],
-              ),
-            ),
+          _Composer(
+            controller: _composer,
+            uploading: _uploading,
+            canSend: _composer.text.trim().isNotEmpty && !_sending && !_uploading,
+            onPickImage: _pickImage,
+            onPickFile: _pickFile,
+            onSend: _send,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Sticky composer from the design system: a rounded `surface-container-high`
+/// capsule with attach actions and an emerald circular send button.
+class _Composer extends StatelessWidget {
+  const _Composer({
+    required this.controller,
+    required this.uploading,
+    required this.canSend,
+    required this.onPickImage,
+    required this.onPickFile,
+    required this.onSend,
+  });
+
+  final TextEditingController controller;
+  final bool uploading;
+  final bool canSend;
+  final VoidCallback onPickImage;
+  final VoidCallback onPickFile;
+  final VoidCallback onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          AppSpacing.pageMargin,
+          AppSpacing.sm,
+          AppSpacing.pageMargin,
+          AppSpacing.sm,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(AppRadius.full),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    IconButton(
+                      onPressed: uploading ? null : onPickImage,
+                      tooltip: 'Send photo',
+                      icon: const Icon(Icons.image_outlined),
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    Expanded(
+                      child: TextField(
+                        controller: controller,
+                        minLines: 1,
+                        maxLines: 5,
+                        enabled: !uploading,
+                        textCapitalization: TextCapitalization.sentences,
+                        textInputAction: TextInputAction.newline,
+                        style: theme.textTheme.bodyLarge,
+                        decoration: InputDecoration(
+                          hintText: 'Message',
+                          filled: false,
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                            vertical: AppSpacing.md,
+                          ),
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: uploading ? null : onPickFile,
+                      tooltip: 'Send file',
+                      icon: const Icon(Icons.attach_file),
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            SizedBox(
+              width: 44,
+              height: 44,
+              child: Material(
+                color: AppColors.whatsappEmerald,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: canSend ? onSend : null,
+                  child: Icon(
+                    Icons.send,
+                    size: 20,
+                    color: canSend
+                        ? scheme.onPrimaryContainer
+                        : scheme.onPrimaryContainer.withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -421,30 +507,48 @@ class _MessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final chat = context.chatTheme;
 
-    final background = isMine
-        ? (_failed ? scheme.errorContainer : scheme.primaryContainer)
-        : scheme.surfaceContainerHighest;
-    final foreground = isMine
-        ? (_failed ? scheme.onErrorContainer : scheme.onPrimaryContainer)
-        : scheme.onSurface;
+    // Design system bubble tokens: outgoing uses `chat-bubble-out`, incoming
+    // `chat-bubble-in`; a failed send falls back to the error container.
+    final background = _failed
+        ? scheme.errorContainer
+        : (isMine ? chat.bubbleOut : chat.bubbleIn);
+    final foreground = _failed
+        ? scheme.onErrorContainer
+        : (isMine ? chat.onBubbleOut : chat.onBubbleIn);
+    final metaColor = scheme.onSurfaceVariant;
+
+    // 16px radius with a tighter 4px corner on the sender's side.
+    const bubbleRadius = Radius.circular(AppRadius.lg);
+    const tailRadius = Radius.circular(AppRadius.sm);
 
     return Align(
       alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
+        padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxWidth: MediaQuery.sizeOf(context).width * 0.78,
+            maxWidth: MediaQuery.sizeOf(context).width * 0.82,
           ),
           child: Material(
             color: background,
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.only(
+              topLeft: isMine ? bubbleRadius : tailRadius,
+              topRight: isMine ? tailRadius : bubbleRadius,
+              bottomLeft: bubbleRadius,
+              bottomRight: bubbleRadius,
+            ),
             child: InkWell(
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(AppRadius.lg),
               onLongPress: isMine ? () => _showActions(context) : null,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.md,
+                  AppSpacing.sm,
+                  AppSpacing.md,
+                  AppSpacing.sm,
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisSize: MainAxisSize.min,
@@ -455,18 +559,18 @@ class _MessageBubble extends StatelessWidget {
                         child: Text(
                           senderName!,
                           style: theme.textTheme.labelSmall?.copyWith(
-                            color: foreground.withValues(alpha: 0.75),
+                            color: scheme.primary,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: AppSpacing.xs),
                     ],
                     Align(
                       alignment: Alignment.centerLeft,
                       child: _body(theme, foreground),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: AppSpacing.xs),
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -474,20 +578,21 @@ class _MessageBubble extends StatelessWidget {
                           Text(
                             _groupReceiptLabel()!,
                             style: theme.textTheme.labelSmall?.copyWith(
-                              color: foreground.withValues(alpha: 0.7),
+                              color: metaColor,
                             ),
                           ),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: AppSpacing.xs),
                         ],
                         Text(
                           _time(message.createdAt),
                           style: theme.textTheme.labelSmall?.copyWith(
-                            color: foreground.withValues(alpha: 0.7),
+                            color: metaColor,
+                            fontFeatures: const [FontFeature.tabularFigures()],
                           ),
                         ),
                         if (isMine) ...[
-                          const SizedBox(width: 4),
-                          _StatusIcon(status: message.status, color: foreground),
+                          const SizedBox(width: AppSpacing.xs),
+                          _StatusIcon(status: message.status),
                         ],
                       ],
                     ),
@@ -506,9 +611,20 @@ class _MessageBubble extends StatelessWidget {
   Widget _body(ThemeData theme, Color foreground) {
     if (_isImage) return ImageMessage(content: message.content);
     if (_isFile) return FileMessage(content: message.content);
+    // A raw envelope must never be rendered as text, e.g. an own message synced
+    // back before the plaintext row existed.
+    final encrypted = isEncryptedContent(message.content);
     return Text(
-      message.content,
-      style: theme.textTheme.bodyLarge?.copyWith(color: foreground),
+      encrypted ? undecryptableContent : message.content,
+      style: encrypted
+          // Encrypted envelopes are rendered in the mono face, per the design
+          // system's `mono-sm` role.
+          ? theme.textTheme.labelSmall?.copyWith(
+              fontFamily: AppTypography.mono,
+              color: foreground,
+              height: 16 / 12,
+            )
+          : theme.textTheme.bodyMedium?.copyWith(color: foreground, height: 20 / 14),
     );
   }
 
@@ -558,13 +674,13 @@ class _MessageBubble extends StatelessWidget {
 }
 
 class _StatusIcon extends StatelessWidget {
-  const _StatusIcon({required this.status, required this.color});
+  const _StatusIcon({required this.status});
 
   final String status;
-  final Color color;
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final (icon, tooltip) = switch (status) {
       'pending' => (Icons.schedule, 'Sending'),
       'sent' => (Icons.check, 'Sent'),
@@ -574,13 +690,17 @@ class _StatusIcon extends StatelessWidget {
       _ => (Icons.schedule, 'Sending'),
     };
 
+    // The design system uses `read-receipt` (#53BDEB) for read ticks; earlier
+    // states stay muted so the difference is unmistakable.
+    final color = switch (status) {
+      'read' => AppColors.readReceipt,
+      'failed' => scheme.error,
+      _ => scheme.onSurfaceVariant,
+    };
+
     return Tooltip(
       message: tooltip,
-      child: Icon(
-        icon,
-        size: 14,
-        color: status == 'read' ? const Color(0xFF2563EB) : color.withValues(alpha: 0.7),
-      ),
+      child: Icon(icon, size: 14, color: color),
     );
   }
 }

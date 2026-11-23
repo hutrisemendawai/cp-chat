@@ -7,6 +7,9 @@ import 'package:material_ui/material_ui.dart';
 /// `StatefulShellRoute.indexedStack`), so switching tabs preserves scroll
 /// position and an in-progress conversation. Detail screens are declared on the
 /// root navigator and therefore cover this bar.
+///
+/// Styling comes from the Stitch design system: a `surface-container` bar with
+/// pill-shaped indicators behind the active destination icon.
 class HomeShell extends StatelessWidget {
   const HomeShell({super.key, required this.navigationShell});
 
@@ -22,20 +25,20 @@ class HomeShell extends StatelessWidget {
           index,
           initialLocation: index == navigationShell.currentIndex,
         ),
-        destinations: const [
+        destinations: [
           NavigationDestination(
-            icon: Icon(Icons.forum_outlined),
-            selectedIcon: Icon(Icons.forum),
+            icon: const Icon(Icons.chat_bubble_outline),
+            selectedIcon: const Icon(Icons.chat_bubble),
             label: 'Chats',
           ),
           NavigationDestination(
-            icon: Icon(Icons.people_outline),
-            selectedIcon: Icon(Icons.people),
+            icon: const Icon(Icons.group_outlined),
+            selectedIcon: const Icon(Icons.group),
             label: 'People',
           ),
           NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person),
+            icon: const Icon(Icons.person_outline),
+            selectedIcon: const Icon(Icons.person),
             label: 'Profile',
           ),
         ],

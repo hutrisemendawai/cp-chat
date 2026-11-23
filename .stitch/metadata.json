@@ -1,0 +1,55 @@
+{
+  "projectId": "14662638851741478393",
+  "projectName": "projects/14662638851741478393",
+  "title": "WhatsApp Clone UI Theme",
+  "projectType": "DESIGN_V2",
+  "deviceType": "MOBILE",
+  "visibility": "PRIVATE",
+  "designSystem": {
+    "assetId": "canvas_node_node_7972721565232412322",
+    "name": "assets/canvas_node_node_7972721565232412322",
+    "displayName": "CP Chat (WhatsApp Theme) - Design System"
+  },
+  "screens": [
+    {
+      "screenId": "node_11045650594592849876",
+      "title": "Chats",
+      "deviceType": "MOBILE"
+    },
+    {
+      "screenId": "node_1995061725710091649",
+      "title": "People",
+      "deviceType": "MOBILE"
+    },
+    {
+      "screenId": "node_137747346619125491",
+      "title": "My Profile",
+      "deviceType": "MOBILE"
+    },
+    {
+      "screenId": "node_10821648265103281790",
+      "title": "Personal Chat",
+      "deviceType": "MOBILE"
+    },
+    {
+      "screenId": "node_9014589874446461940",
+      "title": "Search This Chat",
+      "deviceType": "MOBILE"
+    },
+    {
+      "screenId": "node_12372028746060538218",
+      "title": "Contact Profile",
+      "deviceType": "MOBILE"
+    },
+    {
+      "screenId": "node_13048525848737950887",
+      "title": "Group Chat",
+      "deviceType": "MOBILE"
+    },
+    {
+      "screenId": "node_13379283771244234510",
+      "title": "Group Info",
+      "deviceType": "MOBILE"
+    }
+  ]
+}

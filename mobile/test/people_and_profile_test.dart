@@ -206,7 +206,8 @@ void main() {
 
     await tester.tap(find.text('Alice (Ali)'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Add Friend'));
+    // The Stitch contact profile uses an icon-only friend action.
+    await tester.tap(find.byIcon(Icons.person_add_alt_1));
     await tester.pumpAndSettle();
 
     expect(api.addFriends, 1);

@@ -7,12 +7,16 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_theme.dart';
+import '../../shared/widgets/app_widgets.dart';
 import '../../shared/widgets/user_avatar.dart';
 import '../../shared/widgets/user_search_picker.dart';
 
 import 'group_controller.dart';
 
-/// Group details and administration: rename, membership, leave.
+/// Group details and administration, styled after the Stitch "Group info"
+/// screen: divided settings rows, a members section with an emerald Add action,
+/// and a destructive leave row at the bottom.
 class GroupInfoScreen extends ConsumerStatefulWidget {
   const GroupInfoScreen({super.key, required this.conversationId});
 
@@ -136,6 +140,10 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+            ),
             onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('Leave'),
           ),
@@ -174,111 +182,286 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final selfId = ref.watch(currentUserProvider)?.id;
     final conversation = _conversation;
 
+    if (_loading) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Group info')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (conversation == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Group info')),
+        body: EmptyState(
+          icon: Icons.group_off_outlined,
+          title: 'Group not available',
+          message: _error ?? 'This group could not be loaded.',
+          action: FilledButton.tonal(
+            onPressed: _load,
+            child: const Text('Retry'),
+          ),
+        ),
+      );
+    }
+
+    final canManage = _canRemove(conversation, selfId);
+    final members = conversation.members;
+
     return Scaffold(
       appBar: AppBar(title: const Text('Group info')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : conversation == null
-              ? Center(child: Text(_error ?? 'Group not available'))
-              : ListView(
+      body: ListView(
+        padding: const EdgeInsets.only(bottom: AppSpacing.section),
+        children: [
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.all(AppSpacing.lg),
+              child: Container(
+                padding: const EdgeInsets.all(AppSpacing.md),
+                decoration: BoxDecoration(
+                  color: scheme.errorContainer,
+                  borderRadius: BorderRadius.circular(AppRadius.card),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (_error != null)
-                      Container(
-                        margin: const EdgeInsets.all(16),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: theme.colorScheme.errorContainer,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          _error!,
-                          style: TextStyle(color: theme.colorScheme.onErrorContainer),
-                        ),
-                      ),
-                    ListTile(
-                      leading: const Icon(Icons.photo_outlined),
-                      title: const Text('Group avatar'),
-                      subtitle: Text(
-                        conversation.avatarUrl == null ? 'No avatar set' : 'Tap to change',
-                      ),
-                      enabled: !_busy,
-                      onTap: _canRemove(conversation, selfId) ? _changeAvatar : null,
+                    Icon(
+                      Icons.error_outline,
+                      size: 18,
+                      color: scheme.onErrorContainer,
                     ),
-                    ListTile(
-                      leading: const Icon(Icons.edit_outlined),
-                      title: const Text('Rename group'),
-                      subtitle: Text(conversation.name ?? 'Unnamed'),
-                      enabled: !_busy,
-                      onTap: _rename,
-                    ),
-                    const Divider(),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              'Members (${conversation.members.length})',
-                              style: theme.textTheme.titleMedium,
-                            ),
-                          ),
-                          TextButton.icon(
-                            onPressed: _busy ? null : _addMembers,
-                            icon: const Icon(Icons.person_add_alt),
-                            label: const Text('Add'),
-                          ),
-                        ],
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(
+                        _error!,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onErrorContainer,
+                        ),
                       ),
                     ),
-                    for (final member in conversation.members)
-                      ListTile(
-                        onTap: () => context.push('/users/${member.user.id}'),
-                        leading: UserAvatarWithStatus(
-                          avatarKey: member.user.avatarUrl,
-                          name: member.user.name,
-                          status: member.user.effectiveStatus,
-                        ),
-                        title: Text(
-                          member.user.id == selfId
-                              ? '${member.user.displayName} (you)'
-                              : member.user.displayName,
-                        ),
-                        subtitle: Text(
-                          [
-                            member.role == 'admin' ? 'Admin' : 'Member',
-                            if (member.user.phoneOrEmail != null) member.user.phoneOrEmail!,
-                          ].join(' · '),
-                        ),
-                        trailing: member.user.id == selfId || !_canRemove(conversation, selfId)
-                            ? null
-                            : IconButton(
-                                onPressed: _busy ? null : () => _removeMember(member.user),
-                                tooltip: 'Remove',
-                                icon: const Icon(Icons.person_remove_outlined),
-                              ),
-                      ),
-                    const Divider(),
-                    ListTile(
-                      leading: Icon(Icons.logout, color: theme.colorScheme.error),
-                      title: Text(
-                        'Leave group',
-                        style: TextStyle(color: theme.colorScheme.error),
-                      ),
-                      enabled: !_busy,
-                      onTap: _leave,
-                    ),
-                    const SizedBox(height: 24),
                   ],
                 ),
+              ),
+            ),
+
+          // Group avatar + rename settings rows.
+          _SettingsRow(
+            icon: Icons.image_outlined,
+            title: 'Group avatar',
+            subtitle: conversation.avatarUrl == null ? 'No avatar set' : 'Tap to change',
+            onTap: canManage && !_busy ? _changeAvatar : null,
+          ),
+          _SettingsRow(
+            icon: Icons.edit_outlined,
+            title: 'Rename group',
+            subtitle: conversation.name ?? 'Unnamed',
+            onTap: canManage && !_busy ? _rename : null,
+          ),
+          Divider(height: 1, color: scheme.outlineVariant),
+
+          // Members.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.pageMargin,
+              AppSpacing.lg,
+              AppSpacing.pageMargin,
+              AppSpacing.sm,
+            ),
+            child: SectionLabel(
+              text: 'Members (${members.length})',
+              trailing: TextButton.icon(
+                onPressed: _busy ? null : _addMembers,
+                icon: const Icon(Icons.person_add_alt_1, size: 18),
+                label: const Text('Add'),
+              ),
+            ),
+          ),
+          for (var index = 0; index < members.length; index++) ...[
+            _MemberRow(
+              member: members[index],
+              isSelf: members[index].user.id == selfId,
+              canRemove: canManage && members[index].user.id != selfId && !_busy,
+              onTap: () => context.push('/users/${members[index].user.id}'),
+              onRemove: () => _removeMember(members[index].user),
+            ),
+            if (index < members.length - 1)
+              Divider(
+                height: 1,
+                indent: AppSpacing.lg + 48 + AppSpacing.md,
+                endIndent: AppSpacing.lg,
+                color: scheme.outlineVariant,
+              ),
+          ],
+          Divider(height: 1, color: scheme.outlineVariant),
+
+          // Destructive leave action.
+          InkWell(
+            onTap: _busy ? null : _leave,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.pageMargin,
+                vertical: AppSpacing.lg,
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.logout, size: 20, color: scheme.error),
+                  const SizedBox(width: AppSpacing.lg),
+                  Text(
+                    'Leave group',
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      color: scheme.error,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   bool _canRemove(Conversation conversation, String? selfId) {
     if (selfId == null) return false;
     return conversation.isAdmin(selfId);
+  }
+}
+
+/// A settings row: leading glyph, title and secondary value line.
+class _SettingsRow extends StatelessWidget {
+  const _SettingsRow({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.pageMargin,
+          vertical: AppSpacing.md,
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 22, color: scheme.onSurfaceVariant),
+            const SizedBox(width: AppSpacing.lg),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title, style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A group member row: avatar with presence, name and `Role · contact`.
+class _MemberRow extends StatelessWidget {
+  const _MemberRow({
+    required this.member,
+    required this.isSelf,
+    required this.canRemove,
+    required this.onTap,
+    required this.onRemove,
+  });
+
+  final ConversationMember member;
+  final bool isSelf;
+  final bool canRemove;
+  final VoidCallback onTap;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    final detail = [
+      member.role == 'admin' ? 'Admin' : 'Member',
+      if (member.user.phoneOrEmail != null) member.user.phoneOrEmail!,
+    ].join(' · ');
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.pageMargin,
+          vertical: AppSpacing.md,
+        ),
+        child: Row(
+          children: [
+            UserAvatarWithStatus(
+              avatarKey: member.user.avatarUrl,
+              name: member.user.name,
+              status: member.user.effectiveStatus,
+              radius: 24,
+            ),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    isSelf
+                        ? '${member.user.displayName} (you)'
+                        : member.user.displayName,
+                    maxLines: 2,
+                    style: theme.textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    detail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (canRemove)
+              IconButton(
+                onPressed: onRemove,
+                tooltip: 'Remove',
+                icon: const Icon(Icons.person_remove_outlined, size: 20),
+                color: scheme.onSurfaceVariant,
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

@@ -9,7 +9,7 @@ Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: Center(child: chi
 
 void main() {
   group('status colours', () {
-    test('map each Discord status to its colour', () {
+    test('map each presence status to its colour', () {
       expect(StatusColors.of('online'), StatusColors.online);
       expect(StatusColors.of('idle'), StatusColors.idle);
       expect(StatusColors.of('dnd'), StatusColors.dnd);
@@ -18,11 +18,11 @@ void main() {
       expect(StatusColors.of(null), StatusColors.offline);
     });
 
-    test('uses the exact Discord palette', () {
-      expect(StatusColors.online, const Color(0xFF23A55A));
-      expect(StatusColors.idle, const Color(0xFFF0B232));
-      expect(StatusColors.dnd, const Color(0xFFF23F43));
-      expect(StatusColors.offline, const Color(0xFF80848E));
+    test('uses the exact Stitch presence palette', () {
+      expect(StatusColors.online, const Color(0xFF25D366));
+      expect(StatusColors.idle, const Color(0xFFF59E0B));
+      expect(StatusColors.dnd, const Color(0xFFEF4444));
+      expect(StatusColors.offline, const Color(0xFF86948D));
     });
   });
 
