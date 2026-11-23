@@ -54,7 +54,18 @@ class E2eeManager {
   /// rebuild. Keyed by `client_msg_id` (unique per message).
   final Map<String, String> _plaintext = {};
 
+  /// Serialises inbound decryption. A live frame and a REST sync can process the
+  /// same conversation at once, and advancing one receiving chain from two
+  /// interleaved calls would corrupt it.
+  Future<void> _decryptQueue = Future<void>.value();
+
   bool get isReady => _keys != null;
+
+  Future<T> _serializeDecrypts<T>(Future<T> Function() action) {
+    final result = _decryptQueue.then((_) => action());
+    _decryptQueue = result.then<void>((_) {}, onError: (_) {});
+    return result;
+  }
 
   /// Clears in-memory session state on logout.
   ///
@@ -95,11 +106,38 @@ class E2eeManager {
   /// Plaintext bodies (old clients, media keys) are returned unchanged. A body
   /// that fails to decrypt renders a placeholder rather than throwing: a single
   /// unreadable message must not break the whole chat view.
+  ///
+  /// The peer is resolved from [senderId] (the frame's author, authoritative for
+  /// inbound messages) and only falls back to [peerId] or the conversation map
+  /// registered by the UI. Deriving it from the message means history recovered
+  /// over REST decrypts even when the chat was never opened.
   Future<String> plaintextFor(
     String clientMsgId,
     String conversationId,
     String content, {
     required bool isGroup,
+    String? senderId,
+    String? peerId,
+  }) {
+    return _serializeDecrypts(
+      () => _plaintextFor(
+        clientMsgId,
+        conversationId,
+        content,
+        isGroup: isGroup,
+        senderId: senderId,
+        peerId: peerId,
+      ),
+    );
+  }
+
+  Future<String> _plaintextFor(
+    String clientMsgId,
+    String conversationId,
+    String content, {
+    required bool isGroup,
+    String? senderId,
+    String? peerId,
   }) async {
     if (!isEncryptedContent(content)) return content;
 
@@ -108,30 +146,45 @@ class E2eeManager {
 
     // Group chats have no E2EE in this phase; a ciphertext there is unreadable
     // by design rather than an error to surface.
-    if (isGroup || _keys == null) return _undecryptable;
+    if (isGroup) return undecryptableContent;
+
+    // An outgoing message synced back from the server is ciphertext, but its
+    // matching receiving chain lives on the peer, so this device cannot decrypt
+    // it. Leave the body untouched: the local optimistic row already holds the
+    // plaintext the user typed.
+    final selfId = await _tokenStore.readUserId();
+    if (senderId != null && senderId == selfId) return content;
+
+    if (_keys == null) {
+      try {
+        await bootstrap();
+      } catch (error) {
+        debugPrint('E2EE lazy bootstrap failed: $error');
+      }
+    }
+    final keys = _keys;
+    if (keys == null) return undecryptableContent;
 
     final envelope = decodeEnvelope(content);
-    if (envelope == null) return _undecryptable;
+    if (envelope == null) return undecryptableContent;
 
-    final peerId = await _peerIdFor(conversationId);
-    if (peerId == null) return _undecryptable;
+    final target = peerId ?? senderId ?? await _peerIdFor(conversationId);
+    if (target == null) return undecryptableContent;
 
     try {
       final decrypted = await _service.decrypt(
-        peerId: peerId,
+        peerId: target,
         envelope: envelope,
-        local: _keys!,
+        local: keys,
       );
       _plaintext[clientMsgId] = decrypted.plaintext;
       await _persistSessions();
       return decrypted.plaintext;
     } catch (error) {
       debugPrint('E2EE decrypt failed: $error');
-      return _undecryptable;
+      return undecryptableContent;
     }
   }
-
-  static const String _undecryptable = 'Unable to decrypt this message';
 
   /// Encrypts a text body for `conversationId`. Returns the original text when
   /// the conversation is a group (not covered in this phase) or keys are not
@@ -140,23 +193,24 @@ class E2eeManager {
     required String conversationId,
     required String plaintext,
     required bool isGroup,
+    String? peerId,
   }) async {
     if (isGroup) return plaintext;
     if (!_bootstrapped) await bootstrap();
     final keys = _keys;
     if (keys == null) return plaintext;
 
-    final peerId = await _peerIdFor(conversationId);
-    if (peerId == null) return plaintext;
+    final target = peerId ?? await _peerIdFor(conversationId);
+    if (target == null) return plaintext;
 
     RemotePrekeyBundle? bundle;
-    if (!_service.hasSession(peerId)) {
+    if (!_service.hasSession(target)) {
       try {
-        bundle = await _api.prekeyBundle(peerId);
+        bundle = await _api.prekeyBundle(target);
       } on ApiException catch (error) {
         // A peer that has not published keys yet cannot receive E2EE. Send the
         // plaintext rather than blocking the conversation entirely.
-        debugPrint('No prekey bundle for $peerId (${error.code}); sending plaintext');
+        debugPrint('No prekey bundle for $target (${error.code}); sending plaintext');
         return plaintext;
       }
       // The bundle belongs to the peer, so it cannot tell us how many of *our*
@@ -167,7 +221,7 @@ class E2eeManager {
 
     try {
       final envelope = await _service.encrypt(
-        peerId: peerId,
+        peerId: target,
         plaintext: plaintext,
         local: keys,
         bundle: bundle,
@@ -273,9 +327,8 @@ class E2eeManager {
 
   Future<void> _persistSessions() async {
     final sessions = <String, dynamic>{};
-    for (final peerId in _peerIds.values) {
-      final session = _service.session(peerId);
-      if (session != null) sessions[peerId] = session.toJson();
+    for (final session in _service.sessions) {
+      sessions[session.peerId] = session.toJson();
     }
     await _tokenStore.writeE2eeSessions(jsonEncode(sessions));
   }

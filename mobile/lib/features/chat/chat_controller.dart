@@ -42,6 +42,7 @@ class ChatController {
           conversationId: _conversationId,
           plaintext: trimmed,
           isGroup: isGroup,
+          peerId: conversation?.peerId,
         );
 
     await _socket.send(
@@ -119,14 +120,15 @@ class ChatController {
 
   /// Loads older history (backwards pagination) into the local mirror.
   Future<bool> loadOlder({int limit = 50}) async {
-    final dao = _ref.read(chatDaoProvider);
     final oldestSeq = await _oldestSeq();
     final page = await _api.messages(
       _conversationId,
       beforeSeq: oldestSeq > 1 ? oldestSeq : null,
       limit: limit,
     );
-    await dao.upsertServerMessages(page.messages);
+    // History is stored through the socket so encrypted bodies are decrypted
+    // before they reach the local mirror.
+    await _socket.storeServerMessages(page.messages);
     return page.hasMore;
   }
 

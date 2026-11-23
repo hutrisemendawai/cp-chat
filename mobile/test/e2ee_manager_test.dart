@@ -1,5 +1,106 @@
+import 'package:cp_chat/core/crypto/e2ee_manager.dart';
 import 'package:cp_chat/core/crypto/e2ee_service.dart';
+import 'package:cp_chat/core/models/models.dart';
+import 'package:cp_chat/core/network/api_client.dart';
+import 'package:cp_chat/core/storage/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+/// In-memory secure storage so the manager can be exercised without the
+/// platform keychain.
+class _MemoryTokenStore extends TokenStore {
+  _MemoryTokenStore({this.userId});
+
+  final String? userId;
+  String? keyBlob;
+  String? sessionBlob;
+
+  @override
+  Future<String?> readUserId() async => userId;
+
+  @override
+  Future<String?> readE2eeKeys() async => keyBlob;
+
+  @override
+  Future<void> writeE2eeKeys(String json) async => keyBlob = json;
+
+  @override
+  Future<String?> readE2eeSessions() async => sessionBlob;
+
+  @override
+  Future<void> writeE2eeSessions(String json) async => sessionBlob = json;
+}
+
+/// Serves prekey bundles and records publishes instead of hitting the network.
+class _FakeApi extends ApiClient {
+  _FakeApi(super.tokenStore, {this.bundles = const {}});
+
+  final Map<String, RemotePrekeyBundle> bundles;
+  final List<PublicKeyBundle> published = [];
+
+  @override
+  Future<int> publishKeys(PublicKeyBundle bundle) async {
+    published.add(bundle);
+    return bundle.prekeys.length;
+  }
+
+  @override
+  Future<int> addPrekeys(List<PublicPrekey> prekeys) async => prekeys.length;
+
+  @override
+  Future<int> myPrekeyCount() async => 100;
+
+  @override
+  Future<RemotePrekeyBundle> prekeyBundle(String userId) async {
+    final bundle = bundles[userId];
+    if (bundle == null) {
+      throw ApiException('keys_not_found', 'This user has not published keys', statusCode: 404);
+    }
+    return bundle;
+  }
+}
+
+RemotePrekeyBundle _bundleFor(PublicKeyBundle public, {String userId = 'bob'}) {
+  final prekey = public.prekeys.first;
+  return RemotePrekeyBundle(
+    userId: userId,
+    identityKey: public.identityKey,
+    signingKey: public.signingKey,
+    signedPrekeyId: public.signedPrekeyId,
+    signedPrekey: public.signedPrekey,
+    signedPrekeySignature: public.signedPrekeySignature,
+    oneTimePrekeyId: prekey.keyId,
+    oneTimePrekey: prekey.publicKey,
+  );
+}
+
+typedef _Recipient = ({
+  _MemoryTokenStore store,
+  _FakeApi api,
+  E2eeService service,
+  LocalKeyMaterial keys,
+  E2eeManager manager,
+});
+
+Future<_Recipient> _recipient({required String userId, int startPrekeyId = 100}) async {
+  final service = E2eeService(prekeyCount: 3);
+  final keys = await service.generateKeyMaterial(startPrekeyId: startPrekeyId);
+  final store = _MemoryTokenStore(userId: userId)
+    ..keyBlob = await service.exportKeyMaterial(keys);
+  final api = _FakeApi(store);
+  final manager = E2eeManager(
+    tokenStore: store,
+    api: api,
+    service: E2eeService(prekeyCount: 3),
+  );
+  await manager.bootstrap();
+  return (store: store, api: api, service: service, keys: keys, manager: manager);
+}
+
+Future<E2eeManager> _sender(_MemoryTokenStore store, _FakeApi api) async {
+  final manager = E2eeManager(tokenStore: store, api: api);
+  await manager.bootstrap();
+  return manager;
+}
 
 /// Manager-level tests run against the crypto service directly, because the
 /// manager's storage/API seams are injected by Riverpod. What matters here is
@@ -152,6 +253,177 @@ void main() {
       );
       expect(bobService.hasSession('alice'), isTrue);
       void _ = first;
+    });
+  });
+
+  group('direct chat manager', () {
+    test('encrypts outbound and decrypts inbound from the sender id alone', () async {
+      final bob = await _recipient(userId: 'bob');
+      final bobPublic = await bob.service.buildPublicBundle(bob.keys);
+
+      final aliceStore = _MemoryTokenStore(userId: 'alice');
+      final alice = await _sender(
+        aliceStore,
+        _FakeApi(aliceStore, bundles: {'bob': _bundleFor(bobPublic)}),
+      );
+
+      // The peer is passed explicitly, so no UI registration is needed.
+      final content = await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'hello bob',
+        isGroup: false,
+        peerId: 'bob',
+      );
+      expect(isEncryptedContent(content), isTrue);
+      expect(decodeEnvelope(content)!.ephemeralKey, isNotNull);
+
+      // Bob has never seen this conversation; the sender id resolves the peer.
+      final plaintext = await bob.manager.plaintextFor(
+        'm-1',
+        'conv-1',
+        content,
+        isGroup: false,
+        senderId: 'alice',
+      );
+      expect(plaintext, 'hello bob');
+
+      // And the reply returns on Bob's own sending chain.
+      final reply = await bob.manager.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'hi alice',
+        isGroup: false,
+        peerId: 'alice',
+      );
+      expect(
+        await alice.plaintextFor('m-2', 'conv-1', reply, isGroup: false, senderId: 'bob'),
+        'hi alice',
+      );
+    });
+
+    test('persists a session learned from inbound and resumes it after restart', () async {
+      final bob = await _recipient(userId: 'bob');
+      final bobPublic = await bob.service.buildPublicBundle(bob.keys);
+
+      final aliceStore = _MemoryTokenStore(userId: 'alice');
+      final alice = await _sender(
+        aliceStore,
+        _FakeApi(aliceStore, bundles: {'bob': _bundleFor(bobPublic)}),
+      );
+
+      final first = await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'first',
+        isGroup: false,
+        peerId: 'bob',
+      );
+      expect(
+        await bob.manager.plaintextFor('m-1', 'conv-1', first, isGroup: false, senderId: 'alice'),
+        'first',
+      );
+      expect(bob.store.sessionBlob, isNotNull);
+      expect(bob.store.sessionBlob, contains('"alice"'));
+
+      final restored = E2eeManager(
+        tokenStore: bob.store,
+        api: bob.api,
+        service: E2eeService(prekeyCount: 3),
+      );
+      await restored.bootstrap();
+
+      final second = await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'second',
+        isGroup: false,
+        peerId: 'bob',
+      );
+      expect(
+        await restored.plaintextFor('m-2', 'conv-1', second, isGroup: false, senderId: 'alice'),
+        'second',
+      );
+    });
+
+    test('group chats are never encrypted or treated as ciphertext', () async {
+      final bob = await _recipient(userId: 'bob');
+
+      expect(
+        await bob.manager.encryptForConversation(
+          conversationId: 'group-1',
+          plaintext: 'hello team',
+          isGroup: true,
+          peerId: 'bob',
+        ),
+        'hello team',
+      );
+      expect(
+        await bob.manager.plaintextFor(
+          'm-1',
+          'group-1',
+          'hello team',
+          isGroup: true,
+          senderId: 'alice',
+        ),
+        'hello team',
+      );
+    });
+
+    test('falls back to plaintext when there is no peer or bundle', () async {
+      final store = _MemoryTokenStore(userId: 'alice');
+      final manager = await _sender(store, _FakeApi(store));
+
+      expect(
+        await manager.encryptForConversation(
+          conversationId: 'conv-1',
+          plaintext: 'no peer known',
+          isGroup: false,
+        ),
+        'no peer known',
+      );
+      expect(
+        await manager.encryptForConversation(
+          conversationId: 'conv-1',
+          plaintext: 'no keys published',
+          isGroup: false,
+          peerId: 'ghost',
+        ),
+        'no keys published',
+      );
+    });
+
+    test('renders a placeholder for a body it cannot decrypt', () async {
+      final bob = await _recipient(userId: 'bob');
+
+      expect(
+        await bob.manager.plaintextFor(
+          'bad',
+          'conv-1',
+          '${e2eePrefix}not-json',
+          isGroup: false,
+          senderId: 'alice',
+        ),
+        undecryptableContent,
+      );
+    });
+
+    test('leaves an own outgoing body untouched instead of breaking it', () async {
+      final bob = await _recipient(userId: 'bob');
+      final bobPublic = await bob.service.buildPublicBundle(bob.keys);
+
+      final aliceStore = _MemoryTokenStore(userId: 'alice');
+      final alice = await _sender(
+        aliceStore,
+        _FakeApi(aliceStore, bundles: {'bob': _bundleFor(bobPublic)}),
+      );
+      final content = await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'mine',
+        isGroup: false,
+        peerId: 'bob',
+      );
+
+      expect(
+        await bob.manager.plaintextFor('m-1', 'conv-1', content, isGroup: false, senderId: 'bob'),
+        content,
+      );
     });
   });
 }

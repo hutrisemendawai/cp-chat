@@ -300,6 +300,10 @@ class E2eeService {
 
   E2eeSession? session(String peerId) => _sessions[peerId];
 
+  /// Every established session, so all of them can be persisted — including
+  /// sessions learned from an inbound message before the chat was ever opened.
+  Iterable<E2eeSession> get sessions => _sessions.values;
+
   /// Preloads a fetched bundle's origin so envelopes carry the right prekey
   /// ids. Sessions started via [initiateSession] record this automatically;
   /// this exists for callers that restore a session from storage.
@@ -678,6 +682,9 @@ class E2eeService {
   Future<List<int>> _seedOf(SimpleKeyPair keyPair) async =>
       Uint8List.fromList(await keyPair.extractPrivateKeyBytes());
 }
+
+/// Rendered in place of a body that cannot be decrypted.
+const String undecryptableContent = 'Unable to decrypt this message';
 
 /// True when a body is an E2EE envelope (mirrors the server-side check).
 bool isEncryptedContent(String content) => content.startsWith(e2eePrefix);

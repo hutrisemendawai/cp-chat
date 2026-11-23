@@ -1,6 +1,7 @@
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:cp_chat/core/crypto/e2ee_service.dart' show undecryptableContent;
 import 'package:cp_chat/core/database/app_database.dart';
 import 'package:cp_chat/core/database/chat_dao.dart';
 
@@ -346,6 +347,71 @@ void main() {
 
       final pending = await dao.pendingOutbox();
       expect(pending.single.wireContent, isNull);
+    });
+
+    test('a synced ciphertext does not replace the decrypted bubble', () async {
+      await dao.enqueueOutgoing(
+        clientMsgId: 'c-e2ee',
+        conversationId: 'conv-1',
+        senderId: 'me',
+        type: 'text',
+        content: 'the secret plan',
+        wireContent: 'e2ee:v1:{"ik":"a","ct":"b","n":"c","m":"d"}',
+        createdAt: DateTime.utc(2026, 1, 1),
+      );
+
+      // The server syncs the same message back with its ciphertext body.
+      await dao.upsertServerMessage(
+        message(
+          'c-e2ee',
+          conversationId: 'conv-1',
+          seq: 1,
+          senderId: 'me',
+          content: 'e2ee:v1:{"ik":"a","ct":"b","n":"c","m":"d"}',
+        ),
+      );
+
+      final row = (await dao.watchMessages('conv-1').first).single;
+      expect(row.content, 'the secret plan');
+      expect(row.seq, 1);
+      expect(row.status, 'sent');
+    });
+
+    test('a ciphertext preview never leaks the envelope', () async {
+      await dao.upsertConversations(
+        [
+          conversation(
+            'conv-1',
+            selfId: 'me',
+            lastSeq: 1,
+            lastMessage: message(
+              'a',
+              conversationId: 'conv-1',
+              seq: 1,
+              content: 'e2ee:v1:{"ik":"a","ct":"b","n":"c","m":"d"}',
+            ),
+          ),
+        ],
+        selfId: 'me',
+      );
+
+      final row = await dao.conversation('conv-1');
+      expect(row!.lastMessagePreview, 'Encrypted message');
+    });
+
+    test('re-fetching an unreadable body keeps the decrypted bubble', () async {
+      await dao.upsertServerMessage(
+        message('a', conversationId: 'conv-1', seq: 1, content: 'readable'),
+      );
+
+      // The same message comes back from history as the placeholder (the
+      // ratchet already moved past it), which must not replace the text.
+      await dao.upsertServerMessage(
+        message('a', conversationId: 'conv-1', seq: 1, content: undecryptableContent),
+      );
+
+      final row = (await dao.watchMessages('conv-1').first).single;
+      expect(row.content, 'readable');
     });
   });
 }

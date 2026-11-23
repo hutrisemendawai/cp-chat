@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart';
 
+import '../crypto/e2ee_service.dart' show isEncryptedContent, undecryptableContent;
 import '../models/models.dart';
 import 'app_database.dart';
 
@@ -154,8 +155,24 @@ class ChatDao {
   String? _preview(Message? message) {
     if (message == null) return null;
     if (message.type != 'text') return 'Sent an attachment';
-    return message.content;
+    return _textPreview(message.content);
   }
+
+  /// A body that is still a raw envelope (history restored before its session,
+  /// or an own message synced back) must not leak ciphertext into the UI.
+  String _textPreview(String content) =>
+      isEncryptedContent(content) ? 'Encrypted message' : content;
+
+  /// Keeps already-decrypted text when the incoming body is unreadable, so a
+  /// sync or history page cannot regress a bubble to ciphertext.
+  String _storedContent(String incoming, String? existing) {
+    if (existing == null) return incoming;
+    if (_isUnreadable(existing)) return incoming;
+    return _isUnreadable(incoming) ? existing : incoming;
+  }
+
+  bool _isUnreadable(String content) =>
+      isEncryptedContent(content) || content == undecryptableContent;
 
   /// Applies an optimistic local send: the message row and the outbox entry are
   /// committed together so a crash cannot lose an unsent message.
@@ -198,10 +215,17 @@ class ChatDao {
   }
 
   /// Stores a server message, reconciling the optimistic row by client id.
+  ///
+  /// Readable content is never replaced by an unreadable body. That happens for
+  /// an own message synced back from the server (its receiving chain lives on
+  /// the peer and cannot be replayed here), or for history re-fetched after the
+  /// ratchet moved past it.
   Future<void> upsertServerMessage(Message message, {String status = 'sent'}) async {
     final existing = await (db.select(db.localMessages)
           ..where((table) => table.clientMsgId.equals(message.clientMsgId)))
         .getSingleOrNull();
+
+    final content = _storedContent(message.content, existing?.content);
 
     await db.into(db.localMessages).insertOnConflictUpdate(
           LocalMessagesCompanion.insert(
@@ -211,7 +235,7 @@ class ChatDao {
             seq: Value(message.seq),
             senderId: message.senderId,
             type: message.type,
-            content: message.content,
+            content: content,
             createdAt: message.createdAt,
             status: Value(_maxStatus(existing?.status, status)),
           ),
@@ -221,7 +245,7 @@ class ChatDao {
           ..where((table) => table.clientMsgId.equals(message.clientMsgId)))
         .go();
 
-    await _bumpConversationCursor(message);
+    await _bumpConversationCursor(message, content);
   }
 
   Future<void> upsertServerMessages(List<Message> messages) async {
@@ -388,7 +412,7 @@ class ChatDao {
     });
   }
 
-  Future<void> _bumpConversationCursor(Message message) async {
+  Future<void> _bumpConversationCursor(Message message, String content) async {
     final existing = await conversation(message.conversationId);
     final newest = existing == null || message.createdAt.isAfter(existing.updatedAt)
         ? message.createdAt
@@ -404,7 +428,7 @@ class ChatDao {
         lastSeq: Value(lastSeq),
         updatedAt: Value(newest),
         lastMessagePreview: Value(
-          message.type == 'text' ? message.content : 'Sent an attachment',
+          message.type == 'text' ? _textPreview(content) : 'Sent an attachment',
         ),
       ),
     );

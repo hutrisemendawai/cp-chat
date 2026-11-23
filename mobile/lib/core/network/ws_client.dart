@@ -68,9 +68,15 @@ class ChatSocket {
   /// Decrypts an inbound E2EE body before it is persisted, so the local mirror
   /// (and therefore the UI) only ever holds plaintext. Returning null leaves the
   /// original content untouched, which is what a group or plaintext message
-  /// does.
-  final Future<String?> Function(String conversationId, String clientMsgId, String content)?
-      decrypt;
+  /// does. [senderId] lets the decryptor resolve the peer from the message
+  /// itself instead of UI state.
+  final Future<String?> Function(
+    String conversationId,
+    String clientMsgId,
+    String senderId,
+    String content, {
+    required bool isGroup,
+  })? decrypt;
 
   final Random _random = Random();
 
@@ -228,9 +234,18 @@ class ChatSocket {
     for (var page = 0; page < 50; page += 1) {
       final result = await _api.sync(conversationId, afterSeq: cursor);
       if (result.messages.isEmpty) return;
-      await _dao.upsertServerMessages(result.messages);
+      await storeServerMessages(result.messages);
       cursor = result.messages.last.seq;
       if (cursor >= result.latestSeq) return;
+    }
+  }
+
+  /// Decrypts and stores messages fetched outside the live stream (sync and
+  /// history pagination), so a 1:1 ciphertext never reaches the local mirror
+  /// raw and overwrites the plaintext an optimistic send created.
+  Future<void> storeServerMessages(List<Message> messages) async {
+    for (final message in messages) {
+      await _persistServerMessage(message);
     }
   }
 
@@ -429,29 +444,32 @@ class ChatSocket {
         await _syncConversation(message.conversationId, localMax);
       }
 
-      // Persist plaintext: decrypt an E2EE body before it reaches the mirror so
-      // every reader of the local row (bubbles, previews, search) sees text.
-      final plaintext = await _decryptForStorage(message);
-      if (plaintext != null) {
-        message = Message(
-          id: message.id,
-          conversationId: message.conversationId,
-          seq: message.seq,
-          senderId: message.senderId,
-          clientMsgId: message.clientMsgId,
-          type: message.type,
-          content: plaintext,
-          createdAt: message.createdAt,
-        );
-      }
-
       // An inbound `message` (including the echo of our own send) is on the
       // server, so it reconciles a still-`pending` row to `sent`.
-      await _dao.upsertServerMessage(message, status: 'sent');
+      await _persistServerMessage(message);
       acknowledgeDelivered(message.conversationId, message.seq);
     } catch (error) {
       debugPrint('ChatSocket failed to persist message: $error');
     }
+  }
+
+  /// Persists one server message after decrypting an E2EE body, so every reader
+  /// of the local row (bubbles, previews, search) sees plaintext.
+  Future<void> _persistServerMessage(Message message) async {
+    final plaintext = await _decryptForStorage(message);
+    final stored = plaintext == null || plaintext == message.content
+        ? message
+        : Message(
+            id: message.id,
+            conversationId: message.conversationId,
+            seq: message.seq,
+            senderId: message.senderId,
+            clientMsgId: message.clientMsgId,
+            type: message.type,
+            content: plaintext,
+            createdAt: message.createdAt,
+          );
+    await _dao.upsertServerMessage(stored, status: 'sent');
   }
 
   /// Decrypts a body for storage. A failed decrypt keeps the ciphertext rather
@@ -461,7 +479,14 @@ class ChatSocket {
     if (decryptor == null || message.type != 'text') return null;
     if (!isEncryptedContent(message.content)) return null;
     try {
-      return await decryptor(message.conversationId, message.clientMsgId, message.content);
+      final isGroup = await _dao.conversationType(message.conversationId) == 'group';
+      return await decryptor(
+        message.conversationId,
+        message.clientMsgId,
+        message.senderId,
+        message.content,
+        isGroup: isGroup,
+      );
     } catch (error, stack) {
       debugPrint('ChatSocket could not decrypt message: $error');
       logger?.error('e2ee', 'decrypt failed', meta: {'error': error.toString()});

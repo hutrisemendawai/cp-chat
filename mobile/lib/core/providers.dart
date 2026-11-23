@@ -89,12 +89,13 @@ final chatSocketProvider = Provider<ChatSocket>((ref) {
     ref.watch(apiClientProvider),
     ref.watch(tokenStoreProvider),
     logger: ref.watch(appLoggerProvider),
-    decrypt: (conversationId, clientMsgId, content) {
+    decrypt: (conversationId, clientMsgId, senderId, content, {required isGroup}) {
       return ref.read(e2eeManagerProvider).plaintextFor(
             clientMsgId,
             conversationId,
             content,
-            isGroup: false,
+            isGroup: isGroup,
+            senderId: senderId,
           );
     },
   );

@@ -296,4 +296,69 @@ void main() {
       expect(decodeEnvelope('${e2eePrefix}not-json'), isNull);
     });
   });
+
+  group('1:1 session plumbing', () {
+    test('a fresh responder decrypts the envelope decoded from the wire body', () async {
+      final bundle = await bundleFor(bobKeys);
+      final sent = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'from the wire',
+        local: aliceKeys,
+        bundle: bundle,
+      );
+
+      final envelope = decodeEnvelope(sent.toContent());
+      expect(envelope, isNotNull);
+
+      final received = await bob.decrypt(
+        peerId: 'alice',
+        envelope: envelope!,
+        local: bobKeys,
+      );
+      expect(received.plaintext, 'from the wire');
+    });
+
+    test('the opening body carries X3DH context and the reply omits it', () async {
+      final bundle = await bundleFor(bobKeys);
+      final first = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'open',
+        local: aliceKeys,
+        bundle: bundle,
+      );
+      expect(first.ephemeralKey, isNotNull);
+      expect(first.signedPrekeyId, bundle.signedPrekeyId);
+      expect(first.oneTimePrekeyId, bundle.oneTimePrekeyId);
+
+      await bob.decrypt(peerId: 'alice', envelope: first, local: bobKeys);
+      final reply = await bob.encrypt(peerId: 'alice', plaintext: 'reply', local: bobKeys);
+
+      expect(reply.ephemeralKey, isNull);
+      expect(reply.signedPrekeyId, isNull);
+      expect(reply.oneTimePrekeyId, isNull);
+      expect(
+        (await alice.decrypt(peerId: 'bob', envelope: reply, local: aliceKeys)).plaintext,
+        'reply',
+      );
+    });
+
+    test('a reply cannot be decrypted from scratch without the opening message', () async {
+      final bundle = await bundleFor(bobKeys);
+      final first = await alice.encrypt(
+        peerId: 'bob',
+        plaintext: 'open',
+        local: aliceKeys,
+        bundle: bundle,
+      );
+      await bob.decrypt(peerId: 'alice', envelope: first, local: bobKeys);
+      final reply = await bob.encrypt(peerId: 'alice', plaintext: 'orphan', local: bobKeys);
+
+      final fresh = E2eeService(prekeyCount: 1);
+      final freshKeys = await fresh.generateKeyMaterial(startPrekeyId: 900);
+      await expectLater(
+        fresh.decrypt(peerId: 'bob', envelope: reply, local: freshKeys),
+        throwsA(isA<E2eeException>()),
+      );
+    });
+  });
 }
