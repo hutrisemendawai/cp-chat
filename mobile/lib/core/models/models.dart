@@ -70,6 +70,7 @@ class User {
     String? customStatus,
     String? bio,
     DateTime? lastSeenAt,
+    bool? isFriend,
     bool clearNickname = false,
     bool clearCustomStatus = false,
     bool clearBio = false,
@@ -86,7 +87,7 @@ class User {
       customStatus: clearCustomStatus ? null : (customStatus ?? this.customStatus),
       bio: clearBio ? null : (bio ?? this.bio),
       lastSeenAt: lastSeenAt ?? this.lastSeenAt,
-      isFriend: isFriend,
+      isFriend: isFriend ?? this.isFriend,
     );
   }
 }

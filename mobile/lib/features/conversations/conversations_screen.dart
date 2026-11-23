@@ -100,7 +100,7 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
               radius: 14,
               showStatus: false,
             ),
-            onPressed: () => context.push('/profile'),
+            onPressed: () => context.go('/profile'),
           ),
         ],
       ),

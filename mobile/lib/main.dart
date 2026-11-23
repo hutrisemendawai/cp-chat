@@ -13,7 +13,10 @@ import 'features/chat/chat_screen.dart';
 import 'features/conversations/conversations_screen.dart';
 import 'features/groups/create_group_screen.dart';
 import 'features/groups/group_info_screen.dart';
+import 'features/home/home_shell.dart';
+import 'features/people/people_screen.dart';
 import 'features/profile/my_profile_screen.dart';
+import 'features/profile/user_profile_screen.dart';
 import 'features/search/search_screen.dart';
 
 void main() async {
@@ -37,28 +40,55 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const SearchScreen(),
       ),
       GoRoute(
-        path: '/profile',
-        builder: (context, state) => const MyProfileScreen(),
+        path: '/users/:id',
+        builder: (context, state) => UserProfileScreen(
+          userId: state.pathParameters['id']!,
+        ),
+      ),
+      // Detail routes live on the root navigator so they cover the bottom bar.
+      GoRoute(
+        path: '/conversations/new-group',
+        builder: (context, state) => const CreateGroupScreen(),
       ),
       GoRoute(
-        path: '/conversations',
-        builder: (context, state) => const ConversationsScreen(),
+        path: '/conversations/:id',
+        builder: (context, state) => ChatScreen(
+          conversationId: state.pathParameters['id']!,
+        ),
         routes: [
           GoRoute(
-            path: 'new-group',
-            builder: (context, state) => const CreateGroupScreen(),
-          ),
-          GoRoute(
-            path: ':id',
-            builder: (context, state) => ChatScreen(
+            path: 'info',
+            builder: (context, state) => GroupInfoScreen(
               conversationId: state.pathParameters['id']!,
             ),
+          ),
+        ],
+      ),
+      StatefulShellRoute.indexedStack(
+        builder: (context, state, navigationShell) =>
+            HomeShell(navigationShell: navigationShell),
+        branches: [
+          StatefulShellBranch(
             routes: [
               GoRoute(
-                path: 'info',
-                builder: (context, state) => GroupInfoScreen(
-                  conversationId: state.pathParameters['id']!,
-                ),
+                path: '/conversations',
+                builder: (context, state) => const ConversationsScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/people',
+                builder: (context, state) => const PeopleScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/profile',
+                builder: (context, state) => const MyProfileScreen(),
               ),
             ],
           ),

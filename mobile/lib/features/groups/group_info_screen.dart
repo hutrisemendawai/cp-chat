@@ -255,6 +255,7 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
                     ),
                     for (final member in conversation.members)
                       ListTile(
+                        onTap: () => context.push('/users/${member.user.id}'),
                         leading: UserAvatarWithStatus(
                           avatarKey: member.user.avatarUrl,
                           name: member.user.name,

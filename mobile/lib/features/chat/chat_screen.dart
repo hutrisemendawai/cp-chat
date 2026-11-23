@@ -187,17 +187,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // Register the peer id so outgoing text can be encrypted for this chat.
     // The local row only caches the peer's name, so the member list is the
     // authoritative source for the id.
-    if (!isGroup && selfId != null) {
-      final peer = metadata.value?.otherMember(selfId);
-      if (peer != null) {
-        ref
-            .read(e2eeManagerProvider)
-            .rememberConversation(
-              widget.conversationId,
-              selfId: selfId,
-              peerId: peer.user.id,
-            );
-      }
+    if (!isGroup && selfId != null && peer != null) {
+      ref
+          .read(e2eeManagerProvider)
+          .rememberConversation(
+            widget.conversationId,
+            selfId: selfId,
+            peerId: peer.user.id,
+          );
     }
 
     // For a 1:1 chat the other participant's live presence is the subtitle.
@@ -205,6 +202,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ? ref.watch(presenceProvider(peer.user.id))
         : null;
     final presenceLabel = !isGroup ? formatPresence(presence) : null;
+
+    // Tapping the header of a direct chat opens the peer's full profile.
+    final peerUserId = !isGroup ? (peer?.user.id ?? cached?.peerId) : null;
 
     // Sender names make a group thread readable; direct chats already imply it.
     final senderNames = <String, String>{
@@ -219,48 +219,52 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: isGroup
-                      ? MediaAvatar(
-                          objectKey: cached?.avatarUrl,
-                          radius: 16,
-                          fallback: const Icon(Icons.groups),
-                        )
-                      : UserAvatarWithStatus(
-                          avatarKey: peer?.user.avatarUrl ?? cached?.peerAvatarUrl,
-                          name: peer?.user.name ?? cached?.peerName ?? title,
-                          status: presence?.resolvedStatus,
-                          radius: 16,
-                          showStatus: false,
-                        ),
-                ),
-                if (!isGroup && presence != null)
+        title: InkWell(
+          onTap: peerUserId == null ? null : () => context.push('/users/$peerUserId'),
+          borderRadius: BorderRadius.circular(8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
                   Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: StatusBadge(status: presence.resolvedStatus, size: 10),
+                    padding: const EdgeInsets.only(right: 8),
+                    child: isGroup
+                        ? MediaAvatar(
+                            objectKey: cached?.avatarUrl,
+                            radius: 16,
+                            fallback: const Icon(Icons.groups),
+                          )
+                        : UserAvatarWithStatus(
+                            avatarKey: peer?.user.avatarUrl ?? cached?.peerAvatarUrl,
+                            name: peer?.user.name ?? cached?.peerName ?? title,
+                            status: presence?.resolvedStatus,
+                            radius: 16,
+                            showStatus: false,
+                          ),
                   ),
-                Flexible(
-                  child: Text(title, overflow: TextOverflow.ellipsis),
-                ),
-              ],
-            ),
-            if (presenceLabel != null)
-              Text(
-                presenceLabel,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: presence?.isActive == true
-                      ? theme.colorScheme.primary
-                      : theme.colorScheme.onSurfaceVariant,
-                ),
+                  if (!isGroup && presence != null)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: StatusBadge(status: presence.resolvedStatus, size: 10),
+                    ),
+                  Flexible(
+                    child: Text(title, overflow: TextOverflow.ellipsis),
+                  ),
+                ],
               ),
-          ],
+              if (presenceLabel != null)
+                Text(
+                  presenceLabel,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: presence?.isActive == true
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+            ],
+          ),
         ),
         actions: [
           IconButton(
