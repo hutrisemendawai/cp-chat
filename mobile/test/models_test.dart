@@ -83,6 +83,31 @@ void main() {
       expect(conversation.otherMember('u1'), isNull);
     });
 
+    test('a group never resolves an other member even with members present', () {
+      final conversation = Conversation.fromJson(
+        jsonDecode('''
+        {
+          "id": "g1", "type": "group", "name": "Team", "created_by": "u1",
+          "last_seq": 0, "last_read_seq": 0, "unread_count": 0,
+          "created_at": "2026-01-01T00:00:00Z",
+          "members": [
+            {"user": {"id": "u1", "name": "Alice", "created_at": "2026-01-01T00:00:00Z"},
+             "role": "admin", "last_read_seq": 0},
+            {"user": {"id": "u2", "name": "Bob", "created_at": "2026-01-01T00:00:00Z"},
+             "role": "member", "last_read_seq": 0},
+            {"user": {"id": "u3", "name": "Carol", "created_at": "2026-01-01T00:00:00Z"},
+             "role": "member", "last_read_seq": 0}
+          ],
+          "last_message": null
+        }
+        ''') as Map<String, dynamic>,
+      );
+
+      expect(conversation.isGroup, isTrue);
+      expect(conversation.otherMember('u1'), isNull);
+      expect(conversation.displayName('u1'), 'Team');
+    });
+
     test('parses a message page and sync result', () {
       final page = MessagePage.fromJson(
         jsonDecode('{"messages": [], "has_more": true}') as Map<String, dynamic>,

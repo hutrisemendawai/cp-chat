@@ -229,6 +229,7 @@ class Conversation {
 
   /// The other participant of a direct conversation, `null` for groups.
   ConversationMember? otherMember(String selfId) {
+    if (isGroup) return null;
     for (final member in members) {
       if (member.user.id != selfId) return member;
     }

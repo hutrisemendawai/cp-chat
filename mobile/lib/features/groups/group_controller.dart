@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/models.dart';
 import '../../core/network/api_client.dart';
 import '../../core/providers.dart';
+import '../chat/conversation_metadata.dart';
 
 /// Group lifecycle operations (create, rename, avatar, membership). Kept
 /// separate from [ChatController] so the conversation screen stays about
@@ -70,6 +71,9 @@ class GroupController {
           conversation,
           selfId: _ref.read(currentUserProvider)?.id,
         );
+    // The chat header reads the group name from this cached provider, so a
+    // rename/avatar/member change must not leave a stale title behind.
+    _ref.invalidate(conversationMetadataProvider(conversation.id));
   }
 }
 

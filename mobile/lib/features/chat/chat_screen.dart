@@ -185,15 +185,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final metadata = ref.watch(conversationMetadataProvider(widget.conversationId));
 
     final cached = conversation.value;
-    final peer = selfId == null ? null : metadata.value?.otherMember(selfId);
-    final peerLabel = peer?.user.displayName;
-    final title = cached?.peerName != null
-        ? _peerLabelFromCache(cached!)
-        : (peerLabel ??
-            cached?.name ??
-            metadata.value?.displayName(selfId ?? '') ??
-            'Chat');
+    // Group state must be known before the peer is resolved: a group has no
+    // "other member", so the header shows the group name instead of a member.
     final isGroup = cached?.type == 'group' || metadata.value?.isGroup == true;
+    final peer = isGroup || selfId == null ? null : metadata.value?.otherMember(selfId);
+    final title = isGroup
+        ? (metadata.value?.name?.trim().isNotEmpty == true
+            ? metadata.value!.name!
+            : (cached?.name?.trim().isNotEmpty == true ? cached!.name! : 'Group'))
+        : (peer?.user.displayName ??
+            (cached?.peerName != null ? _peerLabelFromCache(cached!) : null) ??
+            cached?.name ??
+            'Chat');
 
     // Register the peer id so outgoing text can be encrypted for this chat.
     // The local row only caches the peer's name, so the member list is the
@@ -214,7 +217,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         : null;
     final presenceLabel = !isGroup ? formatPresence(presence) : null;
 
-    // Tapping the header of a direct chat opens the peer's full profile.
+    // A group header summarises the roster once the member list is loaded.
+    final groupSubtitle = isGroup && metadata.value != null
+        ? '${metadata.value!.members.length} members'
+        : null;
+
+    // Tapping the header opens a group's info, or a direct chat's peer profile.
     final peerUserId = !isGroup ? (peer?.user.id ?? cached?.peerId) : null;
 
     // Sender names make a group thread readable; direct chats already imply it.
@@ -234,7 +242,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       appBar: AppBar(
         titleSpacing: AppSpacing.xs,
         title: InkWell(
-          onTap: peerUserId == null ? null : () => context.push('/users/$peerUserId'),
+          onTap: isGroup
+              ? () => context.push('/conversations/${widget.conversationId}/info')
+              : (peerUserId == null ? null : () => context.push('/users/$peerUserId')),
           borderRadius: BorderRadius.circular(AppRadius.md),
           child: Padding(
             padding: const EdgeInsets.symmetric(
@@ -271,6 +281,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             color: presence?.isActive == true
                                 ? theme.colorScheme.primary
                                 : theme.colorScheme.onSurfaceVariant,
+                          ),
+                        )
+                      else if (groupSubtitle != null)
+                        Text(
+                          groupSubtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
                           ),
                         ),
                     ],
