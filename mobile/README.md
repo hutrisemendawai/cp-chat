@@ -130,7 +130,7 @@ lib/
 │   ├── media/          # Presign/upload/download for images and files
 │   ├── models/         # API DTOs and presence/profile parsing
 │   ├── network/        # Dio REST client and reconnecting WebSocket
-│   ├── notifications/  # FCM initialization and streams
+│   ├── notifications/  # FCM, local notifications, and suppression policy
 │   ├── storage/        # Secure JWT storage
 │   └── widgets/        # Shared presence badges, avatars, status dots
 ├── features/
