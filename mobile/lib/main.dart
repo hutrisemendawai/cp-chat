@@ -15,7 +15,9 @@ import 'features/conversations/conversations_screen.dart';
 import 'features/groups/create_group_screen.dart';
 import 'features/groups/group_info_screen.dart';
 import 'features/home/home_shell.dart';
+import 'features/people/people_controller.dart';
 import 'features/people/people_screen.dart';
+import 'features/presence/presence_controller.dart';
 import 'features/profile/my_profile_screen.dart';
 import 'features/profile/user_profile_screen.dart';
 import 'features/search/search_screen.dart';
@@ -114,7 +116,16 @@ class _AuthRefresh extends ChangeNotifier {
   _AuthRefresh(this._ref) {
     _subscription = _ref.listen<AuthSession?>(
       authControllerProvider,
-      (_, _) => notifyListeners(),
+      (previous, next) {
+        // A signed-out session must not leave the previous account's directory
+        // results and presence cached for the next user on this device.
+        if (next == null && previous != null) {
+          _ref.invalidate(peopleControllerProvider);
+          _ref.invalidate(presenceProvider);
+          _ref.invalidate(friendsProvider);
+        }
+        notifyListeners();
+      },
     );
   }
 

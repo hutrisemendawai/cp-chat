@@ -111,36 +111,30 @@ final pushRegistrationProvider = Provider<PushRegistration>((ref) {
   return registration;
 });
 
-/// Drives the post-authentication runtime: it watches the auth state and starts
-/// (or tears down) the E2EE bootstrap, the chat socket, and push registration.
+/// Owns the realtime session lifecycle: it boots the E2EE keys, connects the
+/// chat socket, and starts push registration, then tears all three down on
+/// logout.
 ///
-/// It is a provider rather than an `initState` listener so session transitions
-/// are handled in one place and cannot be missed: `ref.listen` inside a
-/// lifecycle method is not permitted, and a boot that ran only once would never
-/// react to a manual login.
-class SessionRuntime extends Notifier<bool> {
-  /// In-flight boot, so a listener-triggered start and an explicit start (the
-  /// cold-start restore path) share one run instead of racing the E2EE
-  /// bootstrap, which is not safe to enter twice concurrently.
-  Future<void>? _starting;
+/// It lives in its own provider (rather than inside [SessionRuntime]) so an
+/// explicit `logout()` can stop the session without reading `sessionRuntime`,
+/// which listens to the auth controller and would otherwise form a circular
+/// dependency. `stop()` is a no-op unless a session is running, so the
+/// auth-transition listener firing after an explicit `logout()` does not start a
+/// second teardown.
+class SessionLifecycle {
+  SessionLifecycle(this._ref);
 
-  @override
-  bool build() {
-    ref.listen<AuthSession?>(authControllerProvider, (previous, next) {
-      if (next != null) {
-        unawaited(start());
-      } else {
-        unawaited(_stop());
-      }
-    });
-    return false;
-  }
+  final Ref _ref;
+  Future<void>? _starting;
+  Future<void>? _stopping;
+  bool _running = false;
 
   /// Starts the socket and push registration for the active session. Safe to
-  /// call repeatedly: a run already in flight is awaited rather than duplicated.
+  /// call repeatedly: a run already in flight is awaited rather than duplicated,
+  /// and a cold-start restore and the login listener share one boot.
   Future<void> start() async {
-    if (ref.read(authControllerProvider) == null) return;
-    state = true;
+    if (_ref.read(authControllerProvider) == null) return;
+    _running = true;
     final existing = _starting;
     if (existing != null) return existing;
     final run = _start();
@@ -148,7 +142,7 @@ class SessionRuntime extends Notifier<bool> {
     try {
       await run;
     } finally {
-      _starting = null;
+      if (identical(_starting, run)) _starting = null;
     }
   }
 
@@ -156,26 +150,77 @@ class SessionRuntime extends Notifier<bool> {
     // Encryption keys must be ready before the first inbound frame is decrypted
     // and before the outbox is flushed, so bootstrap them first.
     try {
-      await ref.read(e2eeManagerProvider).bootstrap();
+      await _ref.read(e2eeManagerProvider).bootstrap();
     } catch (error) {
       debugPrint('E2EE bootstrap failed: $error');
     }
 
-    await ref.read(chatSocketProvider).connect();
+    await _ref.read(chatSocketProvider).connect();
 
-    final push = ref.read(pushRegistrationProvider);
-    await push.start();
+    await _ref.read(pushRegistrationProvider).start();
   }
 
-  /// Stops realtime work on logout: the socket disconnects and its timers stop,
-  /// push registration ends, and per-session E2EE state is cleared.
-  Future<void> stop() => _stop();
+  /// Stops realtime work on logout. An in-flight boot is awaited first so a late
+  /// connect cannot revive a socket that is being torn down, then each step is
+  /// individually guarded so a stalled socket cannot block the rest.
+  Future<void> stop() {
+    final existing = _stopping;
+    if (existing != null) return existing;
+    if (!_running) return Future<void>.value();
+    _running = false;
+    final run = _stop();
+    _stopping = run;
+    return run.whenComplete(() {
+      if (identical(_stopping, run)) _stopping = null;
+    });
+  }
 
   Future<void> _stop() async {
-    await ref.read(chatSocketProvider).disconnect();
-    await ref.read(pushRegistrationProvider).stop();
-    ref.read(e2eeManagerProvider).reset();
+    final starting = _starting;
+    if (starting != null) {
+      try {
+        await starting;
+      } catch (error) {
+        debugPrint('Session stop awaiting boot failed: $error');
+      }
+    }
+    try {
+      await _ref.read(chatSocketProvider).disconnect();
+    } catch (error) {
+      debugPrint('Session teardown socket disconnect failed: $error');
+    }
+    try {
+      await _ref.read(pushRegistrationProvider).stop();
+    } catch (error) {
+      debugPrint('Session teardown push stop failed: $error');
+    }
+    _ref.read(e2eeManagerProvider).reset();
   }
+}
+
+final sessionLifecycleProvider = Provider<SessionLifecycle>(SessionLifecycle.new);
+
+/// Watches the auth state and drives [SessionLifecycle] so session transitions
+/// are handled in one place and cannot be missed: `ref.listen` inside a
+/// lifecycle method is not permitted, and a boot that ran only once would never
+/// react to a manual login.
+class SessionRuntime extends Notifier<bool> {
+  @override
+  bool build() {
+    ref.listen<AuthSession?>(authControllerProvider, (previous, next) {
+      final lifecycle = ref.read(sessionLifecycleProvider);
+      if (next != null) {
+        unawaited(lifecycle.start());
+      } else {
+        unawaited(lifecycle.stop());
+      }
+    });
+    return false;
+  }
+
+  Future<void> start() => ref.read(sessionLifecycleProvider).start();
+
+  Future<void> stop() => ref.read(sessionLifecycleProvider).stop();
 }
 
 final sessionRuntimeProvider =
@@ -241,15 +286,40 @@ class AuthController extends Notifier<AuthSession?> {
     }
   }
 
+  /// Upper bound on each logout teardown step. A step that overruns it is
+  /// abandoned (its work continues in the background) so signing out always
+  /// reaches the signed-out state instead of hanging on a stalled socket or an
+  /// unreachable server.
+  Duration logoutStepTimeout = const Duration(seconds: 5);
+
   Future<void> logout() async {
     final api = ref.read(apiClientProvider);
-    // Tear down the socket before clearing tokens so it stops reconnecting with
-    // a session that is about to disappear, and reset E2EE state so a different
-    // account signing in next cannot see the previous account's plaintext.
-    await ref.read(sessionRuntimeProvider.notifier).stop();
-    await api.logout();
-    await ref.read(chatDaoProvider).clearAll();
-    state = null;
+    final chatDao = ref.read(chatDaoProvider);
+    try {
+      // Tear down the socket before clearing tokens so it stops reconnecting
+      // with a session that is about to disappear, and reset E2EE state so a
+      // different account signing in next cannot see the previous account's
+      // plaintext.
+      try {
+        await ref.read(sessionLifecycleProvider).stop().timeout(logoutStepTimeout);
+      } catch (error) {
+        debugPrint('Logout teardown failed: $error');
+      }
+      try {
+        await api.logout().timeout(logoutStepTimeout);
+      } catch (error) {
+        debugPrint('Logout API call failed: $error');
+      }
+      try {
+        await chatDao.clearAll().timeout(logoutStepTimeout);
+      } catch (error) {
+        debugPrint('Logout local clear failed: $error');
+      }
+    } finally {
+      // Always clear the session locally, even if a step stalled, so the router
+      // can redirect to /auth instead of leaving the user on a dead session.
+      state = null;
+    }
   }
 
   /// Replaces the cached user after a profile edit so every screen reading

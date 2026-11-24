@@ -5,11 +5,13 @@ import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:cp_chat/core/database/app_database.dart';
+import 'package:cp_chat/core/database/chat_dao.dart';
 import 'package:cp_chat/core/models/models.dart';
 import 'package:cp_chat/core/network/api_client.dart';
 import 'package:cp_chat/core/providers.dart';
 import 'package:cp_chat/core/storage/token_store.dart';
 import 'package:cp_chat/features/people/people_screen.dart';
+import 'package:cp_chat/features/profile/my_profile_screen.dart';
 import 'package:cp_chat/features/profile/user_profile_screen.dart';
 
 import 'support/factories.dart';
@@ -67,6 +69,51 @@ class _FakeApi extends ApiClient {
 
   @override
   Future<void> removeFriend(String friendId) async {}
+}
+
+/// Token store backed by memory so sign-out can wipe it without the platform
+/// keychain.
+class _MemoryTokenStore extends TokenStore {
+  _MemoryTokenStore({this.access, this.refresh, this.userId});
+
+  String? access;
+  String? refresh;
+  String? userId;
+
+  @override
+  Future<String?> readAccessToken() async => access;
+
+  @override
+  Future<String?> readRefreshToken() async => refresh;
+
+  @override
+  Future<String?> readUserId() async => userId;
+
+  @override
+  Future<void> clear() async {
+    access = null;
+    refresh = null;
+    userId = null;
+  }
+}
+
+/// Serves the caller's profile and mirrors the logout contract by clearing the
+/// token store, without touching the network.
+class _ProfileApi extends ApiClient {
+  _ProfileApi(this._profile, this._store) : super(_store);
+
+  final User _profile;
+  final _MemoryTokenStore _store;
+  int logouts = 0;
+
+  @override
+  Future<User> me() async => _profile;
+
+  @override
+  Future<void> logout() async {
+    logouts += 1;
+    await _store.clear();
+  }
 }
 
 void main() {
@@ -211,6 +258,57 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(api.addFriends, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('sign-out clears tokens, local data, and returns to /auth',
+      (tester) async {
+    final store = _MemoryTokenStore(access: 'a', refresh: 'r', userId: 'me');
+    final api = _ProfileApi(user('me', name: 'Me'), store);
+    final dao = ChatDao(database);
+    await dao.upsertConversations([conversation('conv-1', selfId: 'me')]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(api),
+          appDatabaseProvider.overrideWithValue(database),
+          tokenStoreProvider.overrideWithValue(store),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            initialLocation: '/profile',
+            routes: [
+              GoRoute(
+                path: '/profile',
+                builder: (context, state) => const MyProfileScreen(),
+              ),
+              GoRoute(
+                path: '/auth',
+                builder: (context, state) =>
+                    const Scaffold(body: Text('auth-screen')),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.dragUntilVisible(
+      find.text('Sign out'),
+      find.byType(ListView),
+      const Offset(0, -300),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sign out'));
+    await tester.pumpAndSettle();
+
+    expect(api.logouts, 1);
+    expect(store.access, isNull);
+    expect(store.refresh, isNull);
+    expect(await dao.conversations(), isEmpty);
+    expect(find.text('auth-screen'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

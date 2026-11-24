@@ -202,6 +202,8 @@ class ChatSocket {
     _awaitingAck.clear();
     _recoveryCursors.clear();
     _attempt = 0;
+    _connecting = false;
+    _syncing = false;
 
     final subscription = _subscription;
     _subscription = null;
@@ -209,8 +211,23 @@ class ChatSocket {
     _channel = null;
     connection.value = const SocketStatus.disconnected();
 
-    await subscription?.cancel();
-    await channel?.sink.close();
+    // A half-open socket can leave `cancel`/`close` pending forever on a flaky
+    // mobile link, which would freeze logout. Bound each step and swallow any
+    // failure: local teardown must always finish.
+    if (subscription != null) {
+      try {
+        await subscription.cancel().timeout(const Duration(seconds: 2));
+      } catch (error) {
+        debugPrint('ChatSocket subscription cancel failed: $error');
+      }
+    }
+    if (channel != null) {
+      try {
+        await channel.sink.close().timeout(const Duration(seconds: 2));
+      } catch (error) {
+        debugPrint('ChatSocket channel close failed: $error');
+      }
+    }
   }
 
   /// Pulls every conversation forward from its local `last_seq`.

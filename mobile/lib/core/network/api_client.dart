@@ -199,19 +199,28 @@ class ApiClient {
   }
 
   Future<void> logout() async {
-    final refreshToken = await _tokenStore.readRefreshToken();
-    if (refreshToken != null) {
-      try {
-        await dio.post<void>(
-          '/api/v1/auth/logout',
-          data: {'refresh_token': refreshToken},
-          options: Options(validateStatus: (status) => status != null && status < 500),
-        );
-      } catch (_) {
-        // Best effort: local logout always succeeds.
+    try {
+      final refreshToken = await _tokenStore.readRefreshToken();
+      if (refreshToken != null) {
+        try {
+          await dio.post<void>(
+            '/api/v1/auth/logout',
+            data: {'refresh_token': refreshToken},
+            options: Options(
+              validateStatus: (status) => status != null && status < 500,
+              // A revoked server session is best effort; a slow or unreachable
+              // backend must never make sign-out appear frozen.
+              sendTimeout: const Duration(seconds: 3),
+              receiveTimeout: const Duration(seconds: 3),
+            ),
+          );
+        } catch (_) {
+          // Best effort: local logout always succeeds.
+        }
       }
+    } finally {
+      await _tokenStore.clear();
     }
-    await _tokenStore.clear();
   }
 
   Future<User> me() async {

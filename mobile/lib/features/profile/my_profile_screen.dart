@@ -33,6 +33,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
   bool _loading = true;
   bool _saving = false;
   bool _uploadingAvatar = false;
+  bool _signingOut = false;
   String? _error;
 
   static const _statusOptions = <({String value, String label, String description})>[
@@ -173,8 +174,36 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
   }
 
   Future<void> _signOut() async {
-    await ref.read(authControllerProvider.notifier).logout();
-    if (mounted) context.go('/auth');
+    if (_signingOut) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() => _signingOut = true);
+    try {
+      await ref.read(authControllerProvider.notifier).logout();
+    } finally {
+      if (mounted) context.go('/auth');
+    }
+  }
+
+  /// AppBar sign-out, available even while the profile is still loading or has
+  /// failed, so the user is never stuck without a way off the screen.
+  Widget _signOutAction() {
+    if (_signingOut) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+        child: Center(
+          child: SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+    return IconButton(
+      tooltip: 'Sign out',
+      icon: const Icon(Icons.logout),
+      onPressed: _signOut,
+    );
   }
 
   @override
@@ -183,7 +212,10 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
 
     if (_loading) {
       return Scaffold(
-        appBar: AppBar(title: const Text('My Profile')),
+        appBar: AppBar(
+          title: const Text('My Profile'),
+          actions: [_signOutAction()],
+        ),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
@@ -205,14 +237,16 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                   : const Text('Save'),
             ),
           ),
+          _signOutAction(),
         ],
       ),
       body: ListView(
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
         padding: const EdgeInsets.fromLTRB(
           AppSpacing.pageMargin,
           AppSpacing.xl,
           AppSpacing.pageMargin,
-          AppSpacing.section,
+          AppSpacing.section + 32,
         ),
         children: [
           if (_error != null) ...[
@@ -251,14 +285,27 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
             maxLines: 6,
           ),
           const SizedBox(height: AppSpacing.xl),
-          OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: StatusColors.dnd,
-              side: BorderSide(color: theme.colorScheme.errorContainer),
+          SafeArea(
+            top: false,
+            child: SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: StatusColors.dnd,
+                  side: BorderSide(color: theme.colorScheme.errorContainer),
+                ),
+                onPressed: _signingOut ? null : _signOut,
+                icon: _signingOut
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.logout, size: 18),
+                label: Text(_signingOut ? 'Signing out…' : 'Sign out'),
+              ),
             ),
-            onPressed: _signOut,
-            icon: const Icon(Icons.logout, size: 18),
-            label: const Text('Sign out'),
           ),
         ],
       ),
