@@ -79,27 +79,9 @@ class ChatDao {
   /// conversations have no server-side name, so the peer's name is cached for
   /// display and cheap sorting without refetching members.
   Future<void> upsertConversations(List<Conversation> conversations, {String? selfId}) async {
-    await db.batch((batch) {
-      for (final conversation in conversations) {
-        batch.insert(
-          db.localConversations,
-          LocalConversationsCompanion.insert(
-            id: conversation.id,
-            type: conversation.type,
-            name: Value(conversation.name),
-            peerName: Value(_peerName(conversation, selfId)),
-            peerId: Value(_peerId(conversation, selfId)),
-            peerNickname: Value(_peerNickname(conversation, selfId)),
-            peerAvatarUrl: Value(_peerAvatar(conversation, selfId)),
-            avatarUrl: Value(conversation.avatarUrl),
-            lastMessagePreview: Value(_preview(conversation.lastMessage)),
-            lastSeq: Value(conversation.lastSeq),
-            lastReadSeq: Value(conversation.lastReadSeq),
-            unreadCount: Value(conversation.unreadCount),
-            updatedAt: conversation.lastMessage?.createdAt ?? conversation.createdAt,
-          ),
-          mode: InsertMode.insertOrReplace,
-        );
+    await db.transaction(() async {
+      for (final item in conversations) {
+        await _upsertConversation(item, selfId: selfId);
       }
     });
   }
@@ -109,32 +91,121 @@ class ChatDao {
     bool preserveLocalCursor = true,
     String? selfId,
   }) async {
-    final existing = await this.conversation(conversation.id);
-    final lastSeq = preserveLocalCursor && existing != null
-        ? (existing.lastSeq > conversation.lastSeq ? existing.lastSeq : conversation.lastSeq)
-        : conversation.lastSeq;
-    final updatedAt = conversation.lastMessage?.createdAt ?? conversation.createdAt;
+    await db.transaction(() => _upsertConversation(
+          conversation,
+          preserveLocalCursor: preserveLocalCursor,
+          selfId: selfId,
+        ));
+  }
 
+  Future<void> _upsertConversation(
+    Conversation item, {
+    bool preserveLocalCursor = true,
+    String? selfId,
+  }) async {
+    final existing = await conversation(item.id);
+    final pending = await _latestPending(item.id);
+    final summary = item.lastMessage;
+    final summarySeq = summary?.seq ?? item.lastSeq;
+    final stale = existing != null && preserveLocalCursor &&
+        (item.lastSeq < existing.lastSeq ||
+            (summary != null && summarySeq < existing.lastSeq));
+    String? preview;
+    if (pending != null) {
+      preview = _contentPreview(pending.type, pending.content);
+    } else if (stale) {
+      preview = _safePreview(existing.lastMessagePreview);
+    } else if (summary == null) {
+      preview = null;
+    } else {
+      preview = await _summaryPreview(item.id, summary);
+      if (preview == 'Encrypted message' && existing != null &&
+          item.lastSeq == existing.lastSeq && summary.seq == item.lastSeq &&
+          existing.lastMessagePreview != null &&
+          !await _hasConflictingMessage(item.id, summary)) {
+        preview = _safePreview(existing.lastMessagePreview);
+      }
+    }
+    final serverTime = summary?.createdAt ?? item.createdAt;
+    var updatedAt = serverTime;
+    if (existing != null && preserveLocalCursor && (stale || pending != null) &&
+        existing.updatedAt.isAfter(updatedAt)) {
+      updatedAt = existing.updatedAt;
+    }
+    if (pending != null && pending.createdAt.isAfter(updatedAt)) {
+      updatedAt = pending.createdAt;
+    }
+    final lastSeq = preserveLocalCursor && existing != null && existing.lastSeq > item.lastSeq
+        ? existing.lastSeq
+        : item.lastSeq;
     await db.into(db.localConversations).insertOnConflictUpdate(
           LocalConversationsCompanion.insert(
-            id: conversation.id,
-            type: conversation.type,
-            name: Value(conversation.name),
-            peerName: Value(_peerName(conversation, selfId) ?? existing?.peerName),
-            peerId: Value(_peerId(conversation, selfId) ?? existing?.peerId),
-            peerNickname:
-                Value(_peerNickname(conversation, selfId) ?? existing?.peerNickname),
-            peerAvatarUrl:
-                Value(_peerAvatar(conversation, selfId) ?? existing?.peerAvatarUrl),
-            avatarUrl: Value(conversation.avatarUrl),
-            lastMessagePreview: Value(_preview(conversation.lastMessage)),
+            id: item.id,
+            type: item.type,
+            name: Value(item.name),
+            peerName: Value(_peerName(item, selfId) ?? existing?.peerName),
+            peerId: Value(_peerId(item, selfId) ?? existing?.peerId),
+            peerNickname: Value(_peerNickname(item, selfId) ?? existing?.peerNickname),
+            peerAvatarUrl: Value(_peerAvatar(item, selfId) ?? existing?.peerAvatarUrl),
+            avatarUrl: Value(item.avatarUrl),
+            lastMessagePreview: Value(preview),
             lastSeq: Value(lastSeq),
-            lastReadSeq: Value(conversation.lastReadSeq),
-            unreadCount: Value(conversation.unreadCount),
+            lastReadSeq: Value(item.lastReadSeq),
+            unreadCount: Value(item.unreadCount),
             updatedAt: updatedAt,
           ),
         );
   }
+
+  Future<LocalMessage?> _latestPending(String conversationId) async {
+    final rows = await db.customSelect(
+      'SELECT pending.* FROM local_messages AS pending '
+      'WHERE pending.conversation_id = ? AND pending.seq IS NULL '
+      'AND NOT EXISTS (SELECT 1 FROM local_messages AS confirmed '
+      'WHERE confirmed.conversation_id = pending.conversation_id '
+      'AND confirmed.sender_id = pending.sender_id AND confirmed.seq IS NOT NULL '
+      'AND (confirmed.created_at > pending.created_at OR '
+      '(confirmed.created_at = pending.created_at AND confirmed.rowid > pending.rowid))) '
+      'ORDER BY pending.created_at DESC, pending.rowid DESC LIMIT 1',
+      variables: [Variable.withString(conversationId)],
+      readsFrom: {db.localMessages},
+    ).get();
+    return rows.isEmpty ? null : db.localMessages.map(rows.single.data);
+  }
+
+  Future<String> _summaryPreview(String conversationId, Message summary) async {
+    if (summary.type != 'text' || !_isUnreadable(summary.content)) {
+      return _contentPreview(summary.type, summary.content);
+    }
+    final byId = await message(summary.clientMsgId);
+    if (byId != null && byId.conversationId == conversationId &&
+        (byId.seq == null || byId.seq == summary.seq) &&
+        byId.type == 'text' && !_isUnreadable(byId.content)) {
+      return byId.content;
+    }
+    final bySeq = await (db.select(db.localMessages)
+          ..where((table) => table.conversationId.equals(conversationId) &
+              table.seq.equals(summary.seq)))
+        .getSingleOrNull();
+    if (bySeq != null && bySeq.type == 'text' && !_isUnreadable(bySeq.content)) {
+      return bySeq.content;
+    }
+    return 'Encrypted message';
+  }
+
+  Future<bool> _hasConflictingMessage(String conversationId, Message summary) async {
+    final row = await (db.select(db.localMessages)
+          ..where((table) => table.conversationId.equals(conversationId) &
+              table.seq.equals(summary.seq)))
+        .getSingleOrNull();
+    return row != null && row.clientMsgId != summary.clientMsgId;
+  }
+
+  String? _safePreview(String? preview) =>
+      preview == null ? null : _textPreview(preview);
+
+  String _contentPreview(String type, String content) =>
+      type == 'text' ? _textPreview(content) : 'Sent an attachment';
 
   String? _peerName(Conversation conversation, String? selfId) {
     if (selfId == null) return null;
@@ -159,16 +230,8 @@ class ChatDao {
     return conversation.otherMember(selfId)?.user.avatarUrl;
   }
 
-  String? _preview(Message? message) {
-    if (message == null) return null;
-    if (message.type != 'text') return 'Sent an attachment';
-    return _textPreview(message.content);
-  }
-
-  /// A body that is still a raw envelope (history restored before its session,
-  /// or an own message synced back) must not leak ciphertext into the UI.
   String _textPreview(String content) =>
-      isEncryptedContent(content) ? 'Encrypted message' : content;
+      _isUnreadable(content) ? 'Encrypted message' : content;
 
   /// Keeps already-decrypted text when the incoming body is unreadable, so a
   /// sync or history page cannot regress a bubble to ciphertext.
@@ -218,7 +281,21 @@ class ChatDao {
               createdAt: createdAt,
             ),
           );
+      await _refreshPendingPreview(conversationId);
     });
+  }
+
+  Future<void> _refreshPendingPreview(String conversationId) async {
+    final existing = await conversation(conversationId);
+    final pending = await _latestPending(conversationId);
+    if (existing == null || pending == null) return;
+    await (db.update(db.localConversations)..where((table) => table.id.equals(conversationId)))
+        .write(LocalConversationsCompanion(
+      lastMessagePreview: Value(_contentPreview(pending.type, pending.content)),
+      updatedAt: Value(pending.createdAt.isAfter(existing.updatedAt)
+          ? pending.createdAt
+          : existing.updatedAt),
+    ));
   }
 
   /// Stores a server message, reconciling the optimistic row by client id.
@@ -228,31 +305,39 @@ class ChatDao {
   /// the peer and cannot be replayed here), or for history re-fetched after the
   /// ratchet moved past it.
   Future<void> upsertServerMessage(Message message, {String status = 'sent'}) async {
-    final existing = await (db.select(db.localMessages)
-          ..where((table) => table.clientMsgId.equals(message.clientMsgId)))
-        .getSingleOrNull();
-
-    final content = _storedContent(message.content, existing?.content);
-
-    await db.into(db.localMessages).insertOnConflictUpdate(
-          LocalMessagesCompanion.insert(
-            clientMsgId: message.clientMsgId,
-            id: Value(message.id),
-            conversationId: message.conversationId,
-            seq: Value(message.seq),
-            senderId: message.senderId,
-            type: message.type,
-            content: content,
-            createdAt: message.createdAt,
-            status: Value(_maxStatus(existing?.status, status)),
-          ),
-        );
-
-    await (db.delete(db.outboxEntries)
-          ..where((table) => table.clientMsgId.equals(message.clientMsgId)))
-        .go();
-
-    await _bumpConversationCursor(message, content);
+    await db.transaction(() async {
+      final existing = await this.message(message.clientMsgId);
+      if (existing != null && existing.conversationId != message.conversationId) {
+        throw StateError('Message id belongs to another conversation');
+      }
+      final pendingBefore = await _latestPending(message.conversationId);
+      final content = _storedContent(message.content, existing?.content);
+      await db.into(db.localMessages).insertOnConflictUpdate(
+            LocalMessagesCompanion.insert(
+              clientMsgId: message.clientMsgId,
+              id: Value(message.id),
+              conversationId: message.conversationId,
+              seq: Value(message.seq),
+              senderId: message.senderId,
+              type: message.type,
+              content: content,
+              createdAt: existing != null && existing.seq == null
+                  ? existing.createdAt
+                  : message.createdAt,
+              status: Value(_maxStatus(existing?.status, status)),
+            ),
+          );
+      await (db.delete(db.outboxEntries)
+            ..where((table) => table.clientMsgId.equals(message.clientMsgId)))
+          .go();
+      await _bumpConversationCursor(message, content);
+      final current = await conversation(message.conversationId);
+      if (current != null && message.seq < current.lastSeq &&
+          pendingBefore?.clientMsgId == message.clientMsgId &&
+          await _latestPending(message.conversationId) == null) {
+        await _restoreServerPreview(current);
+      }
+    });
   }
 
   Future<void> upsertServerMessages(List<Message> messages) async {
@@ -267,27 +352,45 @@ class ChatDao {
   /// server-assigned `seq`. This resolves a message that is still `pending` (or
   /// was marked `failed` by a timeout) without waiting for a sync.
   Future<void> applyStatus(String clientMsgId, String status, {int? seq}) async {
-    final existing = await (db.select(db.localMessages)
-          ..where((table) => table.clientMsgId.equals(clientMsgId)))
-        .getSingleOrNull();
-    if (existing == null) return;
-
-    final nextSeq = seq ?? existing.seq;
-    final confirmed = _confirmedStatuses.contains(status);
-
     await db.transaction(() async {
+      final existing = await message(clientMsgId);
+      if (existing == null) return;
+      final nextSeq = existing.seq != null && (seq == null || existing.seq! > seq)
+          ? existing.seq
+          : seq;
+      final confirmed = _confirmedStatuses.contains(status);
       await (db.update(db.localMessages)
             ..where((table) => table.clientMsgId.equals(clientMsgId)))
-          .write(
-        LocalMessagesCompanion(
-          status: Value(_maxStatus(existing.status, status)),
-          seq: Value(nextSeq),
-        ),
-      );
+          .write(LocalMessagesCompanion(
+        status: Value(_maxStatus(existing.status, status)),
+        seq: Value(nextSeq),
+      ));
       if (confirmed) {
         await (db.delete(db.outboxEntries)
               ..where((table) => table.clientMsgId.equals(clientMsgId)))
             .go();
+      }
+      final current = await conversation(existing.conversationId);
+      if (current == null) return;
+      final pending = await _latestPending(existing.conversationId);
+      final latestKnownSeq = nextSeq != null && nextSeq > current.lastSeq
+          ? nextSeq
+          : current.lastSeq;
+      if (latestKnownSeq != current.lastSeq) {
+        await (db.update(db.localConversations)
+              ..where((table) => table.id.equals(existing.conversationId)))
+            .write(LocalConversationsCompanion(lastSeq: Value(latestKnownSeq)));
+      }
+      if (pending != null) {
+        await _refreshPendingPreview(existing.conversationId);
+      } else if (nextSeq != null && nextSeq >= current.lastSeq) {
+        await (db.update(db.localConversations)
+              ..where((table) => table.id.equals(existing.conversationId)))
+            .write(LocalConversationsCompanion(
+          lastMessagePreview: Value(_contentPreview(existing.type, existing.content)),
+        ));
+      } else if (nextSeq != null && existing.seq == null) {
+        await _restoreServerPreview(current);
       }
     });
   }
@@ -350,11 +453,44 @@ class ChatDao {
 
   Future<void> deleteMessage(String clientMsgId) async {
     await db.transaction(() async {
+      final deleted = await message(clientMsgId);
+      final pendingBefore = deleted == null ? null : await _latestPending(deleted.conversationId);
       await (db.delete(db.localMessages)..where((table) => table.clientMsgId.equals(clientMsgId)))
           .go();
       await (db.delete(db.outboxEntries)..where((table) => table.clientMsgId.equals(clientMsgId)))
           .go();
+      if (deleted != null && pendingBefore?.clientMsgId == clientMsgId) {
+        final pending = await _latestPending(deleted.conversationId);
+        if (pending != null) {
+          await _refreshPendingPreview(deleted.conversationId);
+        } else {
+          final current = await conversation(deleted.conversationId);
+          if (current == null) return;
+          await _restoreServerPreview(current);
+        }
+      } else if (deleted?.seq != null) {
+        final current = await conversation(deleted!.conversationId);
+        if (current != null && deleted.seq == current.lastSeq &&
+            await _latestPending(deleted.conversationId) == null) {
+          await _restoreServerPreview(current);
+        }
+      }
     });
+  }
+
+  Future<void> _restoreServerPreview(LocalConversation current) async {
+    final latest = await (db.select(db.localMessages)
+          ..where((table) => table.conversationId.equals(current.id) &
+              table.seq.equals(current.lastSeq)))
+        .getSingleOrNull();
+    final preview = latest != null
+        ? _contentPreview(latest.type, latest.content)
+        : current.lastSeq == 0 ? null : 'Encrypted message';
+    await (db.update(db.localConversations)..where((table) => table.id.equals(current.id)))
+        .write(LocalConversationsCompanion(
+          lastMessagePreview: Value(preview),
+          updatedAt: latest == null ? const Value.absent() : Value(latest.createdAt),
+        ));
   }
 
   Future<List<OutboxEntry>> pendingOutbox() async {
@@ -421,25 +557,31 @@ class ChatDao {
 
   Future<void> _bumpConversationCursor(Message message, String content) async {
     final existing = await conversation(message.conversationId);
-    final newest = existing == null || message.createdAt.isAfter(existing.updatedAt)
+    if (existing == null) return;
+    final pending = await _latestPending(message.conversationId);
+    final newest = message.createdAt.isAfter(existing.updatedAt)
         ? message.createdAt
         : existing.updatedAt;
-    final lastSeq = existing == null || message.seq > existing.lastSeq
-        ? message.seq
-        : existing.lastSeq;
-
+    final lastSeq = message.seq > existing.lastSeq ? message.seq : existing.lastSeq;
+    var preview = _safePreview(existing.lastMessagePreview);
+    if (pending != null) {
+      preview = _contentPreview(pending.type, pending.content);
+    } else if (message.seq >= existing.lastSeq) {
+      final incoming = _contentPreview(message.type, content);
+      if (message.seq > existing.lastSeq || incoming != 'Encrypted message' ||
+          preview == null || preview == 'Encrypted message') {
+        preview = incoming;
+      }
+    }
     await (db.update(db.localConversations)
           ..where((table) => table.id.equals(message.conversationId)))
-        .write(
-      LocalConversationsCompanion(
-        lastSeq: Value(lastSeq),
-        updatedAt: Value(newest),
-        lastMessagePreview: Value(
-          message.type == 'text' ? _textPreview(content) : 'Sent an attachment',
-        ),
-      ),
-    );
+        .write(LocalConversationsCompanion(
+      lastSeq: Value(lastSeq),
+      updatedAt: Value(newest),
+      lastMessagePreview: Value(preview),
+    ));
   }
+
 }
 
 /// States assigned by the server, which prove it accepted the message.

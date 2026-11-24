@@ -295,8 +295,7 @@ class _ConversationTile extends ConsumerWidget {
 
   String _subtitle() {
     final preview = conversation.lastMessagePreview;
-    if (preview == null || conversation.lastSeq == 0) return 'No messages yet';
-    return preview;
+    return preview ?? 'No messages yet';
   }
 
   String _relativeTime(DateTime time) {

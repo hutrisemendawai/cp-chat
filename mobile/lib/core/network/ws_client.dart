@@ -6,7 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../config/app_config.dart';
-import '../crypto/e2ee_service.dart' show isEncryptedContent, undecryptableContent;
+import '../crypto/e2ee_service.dart'
+    show isEncryptedContent, undecryptableContent;
 import '../logging/app_logger.dart';
 import '../notifications/crash_reporter.dart';
 import '../database/chat_dao.dart';
@@ -22,7 +23,8 @@ enum SocketState { disconnected, connecting, connected }
 class SocketStatus {
   const SocketStatus(this.state, [this.lastError]);
 
-  const SocketStatus.disconnected([String? error]) : this(SocketState.disconnected, error);
+  const SocketStatus.disconnected([String? error])
+    : this(SocketState.disconnected, error);
 
   final SocketState state;
   final String? lastError;
@@ -32,7 +34,9 @@ class SocketStatus {
 
   @override
   bool operator ==(Object other) =>
-      other is SocketStatus && other.state == state && other.lastError == lastError;
+      other is SocketStatus &&
+      other.state == state &&
+      other.lastError == lastError;
 
   @override
   int get hashCode => Object.hash(state, lastError);
@@ -65,18 +69,14 @@ class ChatSocket {
   final Duration sendTimeout;
   final AppLogger? logger;
 
-  /// Decrypts an inbound E2EE body before it is persisted, so the local mirror
-  /// (and therefore the UI) only ever holds plaintext. Returning null leaves the
-  /// original content untouched, which is what a group or plaintext message
-  /// does. [senderId] lets the decryptor resolve the peer from the message
-  /// itself instead of UI state.
   final Future<String?> Function(
     String conversationId,
     String clientMsgId,
     String senderId,
     String content, {
     required bool isGroup,
-  })? decrypt;
+  })?
+  decrypt;
 
   final Random _random = Random();
 
@@ -92,8 +92,9 @@ class ChatSocket {
   Stream<Presence> get presenceEvents => _presenceController.stream;
 
   /// The current connection status, reactive so a screen can show a banner.
-  final ValueNotifier<SocketStatus> connection =
-      ValueNotifier<SocketStatus>(const SocketStatus.disconnected());
+  final ValueNotifier<SocketStatus> connection = ValueNotifier<SocketStatus>(
+    const SocketStatus.disconnected(),
+  );
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
@@ -104,6 +105,9 @@ class ChatSocket {
   bool _disposed = false;
   bool _syncing = false;
   bool _connecting = false;
+  Completer<void>? _syncBarrier;
+  final Map<String, Future<void>> _messageQueues = {};
+  final Map<String, (String, int)> _recoveryCursors = {};
 
   bool get isConnected => _channel != null;
 
@@ -176,7 +180,9 @@ class ChatSocket {
   /// as a token problem worth one rotation.
   bool _authFailure(Object error) {
     final text = error.toString();
-    return text.contains('401') || text.contains('403') || text.contains('Unauthorized');
+    return text.contains('401') ||
+        text.contains('403') ||
+        text.contains('Unauthorized');
   }
 
   /// Closes the connection and stops every timer without scheduling a reconnect
@@ -194,6 +200,7 @@ class ChatSocket {
     }
     _sendTimers.clear();
     _awaitingAck.clear();
+    _recoveryCursors.clear();
     _attempt = 0;
 
     final subscription = _subscription;
@@ -208,61 +215,173 @@ class ChatSocket {
 
   /// Pulls every conversation forward from its local `last_seq`.
   Future<void> syncAll({String? selfId}) async {
-    if (_syncing) return;
+    if (_syncing) {
+      await _syncBarrier?.future;
+      return;
+    }
     _syncing = true;
+    final barrier = Completer<void>();
+    _syncBarrier = barrier;
     try {
       final user = selfId ?? await _tokenStore.readUserId();
       final conversations = await _api.conversations(limit: 100);
       await _dao.upsertConversations(conversations, selfId: user);
 
       for (final conversation in conversations) {
-        final cursor = await _dao.localMaxSeq(conversation.id);
-        if (conversation.lastSeq <= cursor) continue;
-        await _syncConversation(conversation.id, cursor);
+        try {
+          await _serializeMessages(
+            conversation.id,
+            () => _syncSummary(conversation),
+          );
+        } catch (error) {
+          debugPrint('ChatSocket conversation sync failed: $error');
+        }
       }
     } catch (error) {
       debugPrint('ChatSocket sync failed: $error');
     } finally {
       _syncing = false;
+      _syncBarrier = null;
+      barrier.complete();
     }
   }
 
-  /// Fetches missed messages for one conversation, following `latest_seq` until
-  /// the local cursor catches up.
-  Future<void> _syncConversation(String conversationId, int afterSeq) async {
+  Future<void> _serializeMessages(
+    String conversationId,
+    Future<void> Function() action,
+  ) {
+    final previous = _messageQueues[conversationId] ?? Future<void>.value();
+    final result = previous.then((_) => action());
+    final tail = result.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {},
+    );
+    _messageQueues[conversationId] = tail;
+    unawaited(
+      tail.then((_) {
+        if (identical(_messageQueues[conversationId], tail)) {
+          _messageQueues.remove(conversationId);
+        }
+      }),
+    );
+    return result;
+  }
+
+  Future<void> _syncSummary(Conversation conversation) async {
+    final cursor = await _dao.localMaxSeq(conversation.id);
+    final latest = conversation.lastMessage;
+    if (latest != null &&
+        latest.conversationId == conversation.id &&
+        latest.seq > 0 &&
+        latest.seq <= cursor &&
+        latest.type == 'text' &&
+        isEncryptedContent(latest.content) &&
+        latest.senderId != await _tokenStore.readUserId() &&
+        !await _alreadyReadable(latest)) {
+      final result = await _api.sync(
+        conversation.id,
+        afterSeq: latest.seq - 1,
+        limit: 1,
+      );
+      if (result.messages.length == 1) {
+        final candidate = result.messages.single;
+        if (candidate.conversationId == conversation.id &&
+            candidate.seq == latest.seq &&
+            candidate.clientMsgId == latest.clientMsgId &&
+            candidate.id == latest.id &&
+            candidate.senderId == latest.senderId &&
+            candidate.type == latest.type &&
+            candidate.content == latest.content) {
+          final previous = _recoveryCursors[conversation.id];
+          final start = previous?.$1 == latest.clientMsgId ? previous!.$2 : 0;
+          if (start >= latest.seq) {
+            await _persistServerMessage(candidate);
+          } else {
+            final recovered = await _syncConversation(
+              conversation.id,
+              start,
+              throughSeq: latest.seq,
+            );
+            _recoveryCursors[conversation.id] = (latest.clientMsgId, recovered);
+          }
+        }
+      }
+    }
+    if (conversation.lastSeq > cursor) {
+      await _syncConversation(conversation.id, cursor);
+    }
+  }
+
+  Future<int> _syncConversation(String conversationId, int afterSeq, {int? throughSeq}) async {
     var cursor = afterSeq;
     for (var page = 0; page < 50; page += 1) {
-      final result = await _api.sync(conversationId, afterSeq: cursor);
-      if (result.messages.isEmpty) return;
-      await storeServerMessages(result.messages);
-      cursor = result.messages.last.seq;
-      if (cursor >= result.latestSeq) return;
-    }
-  }
-
-  /// Decrypts and stores messages fetched outside the live stream (sync and
-  /// history pagination), so a 1:1 ciphertext never reaches the local mirror
-  /// raw and overwrites the plaintext an optimistic send created.
-  ///
-  /// A message already stored as plaintext is never decrypted again. The
-  /// receiving chain has moved past it, so a second attempt would fail and
-  /// (before) could leave the chain in a worse position than it started.
-  Future<void> storeServerMessages(List<Message> messages) async {
-    for (final message in messages) {
-      if (await _alreadyReadable(message.clientMsgId)) {
-        await _dao.upsertServerMessage(message, status: 'sent');
-        continue;
+      if (throughSeq != null && cursor >= throughSeq) return cursor;
+      final limit = throughSeq == null ? 200 : min(200, throughSeq - cursor);
+      final result = await _api.sync(conversationId, afterSeq: cursor, limit: limit);
+      if (result.messages.isEmpty) return cursor;
+      for (final message in result.messages) {
+        if (message.conversationId != conversationId ||
+            message.seq != cursor + 1) {
+          throw StateError('Invalid sync message ordering');
+        }
+        await _persistServerMessage(message);
+        cursor = message.seq;
       }
-      await _persistServerMessage(message);
+      if (cursor >= result.latestSeq) return cursor;
+    }
+    return cursor;
+  }
+
+  Future<void> storeServerMessages(List<Message> messages) async {
+    final barrier = _syncBarrier;
+    if (barrier != null) await barrier.future;
+    final groups = <String, List<Message>>{};
+    for (final message in messages) {
+      (groups[message.conversationId] ??= []).add(message);
+    }
+    for (final entry in groups.entries) {
+      entry.value.sort((a, b) => a.seq.compareTo(b.seq));
+      await _serializeMessages(entry.key, () async {
+        var blocked = false;
+        for (final message in entry.value) {
+          final cursor = await _dao.localMaxSeq(entry.key);
+          if (!blocked && message.seq > cursor + 1) {
+            var synced = cursor;
+            try {
+              synced = await _syncConversation(entry.key, cursor);
+            } catch (error) {
+              debugPrint('ChatSocket history sync failed: $error');
+            }
+            blocked = synced < message.seq - 1;
+          }
+          if (blocked && isEncryptedContent(message.content)) {
+            await _dao.upsertServerMessage(Message(
+              id: message.id,
+              conversationId: message.conversationId,
+              seq: message.seq,
+              senderId: message.senderId,
+              clientMsgId: message.clientMsgId,
+              type: message.type,
+              content: undecryptableContent,
+              createdAt: message.createdAt,
+            ));
+          } else {
+            await _persistServerMessage(message);
+          }
+        }
+      });
     }
   }
 
-  /// True when the local row for this message already holds its plaintext, so
-  /// re-decrypting the server body would only move (or break) the ratchet.
-  Future<bool> _alreadyReadable(String clientMsgId) async {
-    final existing = await _dao.message(clientMsgId);
-    if (existing == null) return false;
-    return !isEncryptedContent(existing.content) && existing.content != undecryptableContent;
+  Future<bool> _alreadyReadable(Message message) async {
+    final existing = await _dao.message(message.clientMsgId);
+    if (existing == null ||
+        existing.conversationId != message.conversationId ||
+        (existing.seq != null && existing.seq != message.seq)) {
+      return false;
+    }
+    return !isEncryptedContent(existing.content) &&
+        existing.content != undecryptableContent;
   }
 
   /// Adds a message to the outbox and sends it if the socket is up.
@@ -291,7 +410,12 @@ class ChatSocket {
       wireContent: wireContent,
       createdAt: DateTime.now().toUtc(),
     );
-    if (!_writeSend(conversationId, clientMsgId, wireContent ?? content, type)) {
+    if (!_writeSend(
+      conversationId,
+      clientMsgId,
+      wireContent ?? content,
+      type,
+    )) {
       unawaited(connect());
     }
   }
@@ -303,7 +427,9 @@ class ChatSocket {
   /// server happens to answer.
   Future<void> retry(String conversationId, String clientMsgId) async {
     final pending = await _dao.pendingOutbox();
-    final entry = pending.where((item) => item.clientMsgId == clientMsgId).firstOrNull;
+    final entry = pending
+        .where((item) => item.clientMsgId == clientMsgId)
+        .firstOrNull;
     if (entry == null) return;
 
     await _dao.markPending(clientMsgId);
@@ -356,7 +482,12 @@ class ChatSocket {
     }
   }
 
-  bool _writeSend(String conversationId, String clientMsgId, String content, String type) {
+  bool _writeSend(
+    String conversationId,
+    String clientMsgId,
+    String content,
+    String type,
+  ) {
     final sent = _write({
       'type': 'send',
       'conversation_id': conversationId,
@@ -442,7 +573,7 @@ class ChatSocket {
 
   Future<void> _handleMessage(Map<String, dynamic> frame) async {
     try {
-      var message = Message.fromJson({
+      final message = Message.fromJson({
         'id': frame['message_id'],
         'conversation_id': frame['conversation_id'],
         'seq': frame['seq'],
@@ -453,17 +584,20 @@ class ChatSocket {
         'created_at': frame['created_at'],
       });
 
-      // A gap means frames were missed (e.g. a socket hiccup). Sync first so the
-      // local history stays ordered by seq.
-      final localMax = await _dao.localMaxSeq(message.conversationId);
-      if (message.seq > localMax + 1) {
-        await _syncConversation(message.conversationId, localMax);
-      }
-
-      // An inbound `message` (including the echo of our own send) is on the
-      // server, so it reconciles a still-`pending` row to `sent`.
-      await _persistServerMessage(message);
-      acknowledgeDelivered(message.conversationId, message.seq);
+      final barrier = _syncBarrier;
+      if (barrier != null) await barrier.future;
+      await _serializeMessages(message.conversationId, () async {
+        final localMax = await _dao.localMaxSeq(message.conversationId);
+        if (message.seq > localMax + 1) {
+          final synced = await _syncConversation(
+            message.conversationId,
+            localMax,
+          );
+          if (synced < message.seq - 1) return;
+        }
+        await _persistServerMessage(message);
+        acknowledgeDelivered(message.conversationId, message.seq);
+      });
     } catch (error) {
       debugPrint('ChatSocket failed to persist message: $error');
     }
@@ -475,13 +609,18 @@ class ChatSocket {
     // Already-decrypted content must not be decrypted a second time: the
     // receiving chain has advanced past this message, so the retry fails and
     // the local bubble would regress to a placeholder.
-    if (await _alreadyReadable(message.clientMsgId)) {
+    if (await _alreadyReadable(message)) {
       await _dao.upsertServerMessage(message, status: 'sent');
       return;
     }
 
     final plaintext = await _decryptForStorage(message);
-    final stored = plaintext == null || plaintext == message.content
+    final content =
+        isEncryptedContent(message.content) &&
+            (plaintext == null || isEncryptedContent(plaintext))
+        ? undecryptableContent
+        : plaintext ?? message.content;
+    final stored = content == message.content
         ? message
         : Message(
             id: message.id,
@@ -490,20 +629,19 @@ class ChatSocket {
             senderId: message.senderId,
             clientMsgId: message.clientMsgId,
             type: message.type,
-            content: plaintext,
+            content: content,
             createdAt: message.createdAt,
           );
     await _dao.upsertServerMessage(stored, status: 'sent');
   }
 
-  /// Decrypts a body for storage. A failed decrypt keeps the ciphertext rather
-  /// than dropping the message, so it can be retried after keys are available.
   Future<String?> _decryptForStorage(Message message) async {
     final decryptor = decrypt;
     if (decryptor == null || message.type != 'text') return null;
     if (!isEncryptedContent(message.content)) return null;
     try {
-      final isGroup = await _dao.conversationType(message.conversationId) == 'group';
+      final isGroup =
+          await _dao.conversationType(message.conversationId) == 'group';
       return await decryptor(
         message.conversationId,
         message.clientMsgId,
@@ -513,12 +651,16 @@ class ChatSocket {
       );
     } catch (error, stack) {
       debugPrint('ChatSocket could not decrypt message: $error');
-      logger?.error('e2ee', 'decrypt threw', meta: {
-        'message_id': message.clientMsgId,
-        'conversation_id': message.conversationId,
-        'sender_id': message.senderId,
-        'exception': error.runtimeType.toString(),
-      });
+      logger?.error(
+        'e2ee',
+        'decrypt threw',
+        meta: {
+          'message_id': message.clientMsgId,
+          'conversation_id': message.conversationId,
+          'sender_id': message.senderId,
+          'exception': error.runtimeType.toString(),
+        },
+      );
       CrashReporter.record(error, stack, reason: 'e2ee_decrypt_failed');
       return null;
     }
@@ -550,10 +692,14 @@ class ChatSocket {
     final code = frame['code'];
     final message = frame['message'];
     debugPrint('ChatSocket server error: $code $message');
-    logger?.warn('ws', 'server error frame', meta: {
-      if (code is String) 'code': code,
-      if (message is String) 'detail': message,
-    });
+    logger?.warn(
+      'ws',
+      'server error frame',
+      meta: {
+        if (code is String) 'code': code,
+        if (message is String) 'detail': message,
+      },
+    );
 
     final clientMsgId = frame['client_msg_id'];
     if (clientMsgId is String && clientMsgId.isNotEmpty) {
@@ -570,7 +716,10 @@ class ChatSocket {
     final seq = frame['seq'];
     final readCount = frame['read_count'];
     final memberCount = frame['member_count'];
-    if (conversationId is! String || seq is! num || readCount is! num || memberCount is! num) {
+    if (conversationId is! String ||
+        seq is! num ||
+        readCount is! num ||
+        memberCount is! num) {
       return;
     }
 
@@ -595,11 +744,12 @@ class ChatSocket {
     final selfId = await _tokenStore.readUserId();
     try {
       final conversation = await _api.conversation(conversationId);
-      await _dao.upsertConversation(conversation, selfId: selfId);
-      final cursor = await _dao.localMaxSeq(conversationId);
-      if (conversation.lastSeq > cursor) {
-        await _syncConversation(conversationId, cursor);
-      }
+      final barrier = _syncBarrier;
+      if (barrier != null) await barrier.future;
+      await _serializeMessages(conversationId, () async {
+        await _dao.upsertConversation(conversation, selfId: selfId);
+        await _syncSummary(conversation);
+      });
     } on ApiException catch (error) {
       if (error.statusCode == 403 || error.statusCode == 404) {
         await _dao.deleteConversation(conversationId);

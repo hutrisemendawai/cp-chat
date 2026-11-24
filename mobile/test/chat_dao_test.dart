@@ -442,4 +442,181 @@ void main() {
       expect(row!.content, 'hello');
     });
   });
+
+  group('preview reconciliation', () {
+    const cipher = 'e2ee:v1:{"ct":"secret"}';
+    final t1 = DateTime.utc(2026, 2, 1);
+    final t2 = DateTime.utc(2026, 2, 2);
+
+    Future<void> enqueue(String id, String content, DateTime time) => dao.enqueueOutgoing(
+          clientMsgId: id,
+          conversationId: 'conv-1',
+          senderId: 'me',
+          type: 'text',
+          content: content,
+          wireContent: cipher,
+          createdAt: time,
+        );
+
+    test('both upserts resolve plaintext and retain peer metadata', () async {
+      await dao.upsertConversations([
+        conversation('conv-1', selfId: 'me', peerName: 'Bob', peerNickname: 'b'),
+      ], selfId: 'me');
+      await dao.upsertServerMessage(message('a', seq: 3, content: 'readable'));
+      final summary = conversation('conv-1', selfId: 'me', lastSeq: 3,
+          lastMessage: message('a', seq: 3, content: cipher));
+      await dao.upsertConversations([summary]);
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'readable');
+      await dao.upsertConversation(summary);
+      final row = (await dao.conversation('conv-1'))!;
+      expect(row.lastMessagePreview, 'readable');
+      expect(row.peerName, 'Bob');
+      expect(row.peerNickname, 'b');
+    });
+
+    test('sequence matching and cross-conversation identity are isolated', () async {
+      await dao.upsertServerMessage(message('local', seq: 4, content: 'local text'));
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 4,
+          lastMessage: message('server', seq: 4, content: cipher)));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'local text');
+      await dao.upsertServerMessage(message('same-id', conversationId: 'other', seq: 5,
+          content: 'other secret'));
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 5,
+          lastMessage: message('same-id', seq: 5, content: cipher)));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'Encrypted message');
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 6,
+          lastMessage: message('new', seq: 6, content: undecryptableContent)));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'Encrypted message');
+    });
+
+    test('equal summary preserves plaintext but newer ciphertext does not', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 2,
+          lastMessage: message('a', seq: 2, content: 'known')));
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 2,
+          lastMessage: message('a', seq: 2, content: cipher)));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'known');
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 3,
+          lastMessage: message('b', seq: 3, content: cipher)));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'Encrypted message');
+    });
+
+    test('stale and empty summaries and explicit cursor reset', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 5,
+          lastMessage: message('new', seq: 5, content: 'newest')));
+      await dao.upsertConversations([conversation('conv-1', selfId: 'me', lastSeq: 2,
+          lastMessage: message('old', seq: 2, content: 'old'))]);
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'newest');
+      expect((await dao.conversation('conv-1'))!.lastSeq, 5);
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 5));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, isNull);
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 1),
+          preserveLocalCursor: false);
+      expect((await dao.conversation('conv-1'))!.lastSeq, 1);
+    });
+
+    test('group text and attachments retain normal previews', () async {
+      await dao.upsertConversation(conversation('group', selfId: 'me', type: 'group',
+          lastSeq: 1, lastMessage: message('g', conversationId: 'group', content: 'team')));
+      expect((await dao.conversation('group'))!.lastMessagePreview, 'team');
+      await dao.upsertServerMessage(message('img', conversationId: 'group', seq: 2,
+          type: 'image', content: cipher));
+      expect((await dao.conversation('group'))!.lastMessagePreview, 'Sent an attachment');
+    });
+
+    test('pending previews survive refresh, history, echo, and ack', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      await enqueue('first', 'first text', t1);
+      final first = (await dao.conversation('conv-1'))!;
+      expect(first.lastSeq, 0);
+      expect(first.lastMessagePreview, 'first text');
+      expect(first.updatedAt.millisecondsSinceEpoch, t1.millisecondsSinceEpoch);
+      await enqueue('second', 'second text', t2);
+      await dao.upsertConversations([conversation('conv-1', selfId: 'me')]);
+      await dao.upsertServerMessage(message('old', seq: 1, content: 'history'));
+      await dao.upsertServerMessage(message('first', seq: 2, senderId: 'me', content: cipher));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'second text');
+      await dao.applyStatus('first', 'read', seq: 2);
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'second text');
+      await dao.applyStatus('second', 'sent', seq: 3);
+      await dao.upsertServerMessage(message('second', seq: 3, senderId: 'me', content: cipher));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'second text');
+      expect(await dao.pendingOutbox(), isEmpty);
+    });
+
+    test('newer ack before older ack or echo keeps the newer preview', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      await enqueue('first', 'first', t1);
+      await enqueue('second', 'second', t2);
+      await dao.applyStatus('second', 'sent', seq: 2);
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'second');
+      await dao.upsertServerMessage(message('first', seq: 1, content: cipher));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'second');
+      await dao.applyStatus('first', 'read', seq: 1);
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'second');
+    });
+
+    test('unsequenced ack and equal timestamps keep newest pending', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      await enqueue('first', 'first', t1);
+      await enqueue('second', 'second', t1);
+      await dao.applyStatus('first', 'sent');
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'second');
+      await dao.upsertServerMessage(message('first', seq: 1, content: cipher));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'second');
+    });
+
+    test('history and unreadable equality cannot regress preview', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 4,
+          lastMessage: message('latest', seq: 4, content: 'latest')));
+      await dao.upsertServerMessage(message('old', seq: 2, content: 'old', createdAt: t2));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'latest');
+      await dao.upsertServerMessage(message('latest', seq: 4, content: undecryptableContent));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'latest');
+      await dao.upsertServerMessage(message('latest', seq: 4, content: 'decrypted'));
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'decrypted');
+    });
+
+    test('deleting pending and retry preserve correct preview and wire body', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      await dao.upsertServerMessage(message('server', seq: 1, content: 'server text'));
+      await enqueue('first', 'first', t1);
+      await enqueue('second', 'second', t2);
+      await dao.deleteMessage('second');
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'first');
+      await dao.markFailed('first');
+      await dao.markPending('first');
+      expect((await dao.pendingOutbox()).single.wireContent, cipher);
+      await dao.deleteMessage('first');
+      var current = (await dao.conversation('conv-1'))!;
+      expect(current.lastMessagePreview, 'server text');
+      expect(current.updatedAt.millisecondsSinceEpoch, DateTime.utc(2026, 1, 1).millisecondsSinceEpoch);
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 1,
+          lastMessage: message('server', seq: 1, content: 'server text')));
+      current = (await dao.conversation('conv-1'))!;
+      expect(current.updatedAt.millisecondsSinceEpoch, DateTime.utc(2026, 1, 1).millisecondsSinceEpoch);
+    });
+
+    test('conflicting server sequence rolls back message and outbox changes', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      await dao.upsertServerMessage(message('existing', seq: 1, content: 'server'));
+      await enqueue('pending', 'local', t1);
+      await expectLater(
+        dao.upsertServerMessage(message('pending', seq: 1, content: cipher)),
+        throwsA(anything),
+      );
+      expect((await dao.message('pending'))!.seq, isNull);
+      expect((await dao.pendingOutbox()).single.clientMsgId, 'pending');
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'local');
+    });
+
+    test('older ack restores newer server preview', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      await dao.upsertServerMessage(message('new', seq: 10, content: 'newest'));
+      await enqueue('old-pending', 'queued', t1);
+      await dao.applyStatus('old-pending', 'sent', seq: 2);
+      expect((await dao.conversation('conv-1'))!.lastMessagePreview, 'newest');
+    });
+  });
+
 }
