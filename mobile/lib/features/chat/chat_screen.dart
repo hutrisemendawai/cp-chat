@@ -29,8 +29,9 @@ class ChatScreen extends ConsumerStatefulWidget {
   ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends ConsumerState<ChatScreen> {
+class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObserver {
   final _composer = TextEditingController();
+  final _composerFocusNode = FocusNode();
   final _scrollController = ScrollController();
   bool _sending = false;
   bool _uploading = false;
@@ -38,17 +39,27 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _loadingOlder = false;
   bool _hasMoreHistory = true;
 
+  /// The feed is reversed, so offset 0 is the newest message right above the
+  /// composer. This tracks whether the user is still reading the live edge.
+  bool _isNearBottom = true;
+  double _viewInsetBottom = 0;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _composer.addListener(() => setState(() {}));
+    _composerFocusNode.addListener(_onComposerFocus);
     _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _onOpen());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _composer.dispose();
+    _composerFocusNode.removeListener(_onComposerFocus);
+    _composerFocusNode.dispose();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
@@ -58,9 +69,29 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// unread badge honest for messages the user has not scrolled to yet.
   void _onScroll() {
     if (!_scrollController.hasClients) return;
-    final position = _scrollController.position;
-    if (position.pixels >= position.maxScrollExtent - 40) {
+    _isNearBottom = _scrollController.position.pixels <= 80;
+    if (_isNearBottom) {
       unawaited(ref.read(chatControllerProvider(widget.conversationId)).markRead());
+    }
+  }
+
+  /// The soft keyboard shrinks the viewport from the bottom. When the user is at
+  /// the live edge, re-pin to offset 0 so the newest message stays visible above
+  /// the composer instead of being covered.
+  @override
+  void didChangeMetrics() {
+    if (!mounted) return;
+    final inset = View.of(context).viewInsets.bottom;
+    final opening = inset > _viewInsetBottom;
+    _viewInsetBottom = inset;
+    if (opening && _isNearBottom) {
+      unawaited(_scrollToBottom());
+    }
+  }
+
+  void _onComposerFocus() {
+    if (_composerFocusNode.hasFocus && _isNearBottom) {
+      unawaited(_scrollToBottom());
     }
   }
 
@@ -173,7 +204,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _scrollToBottom() async {
     await WidgetsBinding.instance.endOfFrame;
     if (!_scrollController.hasClients) return;
-    _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+    // A reversed feed anchors the newest message at offset 0.
+    _scrollController.jumpTo(0);
+    _isNearBottom = true;
   }
 
   @override
@@ -231,9 +264,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         for (final member in metadata.value!.members) member.user.id: member.user.displayName,
     };
 
-    ref.listen(messagesProvider(widget.conversationId), (_, _) {
-      // Incoming messages while the screen is open are read immediately.
+    ref.listen(messagesProvider(widget.conversationId), (previous, next) {
       unawaited(ref.read(chatControllerProvider(widget.conversationId)).markRead());
+      final items = next.value;
+      if (items == null || items.isEmpty) return;
+      final previousItems = previous?.value;
+      final grew = previousItems == null || items.length > previousItems.length;
+      if (!grew) return;
+      // Follow the live edge when the user sent the message or is already at the
+      // bottom; never yank someone who scrolled up to read history.
+      if (items.last.senderId == selfId || _isNearBottom) {
+        unawaited(_scrollToBottom());
+      }
     });
 
     return Scaffold(
@@ -339,13 +381,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 }
                 return ListView.builder(
                   controller: _scrollController,
+                  // Reversed so offset 0 is the newest message pinned right above
+                  // the composer; the keyboard then pushes the thread up instead
+                  // of covering it.
+                  reverse: true,
+                  physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.symmetric(
                     horizontal: AppSpacing.pageMargin,
                     vertical: AppSpacing.lg,
                   ),
                   itemCount: items.length + (_hasMoreHistory ? 1 : 0),
                   itemBuilder: (context, index) {
-                    if (_hasMoreHistory && index == 0) {
+                    if (_hasMoreHistory && index == items.length) {
                       return Center(
                         child: TextButton(
                           onPressed: _loadingOlder ? null : _loadOlder,
@@ -353,7 +400,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         ),
                       );
                     }
-                    final message = items[index - (_hasMoreHistory ? 1 : 0)];
+                    final message = items[items.length - 1 - index];
                     return _MessageBubble(
                       message: message,
                       isMine: message.senderId == selfId,
@@ -373,6 +420,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ),
           _Composer(
             controller: _composer,
+            focusNode: _composerFocusNode,
             uploading: _uploading,
             canSend: _composer.text.trim().isNotEmpty && !_sending && !_uploading,
             onPickImage: _pickImage,
@@ -390,6 +438,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 class _Composer extends StatelessWidget {
   const _Composer({
     required this.controller,
+    required this.focusNode,
     required this.uploading,
     required this.canSend,
     required this.onPickImage,
@@ -398,6 +447,7 @@ class _Composer extends StatelessWidget {
   });
 
   final TextEditingController controller;
+  final FocusNode focusNode;
   final bool uploading;
   final bool canSend;
   final VoidCallback onPickImage;
@@ -440,6 +490,7 @@ class _Composer extends StatelessWidget {
                     Expanded(
                       child: TextField(
                         controller: controller,
+                        focusNode: focusNode,
                         minLines: 1,
                         maxLines: 5,
                         enabled: !uploading,

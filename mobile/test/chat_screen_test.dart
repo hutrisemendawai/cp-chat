@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +13,7 @@ import 'package:cp_chat/core/network/api_client.dart';
 import 'package:cp_chat/core/network/ws_client.dart';
 import 'package:cp_chat/core/providers.dart';
 import 'package:cp_chat/core/storage/token_store.dart';
+import 'package:cp_chat/features/chat/chat_controller.dart';
 import 'package:cp_chat/features/chat/chat_screen.dart';
 import 'package:cp_chat/features/chat/conversation_metadata.dart';
 
@@ -24,6 +27,20 @@ class _StubChatSocket extends ChatSocket {
 
   @override
   Future<void> acknowledgeRead(String conversationId, int seq) async {}
+}
+
+/// A controller that records sends without touching the socket, so the composer
+/// can be driven deterministically without E2EE or a live connection.
+class _FakeChatController extends ChatController {
+  _FakeChatController(super.ref, super.conversationId);
+
+  final List<String> sent = [];
+
+  @override
+  Future<void> sendText(String text) async => sent.add(text);
+
+  @override
+  Future<void> markRead() async {}
 }
 
 const _selfId = 'me';
@@ -53,6 +70,17 @@ LocalConversation _cachedGroup({String name = 'Weekend Squad'}) => LocalConversa
   updatedAt: DateTime.utc(2026, 1, 1),
 );
 
+LocalMessage _message(int seq, {String senderId = 'u2'}) => LocalMessage(
+  clientMsgId: 'c$seq',
+  conversationId: 'g1',
+  seq: seq,
+  senderId: senderId,
+  type: 'text',
+  content: 'message $seq',
+  createdAt: DateTime.utc(2026, 1, 1).add(Duration(seconds: seq)),
+  status: 'sent',
+);
+
 void main() {
   late AppDatabase database;
 
@@ -70,6 +98,9 @@ void main() {
     Conversation? metadata,
     bool offline = false,
     LocalConversation? cached,
+    List<LocalMessage> messages = const <LocalMessage>[],
+    Stream<List<LocalMessage>>? messageStream,
+    ChatController Function(Ref ref, String conversationId)? chatController,
   }) async {
     await tester.pumpWidget(
       ProviderScope(
@@ -81,19 +112,40 @@ void main() {
             (ref, conversationId) => Stream.value(cached ?? _cachedGroup()),
           ),
           messagesProvider.overrideWith(
-            (ref, conversationId) => Stream.value(const <LocalMessage>[]),
+            (ref, conversationId) => messageStream ?? Stream.value(messages),
           ),
           conversationMetadataProvider.overrideWith(
             (ref, conversationId) =>
                 Future.value(offline ? null : (metadata ?? _groupConversation())),
           ),
+          if (chatController != null)
+            chatControllerProvider.overrideWith(
+              (ref, conversationId) => chatController(ref, conversationId),
+            ),
         ],
         child: router == null
             ? const MaterialApp(home: ChatScreen(conversationId: 'g1'))
             : MaterialApp.router(routerConfig: router),
       ),
     );
-    await tester.pumpAndSettle();
+    // A live stream has not emitted yet, so the feed is still loading (and its
+    // spinner never settles); the caller drives the frames after adding data.
+    if (messageStream == null) {
+      await tester.pumpAndSettle();
+    } else {
+      await tester.pump();
+    }
+  }
+
+  // The chat feed is a reversed ListView; this helper resolves its scroll state
+  // without clashing with the composer's own editable scrollable.
+  ScrollableState feed(WidgetTester tester) => tester.state<ScrollableState>(
+        find.descendant(of: find.byType(ListView), matching: find.byType(Scrollable)),
+      );
+
+  void showKeyboard(WidgetTester tester, {double bottom = 300}) {
+    tester.view.viewInsets = FakeViewPadding(bottom: bottom);
+    addTearDown(tester.view.reset);
   }
 
   testWidgets('group header shows the group name, never a member name', (tester) async {
@@ -142,5 +194,72 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Group info screen'), findsOneWidget);
+  });
+
+  testWidgets('newest message is anchored above the composer', (tester) async {
+    await pumpChat(tester, messages: [_message(1), _message(2), _message(3)]);
+
+    final oldest = tester.getRect(find.text('message 1'));
+    final middle = tester.getRect(find.text('message 2'));
+    final newest = tester.getRect(find.text('message 3'));
+    final composer = tester.getRect(find.byType(TextField));
+
+    expect(oldest.top, lessThan(middle.top));
+    expect(middle.top, lessThan(newest.top));
+    expect(newest.bottom, lessThanOrEqualTo(composer.top));
+  });
+
+  testWidgets('opening the keyboard keeps the newest message above the composer', (tester) async {
+    await pumpChat(tester, messages: [_message(1), _message(2), _message(3)]);
+
+    showKeyboard(tester);
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    final newest = tester.getRect(find.text('message 3'));
+    final composer = tester.getRect(find.byType(TextField));
+    expect(newest.bottom, lessThanOrEqualTo(composer.top));
+  });
+
+  testWidgets('sending a message scrolls the feed to the newest bubble', (tester) async {
+    await pumpChat(
+      tester,
+      messages: [for (var seq = 1; seq <= 40; seq++) _message(seq)],
+      chatController: (ref, conversationId) => _FakeChatController(ref, conversationId),
+    );
+
+    final position = feed(tester).position;
+    expect(position.maxScrollExtent, greaterThan(0));
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pump();
+    expect(position.pixels, greaterThan(0));
+
+    await tester.enterText(find.byType(TextField), 'hello there');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.send));
+    await tester.pumpAndSettle();
+
+    expect(feed(tester).position.pixels, 0);
+  });
+
+  testWidgets('an incoming message does not yank a user reading history', (tester) async {
+    final stream = StreamController<List<LocalMessage>>.broadcast();
+    addTearDown(stream.close);
+
+    await pumpChat(tester, messageStream: stream.stream);
+    stream.add([for (var seq = 1; seq <= 40; seq++) _message(seq)]);
+    await tester.pumpAndSettle();
+
+    final position = feed(tester).position;
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pump();
+    final scrolledAway = position.pixels;
+    expect(scrolledAway, greaterThan(0));
+
+    stream.add([for (var seq = 1; seq <= 41; seq++) _message(seq)]);
+    await tester.pumpAndSettle();
+
+    // Still well away from the live edge instead of being yanked to the bottom.
+    expect(feed(tester).position.pixels, greaterThan(80));
   });
 }
