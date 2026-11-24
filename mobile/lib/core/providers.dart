@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
@@ -13,6 +14,8 @@ import 'models/models.dart';
 import 'network/api_client.dart';
 import 'network/ws_client.dart';
 import 'notifications/fcm_service.dart';
+import 'notifications/local_notification_service.dart';
+import 'notifications/message_notifier.dart';
 import 'notifications/push_registration.dart';
 import 'storage/token_store.dart';
 
@@ -100,6 +103,13 @@ final chatSocketProvider = Provider<ChatSocket>((ref) {
           );
     },
   );
+  // Live inbound messages raise a local notification; the sync/pagination paths
+  // never call this, so catch-up never floods the tray.
+  socket.onIncomingMessage = (message, {String? senderName}) {
+    unawaited(
+      ref.read(messageNotifierProvider).onLiveMessage(message, senderName: senderName),
+    );
+  };
   ref.onDispose(socket.dispose);
   return socket;
 });
@@ -110,6 +120,76 @@ final pushRegistrationProvider = Provider<PushRegistration>((ref) {
   ref.onDispose(() => unawaited(registration.stop()));
   return registration;
 });
+
+/// Android notification-tray integration for incoming messages. Initialized
+/// during bootstrap and independent of Firebase, so self-hosted builds notify.
+final localNotificationServiceProvider = Provider<LocalNotificationService>((ref) {
+  final service = LocalNotificationService();
+  ref.onDispose(() => unawaited(service.dispose()));
+  return service;
+});
+
+/// The app's current lifecycle state, tracking whether it is in the foreground
+/// so a notification for the chat already on screen can be suppressed.
+class AppLifecycleNotifier extends Notifier<AppLifecycleState> {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
+
+  void set(AppLifecycleState state) => this.state = state;
+}
+
+final appLifecycleProvider =
+    NotifierProvider<AppLifecycleNotifier, AppLifecycleState>(AppLifecycleNotifier.new);
+
+/// The conversation currently on screen, set by `ChatScreen` while it is mounted.
+class ActiveConversationNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  void open(String conversationId) => state = conversationId;
+
+  void close(String conversationId) {
+    if (state == conversationId) state = null;
+  }
+
+  void reset() => state = null;
+}
+
+final activeConversationIdProvider =
+    NotifierProvider<ActiveConversationNotifier, String?>(ActiveConversationNotifier.new);
+
+/// Raises local notifications for live incoming messages, applying the DND and
+/// active-chat suppression rules and deduplicating against FCM pushes.
+final messageNotifierProvider = Provider<MessageNotifier>((ref) {
+  final dao = ref.watch(chatDaoProvider);
+  return MessageNotifier(
+    notifications: ref.watch(localNotificationServiceProvider),
+    selfId: () => ref.read(currentUserProvider)?.id,
+    selfStatus: () => ref.read(currentUserProvider)?.status,
+    appResumed: () => ref.read(appLifecycleProvider) == AppLifecycleState.resumed,
+    activeConversationId: () => ref.read(activeConversationIdProvider),
+    resolveNames: (conversationId) async {
+      final row = await dao.conversation(conversationId);
+      if (row == null) return null;
+      if (row.type == 'group') {
+        return (isGroup: true, displayName: row.name ?? 'Group');
+      }
+      return (
+        isGroup: false,
+        displayName: _directPeerLabel(row) ?? row.name ?? 'Chat',
+      );
+    },
+  );
+});
+
+/// "Name (nickname)" from a cached direct-chat peer, or `null` when unnamed.
+String? _directPeerLabel(LocalConversation conversation) {
+  final name = conversation.peerName;
+  if (name == null || name.isEmpty) return null;
+  final nickname = conversation.peerNickname?.trim();
+  if (nickname == null || nickname.isEmpty) return name;
+  return '$name ($nickname)';
+}
 
 /// Owns the realtime session lifecycle: it boots the E2EE keys, connects the
 /// chat socket, and starts push registration, then tears all three down on
@@ -158,6 +238,13 @@ class SessionLifecycle {
     await _ref.read(chatSocketProvider).connect();
 
     await _ref.read(pushRegistrationProvider).start();
+
+    // Ask Android 13+ for the notification permission once a session exists.
+    try {
+      await _ref.read(localNotificationServiceProvider).requestPermission();
+    } catch (error) {
+      debugPrint('Notification permission request failed: $error');
+    }
   }
 
   /// Stops realtime work on logout. An in-flight boot is awaited first so a late
@@ -237,6 +324,7 @@ final bootstrapProvider = FutureProvider<void>((ref) async {
   ref.read(deviceIdProvider.notifier).set(deviceId);
 
   await FcmService.initialize();
+  await ref.read(localNotificationServiceProvider).initialize();
 });
 
 /// The authenticated session. `null` means signed out.
@@ -315,6 +403,14 @@ class AuthController extends Notifier<AuthSession?> {
       } catch (error) {
         debugPrint('Logout local clear failed: $error');
       }
+      // Drop any banners so the next account never sees the previous one's
+      // notification, and stop suppressing the last chat's conversation id.
+      try {
+        await ref.read(localNotificationServiceProvider).cancelAll().timeout(logoutStepTimeout);
+      } catch (error) {
+        debugPrint('Logout notification clear failed: $error');
+      }
+      ref.read(activeConversationIdProvider.notifier).reset();
     } finally {
       // Always clear the session locally, even if a step stalled, so the router
       // can redirect to /auth instead of leaving the user on a dead session.

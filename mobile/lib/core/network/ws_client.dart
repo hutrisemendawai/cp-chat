@@ -78,6 +78,12 @@ class ChatSocket {
   })?
   decrypt;
 
+  /// Fired for a live inbound `message` frame once it has been decrypted and
+  /// persisted. Notification code hooks this; the REST sync and history
+  /// pagination paths deliberately do not call it, so bulk catch-up never
+  /// raises a banner.
+  void Function(Message message, {String? senderName})? onIncomingMessage;
+
   final Random _random = Random();
 
   final Map<String, Timer> _sendTimers = {};
@@ -600,9 +606,11 @@ class ChatSocket {
         'content': frame['content'],
         'created_at': frame['created_at'],
       });
+      final senderName = frame['sender_name'] as String?;
 
       final barrier = _syncBarrier;
       if (barrier != null) await barrier.future;
+      var persisted = false;
       await _serializeMessages(message.conversationId, () async {
         final localMax = await _dao.localMaxSeq(message.conversationId);
         if (message.seq > localMax + 1) {
@@ -614,10 +622,34 @@ class ChatSocket {
         }
         await _persistServerMessage(message);
         acknowledgeDelivered(message.conversationId, message.seq);
+        persisted = true;
       });
+      if (persisted) unawaited(_emitIncoming(message, senderName));
     } catch (error) {
       debugPrint('ChatSocket failed to persist message: $error');
     }
+  }
+
+  /// Hands a freshly persisted live message to [onIncomingMessage], reading the
+  /// locally stored (decrypted) body so a notification never carries an
+  /// undecrypted `e2ee:v1:` envelope.
+  Future<void> _emitIncoming(Message message, String? senderName) async {
+    final listener = onIncomingMessage;
+    if (listener == null) return;
+    final stored = await _dao.message(message.clientMsgId);
+    listener(
+      Message(
+        id: message.id,
+        conversationId: message.conversationId,
+        seq: message.seq,
+        senderId: message.senderId,
+        clientMsgId: message.clientMsgId,
+        type: message.type,
+        content: stored?.content ?? message.content,
+        createdAt: message.createdAt,
+      ),
+      senderName: senderName,
+    );
   }
 
   /// Persists one server message after decrypting an E2EE body, so every reader

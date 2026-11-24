@@ -93,6 +93,30 @@ Push notifications are inactive until Firebase is configured:
 Without `google-services.json`, `FcmService.initialize()` logs a warning and the
 app runs normally.
 
+## Notifications
+
+Incoming messages raise a heads-up notification on one high-importance channel
+(`cpchat_messages`, name `Messages`), fed by two independent paths:
+
+- **WebSocket (no Firebase needed).** A live `message` frame is decrypted and,
+  when the rules below allow it, shown with `flutter_local_notifications`. This
+  is what makes notifications work on self-hosted/LAN builds that ship without
+  `google-services.json`.
+- **FCM.** Android paints background/terminated pushes from the FCM
+  `notification` payload and routes them to the `cpchat_messages` channel;
+  foreground pushes are forwarded to the same local channel. A push that repeats
+  a live message is deduplicated by `message_id`.
+
+A notification is suppressed when it is your own message, when the app is
+foregrounded in that exact conversation, or while your presence is set to **Do
+Not Disturb**. Only live frames notify — opening the app and catching up on
+missed messages does not flood the tray.
+
+Android 13+ (API 33+) needs the runtime `POST_NOTIFICATIONS` permission, which
+the app requests once a session starts; the `VIBRATE` permission powers the
+vibration pattern. `flutter_local_notifications` needs core-library desugaring,
+enabled in `android/app/build.gradle.kts`.
+
 ## Layout
 
 ```

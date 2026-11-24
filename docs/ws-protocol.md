@@ -186,6 +186,7 @@ The server replies with `{ "type": "pong" }`.
   "message_id": "9f5a...",
   "seq": 42,
   "sender_id": "u1",
+  "sender_name": "Alice",
   "client_msg_id": "550e8400-e29b-41d4-a716-446655440000",
   "msg_type": "text",
   "content": "Hello!",
@@ -193,6 +194,9 @@ The server replies with `{ "type": "pong" }`.
 }
 ```
 
+- `sender_name` is the sender's display name (`Name (nickname)` when set) and
+  lets the client title a local notification without a REST round trip. It is an
+  additive field: a client that ignores it still renders the message correctly.
 - Ordering is guaranteed by `seq`, never by `created_at`. If a gap is detected
   (`seq > local_latest_seq + 1`) the client calls the REST sync endpoint before
   appending further messages.

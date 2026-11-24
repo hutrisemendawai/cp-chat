@@ -26,12 +26,18 @@ if (hasReleaseKeystore) {
 
 android {
     namespace = "com.cpchat.mobile"
-    compileSdk = flutter.compileSdkVersion
+    // flutter_local_notifications compiles against Android SDK 37, so the app
+    // must compile against at least that. compileSdk is backward compatible;
+    // take the higher of the Flutter default and the plugin's requirement.
+    compileSdk = maxOf(flutter.compileSdkVersion, 37)
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // flutter_local_notifications uses java.time on Android; desugaring
+        // back-ports it to the app's minSdk (24).
+        isCoreLibraryDesugaringEnabled = true
     }
 
     defaultConfig {
@@ -111,4 +117,8 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }

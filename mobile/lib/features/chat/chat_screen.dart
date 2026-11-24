@@ -44,19 +44,29 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
   bool _isNearBottom = true;
   double _viewInsetBottom = 0;
 
+  /// Captured in initState so the provider can be updated from dispose without
+  /// touching `ref`, which is unsafe once the widget is unmounted.
+  late final ActiveConversationNotifier _activeConversation;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _activeConversation = ref.read(activeConversationIdProvider.notifier);
     _composer.addListener(() => setState(() {}));
     _composerFocusNode.addListener(_onComposerFocus);
     _scrollController.addListener(_onScroll);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _onOpen());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _activeConversation.open(widget.conversationId);
+      _onOpen();
+    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _activeConversation.close(widget.conversationId);
     _composer.dispose();
     _composerFocusNode.removeListener(_onComposerFocus);
     _composerFocusNode.dispose();
@@ -96,6 +106,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
   }
 
   Future<void> _onOpen() async {
+    // Opening the chat clears any banner already raised for it.
+    unawaited(
+      ref.read(localNotificationServiceProvider).cancelForConversation(widget.conversationId),
+    );
     final controller = ref.read(chatControllerProvider(widget.conversationId));
     // Catch up on anything missed, then mark the newest message read.
     await ref.read(chatSocketProvider).syncAll(selfId: ref.read(currentUserProvider)?.id);

@@ -60,6 +60,10 @@ abstract final class FcmService {
   static Stream<RemoteMessage> get onNotificationTap =>
       FirebaseMessaging.onMessageOpenedApp;
 
+  /// Fires for messages received while the app is foregrounded. Android does
+  /// not paint a tray notification for these, so the app surfaces one itself.
+  static Stream<RemoteMessage> get onForegroundMessage => FirebaseMessaging.onMessage;
+
   /// The notification that launched the app from a terminated state, if any.
   static Future<RemoteMessage?> initialMessage() =>
       FirebaseMessaging.instance.getInitialMessage();

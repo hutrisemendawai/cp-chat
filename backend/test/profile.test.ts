@@ -349,6 +349,9 @@ describe('dnd notification suppression', () => {
         body: 'y',
         conversationId: 'c',
         messageId: 'm',
+        senderName: 'Alice',
+        conversationName: '',
+        type: 'text',
       });
     }
     expect(sent).toHaveLength(0);
@@ -365,6 +368,9 @@ describe('dnd notification suppression', () => {
       body: 'y',
       conversationId: 'c',
       messageId: 'm',
+      senderName: 'Alice',
+      conversationName: '',
+      type: 'text',
     })).toEqual([]);
   });
 });

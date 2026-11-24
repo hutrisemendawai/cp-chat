@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
 
     <application
         android:label="CP Chat"
@@ -42,10 +43,10 @@
             android:value="2" />
 
         <!-- Route FCM notifications whose payload omits a channel to the same
-             high-importance channel MainActivity creates at startup. -->
+             high-importance channel the app creates at startup. -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="messages" />
+            android:value="cpchat_messages" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

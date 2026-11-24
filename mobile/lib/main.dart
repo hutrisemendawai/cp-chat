@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
@@ -146,19 +147,30 @@ class CpChatApp extends ConsumerStatefulWidget {
   ConsumerState<CpChatApp> createState() => _CpChatAppState();
 }
 
-class _CpChatAppState extends ConsumerState<CpChatApp> {
-  StreamSubscription<dynamic>? _tapSubscription;
+class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserver {
+  StreamSubscription<dynamic>? _fcmTapSubscription;
+  StreamSubscription<String>? _localTapSubscription;
+  StreamSubscription<RemoteMessage>? _foregroundSubscription;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
   }
 
   @override
   void dispose() {
-    _tapSubscription?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _fcmTapSubscription?.cancel();
+    _localTapSubscription?.cancel();
+    _foregroundSubscription?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    ref.read(appLifecycleProvider.notifier).set(state);
   }
 
   Future<void> _bootstrap() async {
@@ -180,20 +192,54 @@ class _CpChatAppState extends ConsumerState<CpChatApp> {
       await ref.read(sessionRuntimeProvider.notifier).start();
     }
 
-    _tapSubscription ??= FcmService.onNotificationTap.listen(_openFromMessage);
+    // Local notifications are independent of Firebase, so they are always
+    // wired; FCM streams are only touched when Firebase actually initialized.
+    final notifications = ref.read(localNotificationServiceProvider);
+    _localTapSubscription ??= notifications.onNotificationTap.listen(_openConversation);
+    if (FcmService.isAvailable) {
+      _fcmTapSubscription ??= FcmService.onNotificationTap.listen(_openFromMessage);
+      _foregroundSubscription ??=
+          FcmService.onForegroundMessage.listen(_onForegroundMessage);
+    }
+
+    // A notification that launched the app from terminated routes straight in.
+    final coldStart = notifications.coldStartConversationId;
+    if (coldStart != null) _openConversation(coldStart);
     await _routeFromInitialNotification();
   }
 
   Future<void> _routeFromInitialNotification() async {
+    if (!FcmService.isAvailable) return;
     final initial = await FcmService.initialMessage();
     if (initial != null) _openFromMessage(initial);
+  }
+
+  /// A foreground FCM push is only surfaced when the local rules allow it; a
+  /// message that also arrives over the socket is deduplicated by id.
+  void _onForegroundMessage(RemoteMessage message) {
+    final conversationId = message.data['conversation_id'] as String?;
+    final messageId = message.data['message_id'] as String?;
+    if (conversationId == null || messageId == null) return;
+    unawaited(
+      ref.read(messageNotifierProvider).onForegroundFcm(
+        conversationId: conversationId,
+        messageId: messageId,
+        title: message.notification?.title ?? 'New message',
+        body: message.notification?.body ?? 'New message',
+      ),
+    );
+  }
+
+  void _openConversation(String conversationId) {
+    if (conversationId.isEmpty) return;
+    ref.read(routerProvider).push('/conversations/$conversationId');
   }
 
   void _openFromMessage(dynamic message) {
     try {
       final conversationId = message.data['conversation_id'] as String?;
       if (conversationId == null) return;
-      ref.read(routerProvider).push('/conversations/$conversationId');
+      _openConversation(conversationId);
     } catch (_) {
       // Malformed payloads are ignored; the chat list still works.
     }

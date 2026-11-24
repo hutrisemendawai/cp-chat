@@ -11,6 +11,9 @@ export type PushPayload = {
   body: string;
   conversationId: string;
   messageId: string;
+  senderName: string;
+  conversationName: string;
+  type: string;
 };
 
 /**
@@ -71,10 +74,13 @@ export class NotificationService {
         data: {
           conversation_id: payload.conversationId,
           message_id: payload.messageId,
+          sender_name: payload.senderName,
+          conversation_name: payload.conversationName,
+          type: payload.type,
         },
         android: {
           priority: 'high',
-          notification: { channelId: 'messages', sound: 'default' },
+          notification: { channelId: 'cpchat_messages', sound: 'default' },
         },
       });
 

@@ -7,13 +7,14 @@ import type { Config } from '../config.js';
 import type { Logger } from '../lib/logger.js';
 import { ApiError } from '../lib/errors.js';
 import { isUuidV4 } from '../lib/ids.js';
-import { parseMessageContent } from '../lib/e2ee.js';
+import { isEncryptedContent, parseMessageContent } from '../lib/e2ee.js';
 import { withSpan } from '../lib/tracing.js';
 import { redisKeys, type Cache } from '../lib/redis.js';
 import { verifyAccessToken } from '../lib/tokens.js';
 import type { NotificationService } from '../lib/fcm.js';
 import type { AppContext } from '../http/context.js';
 import type { MessageRow } from '../domain/messages.js';
+import type { ConversationRow } from '../domain/conversations.js';
 import type { UserStatus } from '../domain/users.js';
 import { USER_STATUSES } from '../domain/users.js';
 import type { Broker, BroadcastPayload, RoutedPayload } from '../lib/broker.js';
@@ -462,12 +463,17 @@ export class ChatGateway {
     // than written to a local socket.
     const origin = this.deviceSocket(send.sender_id, send.device_id);
 
+    const conversation = await this.ctx.conversations.getRow(message.conversation_id);
+    const sender = await this.ctx.users.findById(message.sender_id);
+    const senderName = this.senderLabel(sender);
+
     const messageEvent = {
       type: 'message',
       conversation_id: message.conversation_id,
       message_id: message.id,
       seq: message.seq,
       sender_id: message.sender_id,
+      sender_name: senderName,
       client_msg_id: message.client_msg_id,
       msg_type: message.type,
       content: message.content,
@@ -511,7 +517,6 @@ export class ChatGateway {
     await this.deliverToOtherDevices(send.sender_id, send.device_id, messageEvent);
 
     const members = await this.ctx.members.ids(message.conversation_id);
-    const conversation = await this.ctx.conversations.getRow(message.conversation_id);
 
     // Fan-out on write. Recipients are independent, so deliver in parallel
     // instead of serializing a round trip per member in a 500-person group.
@@ -520,7 +525,7 @@ export class ChatGateway {
         .filter((memberId) => memberId !== send.sender_id)
         .map(async (memberId) => {
           await this.route(memberId, messageEvent);
-          await this.maybeNotify(memberId, message, conversation?.type === 'group');
+          await this.maybeNotify(memberId, message, conversation, senderName);
         }),
     );
   }
@@ -575,10 +580,23 @@ export class ChatGateway {
     return nickname ? `${sender.name} (${nickname})` : sender.name;
   }
 
+  /**
+   * The push body for a message. A direct-chat body is an E2EE envelope the
+   * server cannot read, so it is reported as `Encrypted message` rather than
+   * leaking the ciphertext into the notification tray.
+   */
+  private notificationPreview(message: MessageRow): string {
+    if (message.type === 'image') return 'Sent an image';
+    if (message.type === 'file') return 'Sent a file';
+    if (isEncryptedContent(message.content)) return 'Encrypted message';
+    return message.content;
+  }
+
   private async maybeNotify(
     userId: string,
     message: MessageRow,
-    isGroup: boolean,
+    conversation: ConversationRow | null,
+    senderName: string,
   ): Promise<void> {
     if (!this.notifications.enabled) return;
     const onlineDevices = await this.registry.liveDevices(userId);
@@ -593,17 +611,22 @@ export class ChatGateway {
     const tokens = await this.ctx.devices.tokensForUser(userId);
     if (tokens.length === 0) return;
 
-    const sender = await this.ctx.users.findById(message.sender_id);
-    const senderName = this.senderLabel(sender);
-    const body = message.type === 'text' ? message.content : 'Sent an attachment';
+    const isGroup = conversation?.type === 'group';
+    const conversationName = conversation?.name ?? '';
+    const preview = this.notificationPreview(message);
+    const title = isGroup ? conversationName || senderName : senderName;
+    const body = isGroup ? `${senderName}: ${preview}` : preview;
 
     const stale = await this.notifications.notify(
       tokens.map((token) => token.fcm_token),
       {
-        title: isGroup ? `${senderName} (group)` : senderName,
+        title,
         body,
         conversationId: message.conversation_id,
         messageId: message.id,
+        senderName,
+        conversationName,
+        type: message.type,
       },
     );
 
