@@ -6,6 +6,26 @@ This repository serves as the complete foundation and phased development roadmap
 
 ---
 
+> ## ⛔ Rule 0 — Never build an APK (MAXIMUM PRIORITY)
+>
+> **Do not build any Android artifact. This rule outranks every other rule in
+> this document and in [`BUGFIX_PLAN.md`](./BUGFIX_PLAN.md).**
+>
+> Forbidden, with no exceptions:
+>
+> - `flutter build apk` and `flutter build appbundle` (any variant: debug,
+>   profile, release, `--split-per-abi`)
+> - `make mobile-apk`, Gradle `assembleDebug` / `assembleRelease` / `bundle*`
+> - Any local, CI, or agent APK/AAB "smoke" or verification build
+>
+> If a task, phase, or plan step asks for an APK/App Bundle build, **skip that
+> step** and verify with the automated suites instead: `flutter analyze`,
+> `flutter test`, and (when backend code is touched) `cd backend && npm run
+> typecheck && npm test`. Report that the build step was intentionally skipped
+> per this rule rather than running it.
+
+---
+
 ## Table of Contents
 
 1. [System Requirements](#1-system-requirements)
