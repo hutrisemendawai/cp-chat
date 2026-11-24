@@ -116,4 +116,47 @@ void main() {
       expect(find.text('No messages yet'), findsOneWidget);
     },
   );
+
+  testWidgets('filters the list by chat type', (tester) async {
+    await pumpApp(tester);
+    await showConversations(tester, [
+      conversation(id: 'group', type: 'group', name: 'Team', preview: 'Hi all'),
+      conversation(id: 'direct', preview: 'Hey there'),
+    ]);
+
+    expect(find.text('Team'), findsOneWidget);
+    expect(find.text('Alice'), findsOneWidget);
+
+    await tester.tap(find.text('Groups'));
+    await tester.pumpAndSettle();
+    expect(find.text('Team'), findsOneWidget);
+    expect(find.text('Alice'), findsNothing);
+
+    await tester.tap(find.text('Personal'));
+    await tester.pumpAndSettle();
+    expect(find.text('Team'), findsNothing);
+    expect(find.text('Alice'), findsOneWidget);
+  });
+
+  testWidgets('filters the list by the search query', (tester) async {
+    await pumpApp(tester);
+    await showConversations(tester, [
+      conversation(id: 'a', preview: 'dinner plans'),
+      conversation(
+        id: 'b',
+        type: 'group',
+        name: 'Work',
+        preview: 'standup notes',
+      ),
+    ]);
+
+    await tester.enterText(find.byType(TextField), 'standup');
+    await tester.pumpAndSettle();
+    expect(find.text('Work'), findsOneWidget);
+    expect(find.text('Alice'), findsNothing);
+
+    await tester.enterText(find.byType(TextField), 'zzz');
+    await tester.pumpAndSettle();
+    expect(find.text('No chats found'), findsOneWidget);
+  });
 }
