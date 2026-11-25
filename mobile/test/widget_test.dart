@@ -23,11 +23,12 @@ void main() {
     await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Enter your phone number or email'), findsOneWidget);
+    expect(find.text('Enter your email or username'), findsOneWidget);
     expect(find.text('Enter your password'), findsOneWidget);
   });
 
-  testWidgets('registration mode asks for a name and a longer password', (tester) async {
+  testWidgets('registration mode asks for a username, name and a longer password',
+      (tester) async {
     await tester.pumpWidget(
       const ProviderScope(child: MaterialApp(home: AuthScreen())),
     );
@@ -37,15 +38,43 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Create your account'), findsOneWidget);
+    expect(find.widgetWithText(TextFormField, 'Username'), findsOneWidget);
     expect(find.widgetWithText(TextFormField, 'Display name'), findsOneWidget);
 
-    await tester.enterText(find.byType(TextFormField).at(0), 'new@example.com');
-    await tester.enterText(find.byType(TextFormField).at(1), 'New Person');
-    await tester.enterText(find.byType(TextFormField).at(2), 'short');
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Phone or email'),
+      'new@example.com',
+    );
+    await tester.enterText(find.widgetWithText(TextFormField, 'Username'), 'new_person');
+    await tester.enterText(find.widgetWithText(TextFormField, 'Display name'), 'New Person');
+    await tester.enterText(find.widgetWithText(TextFormField, 'Password'), 'short');
     await tester.tap(find.text('Create account'));
     await tester.pumpAndSettle();
 
     expect(find.text('Use at least 8 characters'), findsOneWidget);
+  });
+
+  testWidgets('registration rejects a username with an invalid character',
+      (tester) async {
+    await tester.pumpWidget(
+      const ProviderScope(child: MaterialApp(home: AuthScreen())),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('New here? Create an account'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Phone or email'),
+      'new@example.com',
+    );
+    await tester.enterText(find.widgetWithText(TextFormField, 'Username'), 'bad@name');
+    await tester.enterText(find.widgetWithText(TextFormField, 'Display name'), 'New Person');
+    await tester.enterText(find.widgetWithText(TextFormField, 'Password'), 'password123');
+    await tester.tap(find.text('Create account'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Only letters, numbers, "_" and "." are allowed'), findsOneWidget);
   });
 
   testWidgets('password visibility toggles', (tester) async {

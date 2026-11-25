@@ -28,16 +28,91 @@ describe('auth', () => {
     const response = await harness.app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
-      payload: { phone_or_email: 'new@example.com', name: 'New', password: 'password123' },
+      payload: {
+        phone_or_email: 'new@example.com',
+        username: 'new_user',
+        name: 'New',
+        password: 'password123',
+      },
     });
 
     expect(response.statusCode).toBe(201);
     const body = response.json();
-    expect(body.user).toMatchObject({ name: 'New', phone_or_email: 'new@example.com' });
+    expect(body.user).toMatchObject({
+      name: 'New',
+      username: 'new_user',
+      phone_or_email: 'new@example.com',
+    });
     expect(body.access_token).toBeTypeOf('string');
     expect(body.refresh_token).toBeTypeOf('string');
     expect(body.expires_in).toBe(900);
     expect(body.user).not.toHaveProperty('password_hash');
+  });
+
+  it('normalizes the username to lowercase and rejects missing or malformed ones', async () => {
+    const upper = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        phone_or_email: `upper-${crypto.randomUUID()}@example.com`,
+        username: 'Mixed_Case.Name',
+        name: 'Mixed',
+        password: 'password123',
+      },
+    });
+    expect(upper.statusCode).toBe(201);
+    expect(upper.json().user.username).toBe('mixed_case.name');
+
+    const missing = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: { phone_or_email: 'nouser@example.com', name: 'NoUser', password: 'password123' },
+    });
+    const withAt = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        phone_or_email: 'at@example.com',
+        username: 'bad@name',
+        name: 'At',
+        password: 'password123',
+      },
+    });
+    const leadingDot = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        phone_or_email: 'dot@example.com',
+        username: '.dotname',
+        name: 'Dot',
+        password: 'password123',
+      },
+    });
+    const doubleDot = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        phone_or_email: 'doubledot@example.com',
+        username: 'a..b',
+        name: 'Double',
+        password: 'password123',
+      },
+    });
+    const tooShort = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        phone_or_email: 'short@example.com',
+        username: 'ab',
+        name: 'Short',
+        password: 'password123',
+      },
+    });
+
+    for (const response of [missing, withAt, leadingDot, doubleDot, tooShort]) {
+      expect(response.statusCode).toBe(422);
+      expect(response.json().error.code).toBe('validation_error');
+    }
   });
 
   it('rejects a duplicate contact regardless of case', async () => {
@@ -47,28 +122,75 @@ describe('auth', () => {
     const first = await harness.app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
-      payload: { phone_or_email: email, name: 'A', password: 'password123' },
+      payload: {
+        phone_or_email: email,
+        username: `casea_${crypto.randomUUID().slice(0, 6)}`,
+        name: 'A',
+        password: 'password123',
+      },
     });
     const second = await harness.app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
-      payload: { phone_or_email: email.toUpperCase(), name: 'B', password: 'password123' },
+      payload: {
+        phone_or_email: email.toUpperCase(),
+        username: `caseb_${crypto.randomUUID().slice(0, 6)}`,
+        name: 'B',
+        password: 'password123',
+      },
     });
 
     expect(first.statusCode).toBe(201);
     expect(second.statusCode).toBe(409);
   });
 
+  it('rejects a duplicate username case-insensitively', async () => {
+    const first = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        phone_or_email: `taken-${crypto.randomUUID()}@example.com`,
+        username: 'taken_name',
+        name: 'First',
+        password: 'password123',
+      },
+    });
+    const second = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: {
+        phone_or_email: `taken2-${crypto.randomUUID()}@example.com`,
+        username: 'TAKEN_NAME',
+        name: 'Second',
+        password: 'password123',
+      },
+    });
+
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error.message).toBe('Username is already taken');
+  });
+
   it('rejects weak passwords and short names with a validation error', async () => {
     const shortPassword = await harness.app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
-      payload: { phone_or_email: 'weak@example.com', name: 'Weak', password: 'short' },
+      payload: {
+        phone_or_email: 'weak@example.com',
+        username: 'weak_user',
+        name: 'Weak',
+        password: 'short',
+      },
     });
     const emptyName = await harness.app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
-      payload: { phone_or_email: 'noname@example.com', name: '', password: 'password123' },
+      payload: {
+        phone_or_email: 'noname@example.com',
+        username: 'no_name',
+        name: '',
+        password: 'password123',
+      },
     });
 
     expect(shortPassword.statusCode).toBe(422);
@@ -76,10 +198,21 @@ describe('auth', () => {
     expect(emptyName.statusCode).toBe(422);
   });
 
-  it('logs in with the correct password and rejects the wrong one', async () => {
+  it('logs in with the email, the username, and rejects invalid credentials', async () => {
     const user = await registerUser(harness, 'Login User');
 
-    const ok = await harness.app.inject({
+    const byEmail = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { identifier: user.email, password: 'password123' },
+    });
+    const byUsername = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { identifier: user.username.toUpperCase(), password: 'password123' },
+    });
+    // Backward compatibility: the legacy `phone_or_email` field still works.
+    const legacy = await harness.app.inject({
       method: 'POST',
       url: '/api/v1/auth/login',
       payload: { phone_or_email: user.email, password: 'password123' },
@@ -87,15 +220,19 @@ describe('auth', () => {
     const bad = await harness.app.inject({
       method: 'POST',
       url: '/api/v1/auth/login',
-      payload: { phone_or_email: user.email, password: 'wrong-password' },
+      payload: { identifier: user.email, password: 'wrong-password' },
     });
     const unknown = await harness.app.inject({
       method: 'POST',
       url: '/api/v1/auth/login',
-      payload: { phone_or_email: 'ghost@example.com', password: 'password123' },
+      payload: { identifier: 'ghost@example.com', password: 'password123' },
     });
 
-    expect(ok.statusCode).toBe(200);
+    expect(byEmail.statusCode).toBe(200);
+    expect(byEmail.json().user.username).toBe(user.username);
+    expect(byUsername.statusCode).toBe(200);
+    expect(byUsername.json().user.id).toBe(user.id);
+    expect(legacy.statusCode).toBe(200);
     expect(bad.statusCode).toBe(401);
     expect(bad.json().error.code).toBe('invalid_credentials');
     expect(unknown.statusCode).toBe(401);
@@ -168,7 +305,7 @@ describe('auth', () => {
     expect(garbage.statusCode).toBe(401);
   });
 
-  it('exposes the contact of another user so contacts can be identified', async () => {
+  it('exposes the username but never the email on another user', async () => {
     const viewer = await registerUser(harness, 'Viewer User');
     const other = await registerUser(harness, 'Other User');
 
@@ -179,7 +316,8 @@ describe('auth', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().phone_or_email).toBe(other.email);
+    expect(response.json().username).toBe(other.username);
+    expect(response.json()).not.toHaveProperty('phone_or_email');
   });
 });
 

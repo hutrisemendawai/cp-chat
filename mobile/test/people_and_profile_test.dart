@@ -18,11 +18,17 @@ import 'support/factories.dart';
 
 /// Answers directory, presence and conversation calls without a network.
 class _FakeApi extends ApiClient {
-  _FakeApi({required this.friendsList, required this.profile})
-      : super(TokenStore());
+  _FakeApi({
+    required this.friendsList,
+    required this.profile,
+    this.directory = const [],
+  }) : super(TokenStore());
 
   final List<User> friendsList;
   final User profile;
+
+  /// The directory the search walks; falls back to [friendsList] when empty.
+  final List<User> directory;
 
   final List<String> searchedQueries = [];
   int directChats = 0;
@@ -32,15 +38,28 @@ class _FakeApi extends ApiClient {
   Future<List<User>> friends() async => friendsList;
 
   @override
-  Future<List<User>> searchUsers(String query, {int limit = 20}) async {
+  Future<UserSearchPage> searchUsers(
+    String query, {
+    int limit = 10,
+    int offset = 0,
+  }) async {
     searchedQueries.add(query);
+    final source = directory.isEmpty ? friendsList : directory;
     final needle = query.toLowerCase();
-    return [
-      for (final user in friendsList)
+    final matches = [
+      for (final user in source)
         if (user.name.toLowerCase().contains(needle) ||
+            (user.username ?? '').toLowerCase().contains(needle) ||
             (user.phoneOrEmail ?? '').toLowerCase().contains(needle))
           user,
     ];
+    final page = matches.skip(offset).take(limit).toList();
+    final hasMore = offset + page.length < matches.length;
+    return UserSearchPage(
+      items: page,
+      hasMore: hasMore,
+      nextOffset: hasMore ? offset + page.length : null,
+    );
   }
 
   @override
@@ -222,26 +241,108 @@ void main() {
     expect(find.text('opened conv-direct'), findsOneWidget);
   });
 
-  testWidgets('adding a friend by identifier closes the dialog cleanly',
+  testWidgets('a query shorter than 3 characters never hits the network',
       (tester) async {
-    final alice = user('u1', name: 'Alice', nickname: 'Ali');
+    final alice = user('u1', name: 'Alice', username: 'alice', nickname: 'Ali');
     final api = _FakeApi(friendsList: [alice], profile: alice);
 
     await pumpApp(tester, api);
 
-    await tester.tap(find.byTooltip('Add friend'));
+    await tester.enterText(find.byType(TextField), 'al');
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.pumpAndSettle();
 
-    final dialogField = find.descendant(
-      of: find.byType(AlertDialog),
-      matching: find.byType(TextField),
+    expect(api.searchedQueries, isEmpty);
+    expect(
+      find.text('Type at least 3 characters to search by username or email'),
+      findsOneWidget,
     );
-    await tester.enterText(dialogField, 'alice@example.com');
-    await tester.tap(find.text('Add'));
+  });
+
+  testWidgets('search rows show only the avatar and display name',
+      (tester) async {
+    final bob = user(
+      'u1',
+      name: 'Bob',
+      username: 'bob_builder',
+      phoneOrEmail: 'bob@example.com',
+    );
+    final api = _FakeApi(friendsList: [bob], profile: bob);
+
+    await pumpApp(tester, api);
+
+    await tester.enterText(find.byType(TextField), 'bob');
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.pumpAndSettle();
 
-    expect(api.addFriends, 1);
-    expect(tester.takeException(), isNull);
+    expect(find.text('Bob'), findsOneWidget);
+    // No email, no @username and no inline add button in the result row.
+    expect(find.text('bob@example.com'), findsNothing);
+    expect(find.textContaining('@'), findsNothing);
+    expect(find.byIcon(Icons.person_add_alt_1), findsNothing);
+  });
+
+  testWidgets('tapping a search result opens that user profile',
+      (tester) async {
+    final bob = user('u1', name: 'Bob', username: 'bob_builder');
+    final api = _FakeApi(friendsList: [bob], profile: bob);
+
+    await pumpApp(tester, api);
+
+    await tester.enterText(find.byType(TextField), 'bob');
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Bob'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(UserProfileScreen), findsOneWidget);
+  });
+
+  testWidgets('Load more appends the next page of results', (tester) async {
+    final directory = [
+      for (var index = 0; index < 15; index++)
+        user(
+          'd$index',
+          name: 'Match ${index.toString().padLeft(2, '0')}',
+          username: 'match_$index',
+        ),
+    ];
+    final api = _FakeApi(
+      friendsList: const [],
+      profile: directory.first,
+      directory: directory,
+    );
+
+    await pumpApp(tester, api);
+
+    await tester.enterText(find.byType(TextField), 'match');
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+
+    // First page holds the first 10 matches; the 15th is not loaded yet.
+    expect(find.text('Match 00'), findsOneWidget);
+    expect(find.text('Match 14'), findsNothing);
+
+    await tester.dragUntilVisible(
+      find.text('Load more'),
+      find.byType(ListView),
+      const Offset(0, -400),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Load more'));
+    await tester.pumpAndSettle();
+
+    // The second page is appended; scroll to confirm the 15th match arrived.
+    await tester.dragUntilVisible(
+      find.text('Match 14'),
+      find.byType(ListView),
+      const Offset(0, -400),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Match 14'), findsOneWidget);
+    expect(find.text('Load more'), findsNothing);
   });
 
   testWidgets('adding a friend from their profile closes cleanly',

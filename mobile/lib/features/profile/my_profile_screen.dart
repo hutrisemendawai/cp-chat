@@ -355,6 +355,16 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
           textAlign: TextAlign.center,
           style: theme.textTheme.headlineLarge,
         ),
+        if (_user?.username != null) ...[
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            '@${_user!.username}',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ],
         if (_user?.phoneOrEmail != null) ...[
           const SizedBox(height: AppSpacing.xs),
           Text(

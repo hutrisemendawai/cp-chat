@@ -332,9 +332,9 @@ class AuthController extends Notifier<AuthSession?> {
   @override
   AuthSession? build() => null;
 
-  Future<void> login({required String phoneOrEmail, required String password}) async {
+  Future<void> login({required String identifier, required String password}) async {
     final session = await ref.read(apiClientProvider).login(
-          phoneOrEmail: phoneOrEmail,
+          identifier: identifier,
           password: password,
         );
     state = session;
@@ -342,11 +342,13 @@ class AuthController extends Notifier<AuthSession?> {
 
   Future<void> register({
     required String phoneOrEmail,
+    required String username,
     required String name,
     required String password,
   }) async {
     final session = await ref.read(apiClientProvider).register(
           phoneOrEmail: phoneOrEmail,
+          username: username,
           name: name,
           password: password,
         );

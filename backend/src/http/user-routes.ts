@@ -26,8 +26,16 @@ const profileSchema = z
   });
 
 const searchSchema = z.object({
-  q: z.string().trim().min(1).max(100),
-  limit: z.coerce.number().int().min(1).max(50).default(20),
+  q: z.string().trim().min(3).max(100),
+  // Page size is capped at 10: a larger request is clamped rather than
+  // rejected so the client can never accidentally fetch the whole directory.
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .transform((value) => Math.min(value, 10))
+    .default(10),
+  offset: z.coerce.number().int().min(0).default(0),
 });
 
 export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -79,10 +87,11 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
   });
 
   /**
-   * Directory search over name and email/phone. Registered before the `:id`
-   * route conceptually, but Fastify always prefers a static segment anyway.
-   * The caller is excluded and each result reports whether they are already a
-   * friend so the picker can render the relationship.
+   * Paginated directory search over username and email/phone for the "add
+   * friend" live search. A query shorter than 3 characters is rejected so a
+   * one-letter query cannot enumerate the directory. The caller is excluded and
+   * the projection omits the contact so search cannot scrape emails. One extra
+   * row is fetched server-side to report `has_more` without a `COUNT(*)`.
    */
   app.get('/api/v1/users/search', async (request) => {
     requireAuth(request, config);
@@ -96,9 +105,15 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
       });
     }
 
-    const { q, limit } = result.data;
-    const found = await friends.search(request.userId, q.trim(), limit);
-    return { users: found };
+    const { q, limit, offset } = result.data;
+    const page = await friends.search(request.userId, q.trim(), limit, offset);
+    return {
+      users: page.users,
+      limit,
+      offset,
+      has_more: page.hasMore,
+      next_offset: page.hasMore ? offset + page.users.length : null,
+    };
   });
 
   app.get('/api/v1/users/:id', async (request) => {
@@ -111,9 +126,8 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
     const snapshot = await presence.snapshot(id);
     return {
       ...toPublicUser(user),
-      // Public profile is always visible to an authenticated app user so a
-      // contact can be identified by email before a chat starts.
-      phone_or_email: user.phone_or_email,
+      // The public profile is discovery: it exposes the username so a peer can
+      // be identified, but never the email address.
       effective_status: snapshot?.status ?? 'offline',
       online: snapshot?.online ?? false,
       last_seen_at: snapshot?.last_seen_at ?? user.last_seen_at,

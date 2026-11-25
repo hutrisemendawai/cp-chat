@@ -112,6 +112,7 @@ class SearchField extends StatelessWidget {
     this.onSubmitted,
     this.autofocus = false,
     this.onClear,
+    this.focusNode,
   });
 
   final TextEditingController controller;
@@ -120,6 +121,7 @@ class SearchField extends StatelessWidget {
   final ValueChanged<String>? onSubmitted;
   final bool autofocus;
   final VoidCallback? onClear;
+  final FocusNode? focusNode;
 
   @override
   Widget build(BuildContext context) {
@@ -127,6 +129,7 @@ class SearchField extends StatelessWidget {
 
     return TextField(
       controller: controller,
+      focusNode: focusNode,
       autofocus: autofocus,
       onChanged: onChanged,
       onSubmitted: onSubmitted,

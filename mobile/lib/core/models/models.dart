@@ -6,6 +6,7 @@ class User {
   const User({
     required this.id,
     required this.name,
+    this.username,
     this.nickname,
     this.avatarUrl,
     this.phoneOrEmail,
@@ -23,6 +24,7 @@ class User {
     return User(
       id: json['id'] as String,
       name: json['name'] as String,
+      username: json['username'] as String?,
       nickname: json['nickname'] as String?,
       avatarUrl: json['avatar_url'] as String?,
       phoneOrEmail: json['phone_or_email'] as String?,
@@ -37,6 +39,9 @@ class User {
 
   final String id;
   final String name;
+
+  /// The public handle. Absent on payloads that predate usernames.
+  final String? username;
   final String? nickname;
   final String? avatarUrl;
   final String? phoneOrEmail;
@@ -79,6 +84,7 @@ class User {
     return User(
       id: id,
       name: name ?? this.name,
+      username: username,
       nickname: clearNickname ? null : (nickname ?? this.nickname),
       avatarUrl: clearAvatar ? null : (avatarUrl ?? this.avatarUrl),
       phoneOrEmail: phoneOrEmail,
@@ -90,6 +96,30 @@ class User {
       isFriend: isFriend ?? this.isFriend,
     );
   }
+}
+
+/// One page of directory search results (`GET /api/v1/users/search`).
+///
+/// Carries the pagination envelope so the picker can append pages and stop
+/// when `hasMore` is false.
+class UserSearchPage {
+  const UserSearchPage({
+    required this.items,
+    required this.hasMore,
+    this.nextOffset,
+  });
+
+  factory UserSearchPage.fromJson(Map<String, dynamic> json) => UserSearchPage(
+        items: (json['users'] as List<dynamic>)
+            .map((item) => User.fromJson(item as Map<String, dynamic>))
+            .toList(),
+        hasMore: json['has_more'] as bool? ?? false,
+        nextOffset: (json['next_offset'] as num?)?.toInt(),
+      );
+
+  final List<User> items;
+  final bool hasMore;
+  final int? nextOffset;
 }
 
 class AuthSession {

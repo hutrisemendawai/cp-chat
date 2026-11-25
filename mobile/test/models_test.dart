@@ -256,6 +256,60 @@ void main() {
       expect(presence.resolvedStatus, 'offline');
       expect(presence.isActive, isFalse);
     });
+    test('parses a user with a username', () {
+      final user = User.fromJson({
+        'id': 'u1',
+        'name': 'Alice',
+        'username': 'alice',
+        'created_at': '2026-01-01T00:00:00Z',
+      });
+
+      expect(user.username, 'alice');
+      expect(user.displayName, 'Alice');
+    });
+
+    test('a search result without an email parses cleanly', () {
+      final user = User.fromJson({
+        'id': 'u1',
+        'name': 'Alice',
+        'username': 'alice',
+        'nickname': null,
+        'avatar_url': null,
+      });
+
+      expect(user.username, 'alice');
+      expect(user.phoneOrEmail, isNull);
+    });
+
+    test('parses a paginated user search page', () {
+      final page = UserSearchPage.fromJson({
+        'users': [
+          {'id': 'u1', 'name': 'Alice', 'username': 'alice'},
+        ],
+        'limit': 10,
+        'offset': 0,
+        'has_more': true,
+        'next_offset': 10,
+      });
+
+      expect(page.items.single.username, 'alice');
+      expect(page.hasMore, isTrue);
+      expect(page.nextOffset, 10);
+    });
+
+    test('a final search page reports no further offset', () {
+      final page = UserSearchPage.fromJson({
+        'users': [],
+        'limit': 10,
+        'offset': 20,
+        'has_more': false,
+        'next_offset': null,
+      });
+
+      expect(page.items, isEmpty);
+      expect(page.hasMore, isFalse);
+      expect(page.nextOffset, isNull);
+    });
   });
 
   group('ApiException', () {

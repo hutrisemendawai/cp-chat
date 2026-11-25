@@ -59,20 +59,33 @@ export type TestUser = {
   accessToken: string;
   refreshToken: string;
   email: string;
+  username: string;
   deviceId: string;
 };
+
+/** A valid, unique lowercase username derived from a display name. */
+export function usernameFor(name: string): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 20) || 'user';
+  return `${base}_${randomUUID().replace(/-/g, '').slice(0, 6)}`;
+}
 
 export async function registerUser(
   harness: TestHarness,
   name = 'Test User',
 ): Promise<TestUser> {
   const email = `${name.toLowerCase().replace(/\s+/g, '.')}+${randomUUID()}@example.com`;
+  const username = usernameFor(name);
   const deviceId = `device-${randomUUID()}`;
   const response = await harness.app.inject({
     method: 'POST',
     url: '/api/v1/auth/register',
     headers: { 'x-device-id': deviceId },
-    payload: { phone_or_email: email, name, password: 'password123' },
+    payload: { phone_or_email: email, username, name, password: 'password123' },
   });
 
   if (response.statusCode !== 201) {
@@ -84,6 +97,7 @@ export async function registerUser(
     accessToken: body.access_token,
     refreshToken: body.refresh_token,
     email,
+    username,
     deviceId,
   };
 }
@@ -141,21 +155,27 @@ export async function truncateAll(db: Db): Promise<void> {
 export async function seedUsers(harness: TestHarness, count: number): Promise<TestUser[]> {
   const rows = Array.from({ length: count }, (_, index) => ({
     email: `seed-${index}-${randomUUID()}@example.com`,
+    username: `seed_${index}_${randomUUID().replace(/-/g, '').slice(0, 8)}`,
     name: `Seed ${index}`,
     deviceId: `seed-device-${index}`,
   }));
 
   const { rows: inserted } = await harness.db.query<{ id: string; phone_or_email: string }>(
-    `INSERT INTO users (phone_or_email, name, password_hash)
-     SELECT email, name, 'scrypt$16$8$1$deadbeef$deadbeef'
-       FROM unnest($1::text[], $2::text[]) AS t(email, name)
+    `INSERT INTO users (username, phone_or_email, name, password_hash)
+     SELECT username, email, name, 'scrypt$16$8$1$deadbeef$deadbeef'
+       FROM unnest($1::text[], $2::text[], $3::text[]) AS t(username, email, name)
      RETURNING id, phone_or_email`,
-    [rows.map((row) => row.email), rows.map((row) => row.name)],
+    [
+      rows.map((row) => row.username),
+      rows.map((row) => row.email),
+      rows.map((row) => row.name),
+    ],
   );
 
   return inserted.map((row, index) => ({
     id: row.id,
     email: row.phone_or_email,
+    username: rows[index]!.username,
     accessToken: signAccessToken(row.id, rows[index]!.deviceId, TEST_CONFIG),
     refreshToken: '',
     deviceId: rows[index]!.deviceId,

@@ -186,7 +186,7 @@ describe('discord presence transitions', () => {
     expect(JSON.stringify(peer.json())).not.toContain('invisible');
   });
 
-  it('exposes a visible public profile with the contact and last seen', async () => {
+  it('exposes a visible public profile with the username but not the email', async () => {
     const alice = await registerUser(harness, 'Alice');
     const bob = await registerUser(harness, 'Bob');
     await createDirect(harness, alice, bob);
@@ -203,13 +203,14 @@ describe('discord presence transitions', () => {
     expect(response.statusCode).toBe(200);
     expect(body).toMatchObject({
       id: alice.id,
+      username: alice.username,
       name: 'Alice',
       nickname: 'ally',
       bio: 'hi there',
       effective_status: 'idle',
       online: true,
-      phone_or_email: alice.email,
     });
+    expect(body).not.toHaveProperty('phone_or_email');
     expect(body.last_seen_at).toBeNull();
   });
 

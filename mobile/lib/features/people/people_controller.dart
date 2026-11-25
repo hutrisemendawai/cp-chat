@@ -13,20 +13,6 @@ final friendsProvider = FutureProvider.autoDispose<List<User>>((ref) async {
   return sortByPresence(users);
 });
 
-/// Live directory search for a trimmed query. An empty query resolves to no
-/// results so the People screen shows the friends list instead.
-final userSearchProvider =
-    FutureProvider.autoDispose.family<List<User>, String>((ref, query) async {
-  final trimmed = query.trim();
-  if (trimmed.isEmpty) return const [];
-  final selfId = ref.watch(currentUserProvider)?.id;
-  final users = await ref.watch(apiClientProvider).searchUsers(trimmed);
-  return [
-    for (final user in users)
-      if (user.id != selfId) user,
-  ];
-});
-
 /// Fresh details for a single user, used by the profile screen.
 final userProfileProvider =
     FutureProvider.autoDispose.family<User, String>((ref, userId) async {
@@ -63,20 +49,40 @@ class PeopleState {
     this.query = '',
     this.results = const [],
     this.loading = false,
+    this.loadingMore = false,
+    this.hasMore = false,
+    this.nextOffset = 0,
     this.error,
   });
 
   final String query;
   final List<User> results;
+
+  /// A first page is in flight (results are not yet shown).
   final bool loading;
+
+  /// An additional page is in flight (results are already shown).
+  final bool loadingMore;
+  final bool hasMore;
+
+  /// Offset for the next page.
+  final int nextOffset;
   final String? error;
 
+  /// A non-empty query means the friends list is replaced by search results.
   bool get isSearching => query.trim().isNotEmpty;
+
+  /// Whether the query is long enough to hit the network (min 3 characters).
+  bool get isQueryLongEnough =>
+      query.trim().length >= PeopleController.minQueryLength;
 
   PeopleState copyWith({
     String? query,
     List<User>? results,
     bool? loading,
+    bool? loadingMore,
+    bool? hasMore,
+    int? nextOffset,
     String? error,
     bool clearError = false,
   }) {
@@ -84,14 +90,23 @@ class PeopleState {
       query: query ?? this.query,
       results: results ?? this.results,
       loading: loading ?? this.loading,
+      loadingMore: loadingMore ?? this.loadingMore,
+      hasMore: hasMore ?? this.hasMore,
+      nextOffset: nextOffset ?? this.nextOffset,
       error: clearError ? null : (error ?? this.error),
     );
   }
 }
 
-/// Debounced directory search plus friend toggles for the People screen.
+/// Debounced, paginated directory search for the People screen.
+///
+/// A query shorter than [minQueryLength] never triggers a network call. Results
+/// are requested 10 at a time; [loadMore] appends the next page. A stale
+/// response is discarded whenever the query changes mid-flight.
 class PeopleController extends Notifier<PeopleState> {
-  static const debounce = Duration(milliseconds: 300);
+  static const debounce = Duration(milliseconds: 350);
+  static const minQueryLength = 3;
+  static const pageSize = 10;
 
   Timer? _debounce;
   int _requestToken = 0;
@@ -106,12 +121,19 @@ class PeopleController extends Notifier<PeopleState> {
   /// the debounce window. Clearing the text returns to the friends list.
   void updateQuery(String value) {
     _debounce?.cancel();
-    if (value.trim().isEmpty) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) {
       clear();
       return;
     }
-    state = state.copyWith(query: value, loading: true, clearError: true);
-    _debounce = Timer(debounce, () => unawaited(_search(value)));
+    if (trimmed.length < minQueryLength) {
+      // Too short to search: drop any in-flight request and show the hint.
+      _requestToken += 1;
+      state = PeopleState(query: value);
+      return;
+    }
+    state = PeopleState(query: value, loading: true);
+    _debounce = Timer(debounce, () => unawaited(_search(trimmed)));
   }
 
   void clear() {
@@ -120,66 +142,51 @@ class PeopleController extends Notifier<PeopleState> {
     state = const PeopleState();
   }
 
-  Future<void> _search(String value) async {
+  /// Loads the next page and appends it to the current results.
+  void loadMore() {
+    final trimmed = state.query.trim();
+    if (!state.hasMore ||
+        state.loading ||
+        state.loadingMore ||
+        trimmed.length < minQueryLength) {
+      return;
+    }
+    unawaited(_search(trimmed, append: true));
+  }
+
+  Future<void> _search(String query, {bool append = false}) async {
     final token = ++_requestToken;
-    state = state.copyWith(loading: true, clearError: true);
+    final offset = append ? state.nextOffset : 0;
+    state = state.copyWith(loading: !append, loadingMore: append, clearError: true);
     try {
-      final selfId = ref.read(currentUserProvider)?.id;
-      final users = (await ref.read(apiClientProvider).searchUsers(value.trim()))
-          .where((user) => user.id != selfId)
-          .toList();
+      final page = await ref
+          .read(apiClientProvider)
+          .searchUsers(query, limit: pageSize, offset: offset);
       if (token != _requestToken) return;
-      state = state.copyWith(results: users, loading: false);
+      final selfId = ref.read(currentUserProvider)?.id;
+      final merged = append ? [...state.results] : <User>[];
+      final seen = merged.map((user) => user.id).toSet();
+      for (final user in page.items) {
+        if (user.id == selfId) continue;
+        if (seen.add(user.id)) merged.add(user);
+      }
+      state = PeopleState(
+        query: state.query,
+        results: merged,
+        hasMore: page.hasMore,
+        nextOffset: page.nextOffset ?? offset + page.items.length,
+      );
     } on ApiException catch (error) {
       if (token != _requestToken) return;
-      state = state.copyWith(loading: false, error: error.message);
+      state = state.copyWith(loading: false, loadingMore: false, error: error.message);
     } catch (_) {
       if (token != _requestToken) return;
       state = state.copyWith(
         loading: false,
+        loadingMore: false,
         error: 'Search failed. Check your connection.',
       );
     }
-  }
-
-  /// Adds or removes a friend, flipping the row immediately and reverting if the
-  /// request fails. Returns an error message, or `null` on success.
-  Future<String?> toggleFriend(User user) async {
-    final target = !user.isFriend;
-    _setFriendFlag(user.id, target);
-    try {
-      final api = ref.read(apiClientProvider);
-      if (target) {
-        await api.addFriend(userId: user.id);
-      } else {
-        await api.removeFriend(user.id);
-      }
-      ref.invalidate(friendsProvider);
-      return null;
-    } catch (error) {
-      _setFriendFlag(user.id, !target);
-      return error is ApiException ? error.message : 'Could not update friend';
-    }
-  }
-
-  /// Adds a friend by email, phone or exact name.
-  Future<String?> addFriendByIdentifier(String identifier) async {
-    try {
-      await ref.read(apiClientProvider).addFriend(identifier: identifier);
-      ref.invalidate(friendsProvider);
-      return null;
-    } catch (error) {
-      return error is ApiException ? error.message : 'Could not add friend';
-    }
-  }
-
-  void _setFriendFlag(String userId, bool isFriend) {
-    state = state.copyWith(
-      results: [
-        for (final user in state.results)
-          user.id == userId ? user.copyWith(isFriend: isFriend) : user,
-      ],
-    );
   }
 }
 

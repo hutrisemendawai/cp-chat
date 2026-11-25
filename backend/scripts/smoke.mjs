@@ -129,11 +129,21 @@ async function main() {
 
   const alice = await rest('/api/v1/auth/register', {
     method: 'POST',
-    body: { phone_or_email: aliceEmail, name: 'Alice', password: 'password123' },
+    body: {
+      phone_or_email: aliceEmail,
+      username: `alice_${stamp}`,
+      name: 'Alice',
+      password: 'password123',
+    },
   });
   const bob = await rest('/api/v1/auth/register', {
     method: 'POST',
-    body: { phone_or_email: bobEmail, name: 'Bob', password: 'password123' },
+    body: {
+      phone_or_email: bobEmail,
+      username: `bob_${stamp}`,
+      name: 'Bob',
+      password: 'password123',
+    },
   });
   check('register two users', alice.status === 201 && bob.status === 201);
 
@@ -299,7 +309,7 @@ async function main() {
   const outsider = await rest(`/api/v1/conversations/${conversationId}/messages`, {
     token: (await rest('/api/v1/auth/register', {
       method: 'POST',
-      body: { phone_or_email: `eve+${stamp}@example.com`, name: 'Eve', password: 'password123' },
+      body: { phone_or_email: `eve+${stamp}@example.com`, username: `eve_${stamp}`, name: 'Eve', password: 'password123' },
     })).json.access_token,
   });
   check('non-member cannot read history', outsider.status === 403, `status=${outsider.status}`);
@@ -307,7 +317,12 @@ async function main() {
   // Phase 2: group fan-out and aggregated read receipt.
   const carol = await rest('/api/v1/auth/register', {
     method: 'POST',
-    body: { phone_or_email: `carol+${stamp}@example.com`, name: 'Carol', password: 'password123' },
+    body: {
+      phone_or_email: `carol+${stamp}@example.com`,
+      username: `carol_${stamp}`,
+      name: 'Carol',
+      password: 'password123',
+    },
   });
   const carolToken = carol.json.access_token;
 
@@ -405,7 +420,7 @@ async function main() {
   const outsiderSearch = await rest(`/api/v1/search?q=${encodeURIComponent('burst')}`, {
     token: (await rest('/api/v1/auth/register', {
       method: 'POST',
-      body: { phone_or_email: `frank+${stamp}@example.com`, name: 'Frank', password: 'password123' },
+      body: { phone_or_email: `frank+${stamp}@example.com`, username: `frank_${stamp}`, name: 'Frank', password: 'password123' },
     })).json.access_token,
   });
   check(
@@ -519,7 +534,12 @@ async function main() {
   // ---- Phase 6: profiles, friends, proxied media, and the log timeline ----
   const dave = await rest('/api/v1/auth/register', {
     method: 'POST',
-    body: { phone_or_email: `dave+${stamp}@example.com`, name: 'Dave Smoke', password: 'password123' },
+    body: {
+      phone_or_email: `dave+${stamp}@example.com`,
+      username: `dave_${stamp}`,
+      name: 'Dave Smoke',
+      password: 'password123',
+    },
   });
   const daveToken = dave.json.access_token;
   const daveId = dave.json.user.id;
@@ -563,26 +583,39 @@ async function main() {
     statusResults.filter((r) => !r.ok).map((r) => r.wanted).join(',') || 'idle,dnd,invisible',
   );
 
-  // Directory search over name and email, excluding the caller.
-  const byName = await rest(`/api/v1/users/search?q=${encodeURIComponent('Dave Smoke')}`, {
+  // Directory live search over username and email, excluding the caller and
+  // never returning an email address.
+  const byUsername = await rest(`/api/v1/users/search?q=${encodeURIComponent(`dave_${stamp}`)}`, {
     token: aliceToken,
   });
   const byEmail = await rest(`/api/v1/users/search?q=${encodeURIComponent('dave+')}`, {
     token: aliceToken,
   });
   check(
-    'user search finds a user by name',
-    byName.status === 200 && byName.json.users.some((user) => user.id === daveId),
-    `${byName.json.users?.length ?? 0} hits`,
+    'user search finds a user by username',
+    byUsername.status === 200 && byUsername.json.users.some((user) => user.id === daveId),
+    `${byUsername.json.users?.length ?? 0} hits`,
   );
   check(
     'user search finds a user by email',
     byEmail.status === 200 && byEmail.json.users.some((user) => user.id === daveId),
     `${byEmail.json.users?.length ?? 0} hits`,
   );
-  const selfSearch = await rest(`/api/v1/users/search?q=${encodeURIComponent('Alice')}`, {
+  check(
+    'user search omits the email and paginates',
+    byUsername.json.users.every((user) => user.email === undefined && user.phone_or_email === undefined) &&
+      byUsername.json.limit === 10 &&
+      byUsername.json.has_more === false,
+    `limit=${byUsername.json?.limit}, has_more=${byUsername.json?.has_more}`,
+  );
+  const tooShort = await rest(`/api/v1/users/search?q=${encodeURIComponent('ab')}`, {
     token: aliceToken,
   });
+  check('user search enforces a 3-character minimum', tooShort.status === 422, `status=${tooShort.status}`);
+  const selfSearch = await rest(
+    `/api/v1/users/search?q=${encodeURIComponent(`alice_${stamp}`)}`,
+    { token: aliceToken },
+  );
   check(
     'user search never returns the caller',
     selfSearch.json.users.every((user) => user.id !== alice.json.user.id),

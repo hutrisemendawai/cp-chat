@@ -23,6 +23,7 @@ class AuthScreen extends ConsumerStatefulWidget {
 class _AuthScreenState extends ConsumerState<AuthScreen> {
   final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
+  final _usernameController = TextEditingController();
   final _nameController = TextEditingController();
   final _passwordController = TextEditingController();
 
@@ -36,6 +37,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   @override
   void dispose() {
     _emailController.dispose();
+    _usernameController.dispose();
     _nameController.dispose();
     _passwordController.dispose();
     super.dispose();
@@ -54,12 +56,13 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
       if (_isRegister) {
         await controller.register(
           phoneOrEmail: _emailController.text.trim(),
+          username: _usernameController.text.trim(),
           name: _nameController.text.trim(),
           password: _passwordController.text,
         );
       } else {
         await controller.login(
-          phoneOrEmail: _emailController.text.trim(),
+          identifier: _emailController.text.trim(),
           password: _passwordController.text,
         );
       }
@@ -71,6 +74,23 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Mirrors the backend username rules: 3–30 characters from `a-z`, `0-9`, `_`
+  /// and `.`, with no leading/trailing or consecutive dots.
+  static String? validateUsername(String? value) {
+    final text = value?.trim() ?? '';
+    if (text.isEmpty) return 'Choose a username';
+    if (text.length < 3) return 'Use at least 3 characters';
+    if (text.length > 30) return 'Keep it under 30 characters';
+    if (!RegExp(r'^[a-zA-Z0-9_.]+$').hasMatch(text)) {
+      return 'Only letters, numbers, "_" and "." are allowed';
+    }
+    if (text.startsWith('.') || text.endsWith('.')) {
+      return 'Cannot start or end with a dot';
+    }
+    if (text.contains('..')) return 'Cannot contain consecutive dots';
+    return null;
   }
 
   @override
@@ -136,18 +156,36 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         autocorrect: false,
                         enableSuggestions: false,
                         textCapitalization: TextCapitalization.none,
-                        decoration: const InputDecoration(
-                          labelText: 'Phone or email',
-                          prefixIcon: Icon(Icons.person_outline, size: 20),
+                        decoration: InputDecoration(
+                          labelText: _isRegister ? 'Phone or email' : 'Email or Username',
+                          prefixIcon: const Icon(Icons.person_outline, size: 20),
                         ),
                         validator: (value) {
                           final text = value?.trim() ?? '';
-                          if (text.isEmpty) return 'Enter your phone number or email';
-                          if (text.length < 3) return 'That looks too short';
+                          if (text.isEmpty) {
+                            return _isRegister
+                                ? 'Enter your phone number or email'
+                                : 'Enter your email or username';
+                          }
+                          if (_isRegister && text.length < 3) return 'That looks too short';
                           return null;
                         },
                       ),
                       if (_isRegister) ...[
+                        const SizedBox(height: AppSpacing.md),
+                        TextFormField(
+                          controller: _usernameController,
+                          enabled: !_busy,
+                          textInputAction: TextInputAction.next,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          textCapitalization: TextCapitalization.none,
+                          decoration: const InputDecoration(
+                            labelText: 'Username',
+                            prefixIcon: Icon(Icons.alternate_email, size: 20),
+                          ),
+                          validator: validateUsername,
+                        ),
                         const SizedBox(height: AppSpacing.md),
                         TextFormField(
                           controller: _nameController,

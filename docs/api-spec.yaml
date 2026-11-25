@@ -55,7 +55,10 @@ paths:
   /api/v1/auth/login:
     post:
       tags: [Auth]
-      summary: Log in with phone/email and password
+      summary: Log in with an email, phone number or username and password
+      description: >
+        The `identifier` may be an email/phone or a username (case-insensitive).
+        `phone_or_email` is still accepted as a fallback for older clients.
       security: []
       requestBody:
         required: true
@@ -171,10 +174,10 @@ paths:
       tags: [Users]
       summary: Get another user's public profile
       description: >
-        Returns the public profile with presence. An `invisible` user is always
-        reported as `offline`; the raw preference never leaks. `phone_or_email`
-        is included so app users can identify contacts by email before a chat
-        exists.
+        Returns the public profile with presence and the public `username`. An
+        `invisible` user is always reported as `offline`; the raw preference
+        never leaks. The email/phone is never returned here, only on the
+        caller's own profile (`GET /users/me`).
       responses:
         '200':
           description: Public profile with presence
@@ -192,41 +195,59 @@ paths:
   /api/v1/users/search:
     get:
       tags: [Users]
-      summary: Search users by name or email/phone
+      summary: Paginated live search over username and email/phone
       description: >
-        Case-insensitive substring search over `name` and `phone_or_email`. The
-        caller is excluded. Exact email/name and prefix matches sort first, then
-        alphabetical by name. `nickname` is returned for display as
-        "Name (nickname)"; the user is always identified by name/email, never by
-        a UUID the client asks the user to type.
+        Case-insensitive substring search over `username` and `phone_or_email`.
+        `q` must be at least 3 characters; a shorter query is rejected with a
+        validation error so a one-letter query cannot enumerate the directory.
+        The caller is excluded. Exact and prefix matches sort first, then
+        alphabetically by username with an `id` tie-break, so paging never
+        duplicates or skips a user. Each page returns at most 10 users and the
+        email address is never included.
       parameters:
         - name: q
           in: query
           required: true
           schema:
             type: string
-            minLength: 1
+            minLength: 3
             maxLength: 100
         - name: limit
           in: query
+          description: Page size; values above 10 are clamped to 10.
           schema:
             type: integer
             minimum: 1
-            maximum: 50
-            default: 20
+            default: 10
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
       responses:
         '200':
-          description: Matching users with presence and friend state
+          description: A page of matching users (email omitted)
           content:
             application/json:
               schema:
                 type: object
-                required: [users]
+                required: [users, limit, offset, has_more, next_offset]
                 properties:
                   users:
                     type: array
                     items:
-                      $ref: '#/components/schemas/User'
+                      $ref: '#/components/schemas/UserSearchResult'
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+                  has_more:
+                    type: boolean
+                  next_offset:
+                    type: integer
+                    nullable: true
+                    description: Offset for the next page, or null on the last page
         '401':
           $ref: '#/components/responses/Unauthorized'
         '422':
@@ -1237,9 +1258,16 @@ components:
         id:
           type: string
           format: uuid
+        username:
+          type: string
+          description: >
+            The public handle, stored lowercase and unique case-insensitively.
+            Present in user, profile, contact, friend and member payloads.
         phone_or_email:
           type: string
-          description: Included on the caller's own profile and on public profiles
+          description: >
+            Only on the caller's own profile and self endpoints; never returned
+            for another user (see `UserSearchResult`).
         name:
           type: string
         nickname:
@@ -1337,10 +1365,19 @@ components:
 
     RegisterRequest:
       type: object
-      required: [phone_or_email, name, password]
+      required: [phone_or_email, username, name, password]
       properties:
         phone_or_email:
           type: string
+        username:
+          type: string
+          minLength: 3
+          maxLength: 30
+          pattern: '^[a-zA-Z0-9_.]+$'
+          description: >
+            Required and unique case-insensitively. Stored lowercase, 3–30
+            characters from `a-z`, `0-9`, `_` and `.`; no `@`, no leading or
+            trailing dot and no consecutive dots.
         name:
           type: string
           minLength: 1
@@ -1351,12 +1388,37 @@ components:
 
     LoginRequest:
       type: object
-      required: [phone_or_email, password]
+      required: [identifier, password]
       properties:
+        identifier:
+          type: string
+          description: Email/phone or username; matched case-insensitively
         phone_or_email:
           type: string
+          description: Legacy alias for `identifier`, accepted as a fallback
         password:
           type: string
+
+    UserSearchResult:
+      type: object
+      required: [id, username, name]
+      description: >
+        Minimal, profile-first search projection. Deliberately omits the email
+        so search cannot scrape contacts; open the public profile for more.
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        name:
+          type: string
+        nickname:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
 
     Member:
       type: object

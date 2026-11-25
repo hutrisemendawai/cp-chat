@@ -7,17 +7,37 @@ import { ApiError } from '../lib/errors.js';
 import { signAccessToken } from '../lib/tokens.js';
 import { toPublicUser } from '../domain/users.js';
 
+const usernameSchema = z
+  .string()
+  .trim()
+  .min(3, 'Username must be at least 3 characters')
+  .max(30, 'Username must be at most 30 characters')
+  .regex(/^[a-zA-Z0-9_.]+$/, 'Username may only contain letters, numbers, "_" and "."')
+  .refine((value) => !value.startsWith('.') && !value.endsWith('.'), {
+    message: 'Username cannot start or end with a dot',
+  })
+  .refine((value) => !value.includes('..'), {
+    message: 'Username cannot contain consecutive dots',
+  })
+  .transform((value) => value.toLowerCase());
+
 const registerSchema = z.object({
   phone_or_email: z.string().trim().min(3).max(255),
+  username: usernameSchema,
   name: z.string().trim().min(1).max(100),
   password: z.string().min(8).max(200),
 });
 
-const loginSchema = z.object({
-  phone_or_email: z.string().trim().min(1),
-  password: z.string().min(1),
-  device_id: z.string().trim().min(1).max(200).optional(),
-});
+const loginSchema = z
+  .object({
+    identifier: z.string().trim().min(1).optional(),
+    phone_or_email: z.string().trim().min(1).optional(),
+    password: z.string().min(1),
+    device_id: z.string().trim().min(1).max(200).optional(),
+  })
+  .refine((value) => value.identifier !== undefined || value.phone_or_email !== undefined, {
+    message: 'Provide an identifier (email or username)',
+  });
 
 const refreshSchema = z.object({
   refresh_token: z.string().min(1),
@@ -64,18 +84,27 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
     if (await users.findByContact(input.phone_or_email)) {
       throw new ApiError('conflict', 'That phone number or email is already registered');
     }
+    if (await users.findByUsername(input.username)) {
+      throw new ApiError('conflict', 'Username is already taken');
+    }
 
     const passwordHash = await hashPassword(input.password);
     let user;
     try {
       user = await users.create({
+        username: input.username,
         phoneOrEmail: input.phone_or_email,
         name: input.name,
         passwordHash,
       });
     } catch (error) {
-      // Unique violation from a concurrent registration of the same contact.
+      // Unique violation from a concurrent registration of the same contact or
+      // username. The index name distinguishes which one collided.
       if ((error as { code?: string }).code === '23505') {
+        const constraint = (error as { constraint?: string }).constraint ?? '';
+        if (constraint.includes('username')) {
+          throw new ApiError('conflict', 'Username is already taken');
+        }
         throw new ApiError('conflict', 'That phone number or email is already registered');
       }
       throw error;
@@ -95,11 +124,12 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
   app.post('/api/v1/auth/login', async (request, reply) => {
     const input = parse(loginSchema, request.body);
     const deviceId = deviceIdFrom(request, input.device_id);
-    const user = await users.findByContact(input.phone_or_email);
+    const identifier = input.identifier ?? input.phone_or_email!;
+    const user = await users.findByIdentifier(identifier);
 
     const valid = await verifyPassword(input.password, user?.password_hash ?? (await getDecoyHash()));
     if (!user || !valid) {
-      throw new ApiError('invalid_credentials', 'Incorrect phone/email or password');
+      throw new ApiError('invalid_credentials', 'Incorrect email/username or password');
     }
 
     const tokens = await issue(user.id, deviceId);

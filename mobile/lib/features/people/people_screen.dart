@@ -11,8 +11,8 @@ import '../presence/presence_controller.dart';
 import 'people_controller.dart';
 
 /// The user directory, styled after the Stitch "People" screen: a muted
-/// rounded search field, an emerald `Friends` section label and two-line rows
-/// with a trailing chat action.
+/// rounded search field that live-searches by username or email, an emerald
+/// `Friends` section label and two-line rows with a trailing chat action.
 class PeopleScreen extends ConsumerStatefulWidget {
   const PeopleScreen({super.key});
 
@@ -22,10 +22,12 @@ class PeopleScreen extends ConsumerStatefulWidget {
 
 class _PeopleScreenState extends ConsumerState<PeopleScreen> {
   final _search = TextEditingController();
+  final _searchFocus = FocusNode();
 
   @override
   void dispose() {
     _search.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
@@ -40,38 +42,13 @@ class _PeopleScreenState extends ConsumerState<PeopleScreen> {
     ref.read(peopleControllerProvider.notifier).clear();
   }
 
-  Future<void> _addFriendByIdentifier() async {
-    final identifier = await showDialog<String>(
-      context: context,
-      builder: (_) => const _AddFriendDialog(),
-    );
-
-    if (identifier == null || identifier.isEmpty || !mounted) return;
-    final error = await ref
-        .read(peopleControllerProvider.notifier)
-        .addFriendByIdentifier(identifier);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(error ?? 'Friend added')),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(peopleControllerProvider);
     final friends = ref.watch(friendsProvider);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('People'),
-        actions: [
-          IconButton(
-            tooltip: 'Add friend',
-            icon: const Icon(Icons.person_add_alt_1_outlined),
-            onPressed: _addFriendByIdentifier,
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('People')),
       body: Column(
         children: [
           Padding(
@@ -83,18 +60,21 @@ class _PeopleScreenState extends ConsumerState<PeopleScreen> {
             ),
             child: SearchField(
               controller: _search,
-              hintText: 'Search users by name or email...',
+              focusNode: _searchFocus,
+              hintText: 'Search by username or email...',
               onChanged: _onQueryChanged,
               onClear: _clear,
             ),
           ),
           Expanded(
-            child: state.isSearching
-                ? _SearchResults(state: state)
-                : _FriendsList(
+            child: !state.isSearching
+                ? _FriendsList(
                     friends: friends,
-                    onAddFriend: _addFriendByIdentifier,
-                  ),
+                    onFindPeople: _searchFocus.requestFocus,
+                  )
+                : !state.isQueryLongEnough
+                    ? const _SearchPrompt()
+                    : _SearchResults(state: state),
           ),
         ],
       ),
@@ -102,55 +82,40 @@ class _PeopleScreenState extends ConsumerState<PeopleScreen> {
   }
 }
 
-/// Owns its text controller for the lifetime of the route: disposing it as soon
-/// as `showDialog` resolves would run while the dialog is still animating out.
-class _AddFriendDialog extends StatefulWidget {
-  const _AddFriendDialog();
-
-  @override
-  State<_AddFriendDialog> createState() => _AddFriendDialogState();
-}
-
-class _AddFriendDialogState extends State<_AddFriendDialog> {
-  final _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _submit() => Navigator.of(context).pop(_controller.text.trim());
+/// Shown while the query is too short to search, so the network is never hit.
+class _SearchPrompt extends StatelessWidget {
+  const _SearchPrompt();
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Add friend'),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        textInputAction: TextInputAction.done,
-        decoration: const InputDecoration(
-          labelText: 'Email, phone or name',
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.person_search_outlined, size: 36, color: scheme.outline),
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              'Type at least 3 characters to search by username or email',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+            ),
+          ],
         ),
-        onSubmitted: (_) => _submit(),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(onPressed: _submit, child: const Text('Add')),
-      ],
     );
   }
 }
 
 class _FriendsList extends ConsumerWidget {
-  const _FriendsList({required this.friends, required this.onAddFriend});
+  const _FriendsList({required this.friends, required this.onFindPeople});
 
   final AsyncValue<List<User>> friends;
-  final VoidCallback onAddFriend;
+  final VoidCallback onFindPeople;
 
   Future<void> _refresh(WidgetRef ref) async {
     ref.invalidate(friendsProvider);
@@ -186,11 +151,12 @@ class _FriendsList extends ConsumerWidget {
                 EmptyState(
                   icon: Icons.group_outlined,
                   title: 'No friends yet',
-                  message: 'Find people by name or email, then add them.',
+                  message: 'Search by username or email to find people, then open '
+                      'a profile to add them.',
                   action: FilledButton.icon(
-                    onPressed: onAddFriend,
-                    icon: const Icon(Icons.person_add_alt_1),
-                    label: const Text('Add friend'),
+                    onPressed: onFindPeople,
+                    icon: const Icon(Icons.search),
+                    label: const Text('Find people'),
                   ),
                 ),
               ],
@@ -253,20 +219,17 @@ class _FriendsList extends ConsumerWidget {
   }
 }
 
+/// Live search results: minimal avatar + name rows, with a "Load more" button
+/// while the server reports another page.
 class _SearchResults extends ConsumerWidget {
   const _SearchResults({required this.state});
 
   final PeopleState state;
 
-  Future<void> _toggleFriend(BuildContext context, WidgetRef ref, User user) async {
-    final error = await ref.read(peopleControllerProvider.notifier).toggleFriend(user);
-    if (!context.mounted || error == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final controller = ref.read(peopleControllerProvider.notifier);
 
     if (state.loading && state.results.isEmpty) {
       return const Center(child: CircularProgressIndicator());
@@ -277,9 +240,7 @@ class _SearchResults extends ConsumerWidget {
         title: 'Search failed',
         message: state.error!,
         action: FilledButton.tonal(
-          onPressed: () => ref
-              .read(peopleControllerProvider.notifier)
-              .updateQuery(state.query),
+          onPressed: () => controller.updateQuery(state.query),
           child: const Text('Retry'),
         ),
       );
@@ -287,56 +248,90 @@ class _SearchResults extends ConsumerWidget {
     if (state.results.isEmpty) {
       return EmptyState(
         icon: Icons.person_search_outlined,
-        title: 'No matches',
+        title: 'No matching users found',
         message: 'No one matches "${state.query.trim()}".',
       );
     }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (state.loading) const LinearProgressIndicator(),
-        Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.only(bottom: AppSpacing.section),
-            itemCount: state.results.length,
-            separatorBuilder: (_, _) => Divider(
-              height: 1,
-              indent: AppSpacing.lg,
-              endIndent: AppSpacing.lg,
-              color: scheme.outlineVariant,
+    return ListView.separated(
+      padding: const EdgeInsets.only(bottom: AppSpacing.section),
+      itemCount: state.results.length + (state.hasMore ? 1 : 0),
+      separatorBuilder: (_, _) => Divider(
+        height: 1,
+        indent: AppSpacing.lg,
+        endIndent: AppSpacing.lg,
+        color: scheme.outlineVariant,
+      ),
+      itemBuilder: (context, index) {
+        if (index >= state.results.length) {
+          return Padding(
+            padding: const EdgeInsets.all(AppSpacing.md),
+            child: Center(
+              child: state.loadingMore
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : TextButton.icon(
+                      onPressed: controller.loadMore,
+                      icon: const Icon(Icons.expand_more, size: 18),
+                      label: const Text('Load more'),
+                    ),
             ),
-            itemBuilder: (context, index) {
-              final user = state.results[index];
-              return _UserTile(
-                user: user,
-                onTap: () => context.push('/users/${user.id}'),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      tooltip: 'Message',
-                      icon: const Icon(Icons.chat_bubble_outline),
-                      color: scheme.primary,
-                      onPressed: () => openDirectChat(context, ref, user),
-                    ),
-                    IconButton(
-                      tooltip: user.isFriend ? 'Remove friend' : 'Add friend',
-                      icon: Icon(
-                        user.isFriend
-                            ? Icons.how_to_reg
-                            : Icons.person_add_alt_1_outlined,
-                        color: user.isFriend ? scheme.primary : null,
-                      ),
-                      onPressed: () => _toggleFriend(context, ref, user),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
+          );
+        }
+        final user = state.results[index];
+        return _SearchResultTile(
+          user: user,
+          onTap: () => context.push('/users/${user.id}'),
+        );
+      },
+    );
+  }
+}
+
+/// A minimal, profile-first search row: avatar and display name only. No email,
+/// no username and no inline add button; tapping opens the full profile.
+class _SearchResultTile extends ConsumerWidget {
+  const _SearchResultTile({required this.user, required this.onTap});
+
+  final User user;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final presence = ref.watch(presenceProvider(user.id));
+    final status = presence?.resolvedStatus ?? user.effectiveStatus;
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
         ),
-      ],
+        child: Row(
+          children: [
+            UserAvatarWithStatus(
+              avatarKey: user.avatarUrl,
+              name: user.displayName,
+              status: status,
+              radius: 24,
+            ),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: Text(
+                user.displayName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleMedium,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

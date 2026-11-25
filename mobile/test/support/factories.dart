@@ -25,8 +25,10 @@ Message message(
 User user(
   String id, {
   String? name,
+  String? username,
   String? nickname,
   String? avatarKey,
+  String? phoneOrEmail,
   String? status,
   String? effectiveStatus,
   String? customStatus,
@@ -34,8 +36,10 @@ User user(
     User(
       id: id,
       name: name ?? id,
+      username: username,
       nickname: nickname,
       avatarUrl: avatarKey,
+      phoneOrEmail: phoneOrEmail,
       status: status,
       effectiveStatus: effectiveStatus,
       customStatus: customStatus,

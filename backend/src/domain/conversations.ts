@@ -496,7 +496,7 @@ export class ConversationRepository {
       }
     >(
       `SELECT cm.conversation_id, cm.role, cm.last_read_seq, cm.joined_at,
-              u.id, u.phone_or_email, u.name, u.nickname, u.avatar_url,
+              u.id, u.username, u.phone_or_email, u.name, u.nickname, u.avatar_url,
               u.status, u.custom_status, u.bio, u.last_seen_at, u.created_at
          FROM conversation_members cm
          JOIN users u ON u.id = cm.user_id
@@ -516,6 +516,7 @@ export class ConversationRepository {
         user: toPublicUser(
           {
             id: row.id,
+            username: row.username,
             phone_or_email: row.phone_or_email,
             name: row.name,
             nickname: row.nickname,

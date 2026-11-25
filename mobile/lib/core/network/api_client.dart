@@ -166,12 +166,18 @@ class ApiClient {
   /// Authenticates and persists the session.
   Future<AuthSession> register({
     required String phoneOrEmail,
+    required String username,
     required String name,
     required String password,
   }) async {
     final session = await _postSession(
       '/api/v1/auth/register',
-      {'phone_or_email': phoneOrEmail, 'name': name, 'password': password},
+      {
+        'phone_or_email': phoneOrEmail,
+        'username': username,
+        'name': name,
+        'password': password,
+      },
       expected: 201,
     );
     await _tokenStore.saveSession(
@@ -182,13 +188,14 @@ class ApiClient {
     return session;
   }
 
+  /// Logs in with either an email/phone or a username.
   Future<AuthSession> login({
-    required String phoneOrEmail,
+    required String identifier,
     required String password,
   }) async {
     final session = await _postSession(
       '/api/v1/auth/login',
-      {'phone_or_email': phoneOrEmail, 'password': password},
+      {'identifier': identifier, 'password': password},
     );
     await _tokenStore.saveSession(
       accessToken: session.accessToken,
@@ -233,16 +240,19 @@ class ApiClient {
     return User.fromJson(_ok(response));
   }
 
-  /// Directory search by name or email/phone. Never searches by UUID.
-  Future<List<User>> searchUsers(String query, {int limit = 20}) async {
+  /// Paginated directory search over username and email/phone for the "add
+  /// friend" live search. The server requires at least 3 characters, returns at
+  /// most 10 users per page, and never includes an email address.
+  Future<UserSearchPage> searchUsers(
+    String query, {
+    int limit = 10,
+    int offset = 0,
+  }) async {
     final response = await dio.get<dynamic>(
       '/api/v1/users/search',
-      queryParameters: {'q': query, 'limit': limit},
+      queryParameters: {'q': query, 'limit': limit, 'offset': offset},
     );
-    final body = _ok(response);
-    return (body['users'] as List<dynamic>)
-        .map((item) => User.fromJson(item as Map<String, dynamic>))
-        .toList();
+    return UserSearchPage.fromJson(_ok(response));
   }
 
   /// The caller's friends, ordered online first then by name.

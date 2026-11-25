@@ -7,6 +7,7 @@ export const USER_STATUSES: readonly UserStatus[] = ['online', 'idle', 'dnd', 'i
 
 export type UserRow = {
   id: string;
+  username: string;
   phone_or_email: string;
   name: string;
   nickname: string | null;
@@ -20,6 +21,7 @@ export type UserRow = {
 
 export type PublicUser = {
   id: string;
+  username: string;
   name: string;
   nickname: string | null;
   avatar_url: string | null;
@@ -35,7 +37,7 @@ export type PublicUser = {
   phone_or_email?: string;
 };
 
-const USER_COLUMNS = `id, phone_or_email, name, nickname, avatar_url, status,
+const USER_COLUMNS = `id, username, phone_or_email, name, nickname, avatar_url, status,
                       custom_status, bio, last_seen_at, created_at`;
 
 /**
@@ -55,6 +57,7 @@ export function toOwnUser(row: UserRow, connected: boolean): PublicUser {
     row.status === 'invisible' ? 'offline' : connected ? row.status : 'offline';
   return {
     id: row.id,
+    username: row.username,
     name: row.name,
     nickname: row.nickname,
     avatar_url: row.avatar_url,
@@ -80,6 +83,7 @@ export function toPublicUser(
   const effective = row.status === 'invisible' ? 'offline' : connected ? row.status : 'offline';
   return {
     id: row.id,
+    username: row.username,
     name: row.name,
     nickname: row.nickname,
     avatar_url: row.avatar_url,
@@ -114,6 +118,33 @@ export class UserRepository {
     return rows[0] ?? null;
   }
 
+  async findByUsername(username: string): Promise<UserRow | null> {
+    const { rows } = await this.db.query<UserRow>(
+      `SELECT ${USER_COLUMNS} FROM users WHERE lower(username) = lower($1)`,
+      [username],
+    );
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Resolves a login identifier that may be either an email/phone or a
+   * username. Contact matches are preferred so an address that happens to also
+   * be a username still resolves to its own account.
+   */
+  async findByIdentifier(
+    identifier: string,
+  ): Promise<(UserRow & { password_hash: string }) | null> {
+    const { rows } = await this.db.query<UserRow & { password_hash: string }>(
+      `SELECT ${USER_COLUMNS}, password_hash
+         FROM users
+        WHERE lower(phone_or_email) = lower($1) OR lower(username) = lower($1)
+        ORDER BY CASE WHEN lower(phone_or_email) = lower($1) THEN 0 ELSE 1 END, id ASC
+        LIMIT 1`,
+      [identifier],
+    );
+    return rows[0] ?? null;
+  }
+
   async findById(id: string): Promise<UserRow | null> {
     const { rows } = await this.db.query<UserRow>(
       `SELECT ${USER_COLUMNS} FROM users WHERE id = $1`,
@@ -123,15 +154,16 @@ export class UserRepository {
   }
 
   async create(input: {
+    username: string;
     phoneOrEmail: string;
     name: string;
     passwordHash: string;
   }): Promise<UserRow> {
     const { rows } = await this.db.query<UserRow>(
-      `INSERT INTO users (phone_or_email, name, password_hash)
-       VALUES ($1, $2, $3)
+      `INSERT INTO users (username, phone_or_email, name, password_hash)
+       VALUES ($1, $2, $3, $4)
        RETURNING ${USER_COLUMNS}`,
-      [input.phoneOrEmail, input.name, input.passwordHash],
+      [input.username, input.phoneOrEmail, input.name, input.passwordHash],
     );
     return rows[0]!;
   }

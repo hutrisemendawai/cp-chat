@@ -4,6 +4,7 @@ import type { UserRow } from './users.js';
 
 export type FriendUser = {
   id: string;
+  username: string;
   name: string;
   nickname: string | null;
   phone_or_email: string;
@@ -15,9 +16,27 @@ export type FriendUser = {
   is_friend: boolean;
 };
 
+/**
+ * Minimal projection for the live "add friend" search. Deliberately omits the
+ * contact so emails cannot be scraped through search; the client opens the full
+ * profile to see more.
+ */
+export type UserSearchResult = {
+  id: string;
+  username: string;
+  name: string;
+  nickname: string | null;
+  avatar_url: string | null;
+};
+
+export type UserSearchPage = {
+  users: UserSearchResult[];
+  hasMore: boolean;
+};
+
 type FriendRow = UserRow & { is_friend: boolean };
 
-const USER_COLUMNS = `u.id, u.phone_or_email, u.name, u.nickname, u.avatar_url,
+const USER_COLUMNS = `u.id, u.username, u.phone_or_email, u.name, u.nickname, u.avatar_url,
                       u.status, u.custom_status, u.bio, u.last_seen_at, u.created_at`;
 
 /**
@@ -30,6 +49,7 @@ export function toFriendUser(row: FriendRow, connected: boolean): FriendUser {
   const status = effectiveStatus(row.status, connected);
   return {
     id: row.id,
+    username: row.username,
     name: row.name,
     nickname: row.nickname,
     phone_or_email: row.phone_or_email,
@@ -44,8 +64,8 @@ export function toFriendUser(row: FriendRow, connected: boolean): FriendUser {
 
 /**
  * Friends/contacts storage plus the directory search that backs the mobile
- * user pickers. Search runs over `name` and `phone_or_email` (never the UUID)
- * and is always scoped to "not me".
+ * "add friend" flow. Search runs over `username` and `phone_or_email` (never the
+ * UUID) and is always scoped to "not me".
  */
 export class FriendRepository {
   constructor(
@@ -54,35 +74,39 @@ export class FriendRepository {
   ) {}
 
   /**
-   * Case-insensitive substring search over name and contact. Exact email/name
-   * and prefix matches sort first, then alphabetical by name, so typing a full
-   * address surfaces that person at the top.
+   * Case-insensitive substring search over username and contact, paginated.
+   *
+   * Exact and prefix matches sort first, then alphabetically by username with a
+   * final `id` tie-break, so paging never duplicates or skips a user. One extra
+   * row is fetched to derive `hasMore` without a `COUNT(*)`. The contact is
+   * intentionally not projected: search must never leak an email address.
    */
-  async search(callerId: string, query: string, limit: number): Promise<FriendUser[]> {
-    const { rows } = await this.db.query<FriendRow>(
-      `SELECT ${USER_COLUMNS},
-              EXISTS (
-                SELECT 1 FROM user_friends f
-                 WHERE f.user_id = $1 AND f.friend_id = u.id
-              ) AS is_friend
+  async search(
+    callerId: string,
+    query: string,
+    limit: number,
+    offset: number,
+  ): Promise<UserSearchPage> {
+    const { rows } = await this.db.query<UserSearchResult>(
+      `SELECT u.id, u.username, u.name, u.nickname, u.avatar_url
          FROM users u
         WHERE u.id <> $1
-          AND (lower(u.name) LIKE '%' || lower($2) || '%'
+          AND (lower(u.username) LIKE '%' || lower($2) || '%'
                OR lower(u.phone_or_email) LIKE '%' || lower($2) || '%')
         ORDER BY
           CASE
-            WHEN lower(u.phone_or_email) = lower($2) THEN 0
-            WHEN lower(u.phone_or_email) LIKE lower($2) || '%' THEN 1
-            WHEN lower(u.name) = lower($2) THEN 2
-            WHEN lower(u.name) LIKE lower($2) || '%' THEN 3
+            WHEN lower(u.username) = lower($2) THEN 0
+            WHEN lower(u.username) LIKE lower($2) || '%' THEN 1
+            WHEN lower(u.phone_or_email) = lower($2) THEN 2
+            WHEN lower(u.phone_or_email) LIKE lower($2) || '%' THEN 3
             ELSE 4
           END,
-          lower(u.name) ASC,
+          lower(u.username) ASC,
           u.id ASC
-        LIMIT $3`,
-      [callerId, query, limit],
+        LIMIT $3 OFFSET $4`,
+      [callerId, query, limit + 1, offset],
     );
-    return this.project(rows);
+    return { users: rows.slice(0, limit), hasMore: rows.length > limit };
   }
 
   /** The caller's friends. Ordering (online first, then name) happens in JS. */
@@ -101,12 +125,14 @@ export class FriendRepository {
     });
   }
 
-  /** Resolves an email/phone or exact name to a user, preferring contact match. */
+  /** Resolves an email/phone, username or exact name, preferring a contact match. */
   async resolve(identifier: string): Promise<UserRow | null> {
     const { rows } = await this.db.query<UserRow>(
       `SELECT ${USER_COLUMNS}
          FROM users u
-        WHERE lower(u.phone_or_email) = lower($1) OR lower(u.name) = lower($1)
+        WHERE lower(u.phone_or_email) = lower($1)
+           OR lower(u.username) = lower($1)
+           OR lower(u.name) = lower($1)
         ORDER BY CASE WHEN lower(u.phone_or_email) = lower($1) THEN 0 ELSE 1 END,
                  u.id ASC
         LIMIT 1`,

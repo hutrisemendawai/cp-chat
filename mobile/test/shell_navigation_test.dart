@@ -104,7 +104,7 @@ void main() {
 
     await tester.tap(find.text('People'));
     await tester.pumpAndSettle();
-    expect(find.text('Search users by name or email...'), findsOneWidget);
+    expect(find.text('Search by username or email...'), findsOneWidget);
 
     await tester.tap(find.text('Profile'));
     await tester.pumpAndSettle();

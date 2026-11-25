@@ -110,9 +110,9 @@ class _UserSearchSheetState extends ConsumerState<_UserSearchSheet> {
   }
 }
 
-/// Debounced live search by **name or email** with the caller's friends shown as
-/// quick-select chips while the query is empty. Users are picked by identity,
-/// never by pasting a UUID.
+/// Debounced live search by **username or email** with the caller's friends
+/// shown as quick-select chips while the query is empty. Users are picked by
+/// identity, never by pasting a UUID.
 class UserSearchPicker extends ConsumerStatefulWidget {
   const UserSearchPicker({
     super.key,
@@ -142,7 +142,9 @@ class UserSearchPicker extends ConsumerStatefulWidget {
 }
 
 class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
-  static const _debounceDuration = Duration(milliseconds: 300);
+  static const _debounceDuration = Duration(milliseconds: 350);
+  static const _minQueryLength = 3;
+  static const _pageSize = 10;
 
   final _controller = TextEditingController();
   final Map<String, User> _selected = {};
@@ -151,6 +153,9 @@ class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
   List<User> _friends = const [];
   List<User> _results = const [];
   bool _loading = false;
+  bool _loadingMore = false;
+  bool _hasMore = false;
+  int _nextOffset = 0;
   bool _friendsLoading = true;
   String? _error;
   int _requestToken = 0;
@@ -190,10 +195,15 @@ class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
   void _onQueryChanged(String value) {
     _debounce?.cancel();
     final query = value.trim();
-    if (query.isEmpty) {
+    if (query.isEmpty || query.length < _minQueryLength) {
+      // Too short (or empty) to search: drop any in-flight request and reset.
+      _requestToken += 1;
       setState(() {
         _results = const [];
         _loading = false;
+        _loadingMore = false;
+        _hasMore = false;
+        _nextOffset = 0;
         _error = null;
       });
       return;
@@ -201,29 +211,53 @@ class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
     _debounce = Timer(_debounceDuration, () => unawaited(_search(query)));
   }
 
-  Future<void> _search(String query) async {
+  void _loadMore() {
+    final query = _controller.text.trim();
+    if (!_hasMore || _loadingMore || _loading || query.length < _minQueryLength) return;
+    unawaited(_search(query, append: true));
+  }
+
+  Future<void> _search(String query, {bool append = false}) async {
     final token = ++_requestToken;
+    final offset = append ? _nextOffset : 0;
     setState(() {
-      _loading = true;
+      if (append) {
+        _loadingMore = true;
+      } else {
+        _loading = true;
+      }
       _error = null;
     });
     try {
-      final users = await ref.read(apiClientProvider).searchUsers(query);
+      final page = await ref
+          .read(apiClientProvider)
+          .searchUsers(query, limit: _pageSize, offset: offset);
       if (!mounted || token != _requestToken) return;
+      final merged = append ? [..._results] : <User>[];
+      final seen = merged.map((user) => user.id).toSet();
+      for (final user in page.items) {
+        if (_hiddenIds.contains(user.id)) continue;
+        if (seen.add(user.id)) merged.add(user);
+      }
       setState(() {
-        _results = users.where((user) => !_hiddenIds.contains(user.id)).toList();
+        _results = merged;
+        _hasMore = page.hasMore;
+        _nextOffset = page.nextOffset ?? offset + page.items.length;
         _loading = false;
+        _loadingMore = false;
       });
     } on ApiException catch (error) {
       if (!mounted || token != _requestToken) return;
       setState(() {
         _loading = false;
+        _loadingMore = false;
         _error = error.message;
       });
     } catch (_) {
       if (!mounted || token != _requestToken) return;
       setState(() {
         _loading = false;
+        _loadingMore = false;
         _error = 'Search failed. Check your connection.';
       });
     }
@@ -263,7 +297,7 @@ class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
           ),
           child: SearchField(
             controller: _controller,
-            hintText: 'Search by name or email',
+            hintText: 'Search by username or email',
             autofocus: widget.autofocus,
             onChanged: _onQueryChanged,
             onClear: () {
@@ -292,7 +326,7 @@ class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
     if (_friends.isEmpty) {
       return const _Hint(
         icon: Icons.group_outlined,
-        message: 'No friends yet. Search by name or email to find someone.',
+        message: 'No friends yet. Search by username or email to find someone.',
       );
     }
 
@@ -327,13 +361,20 @@ class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
   }
 
   Widget _buildResults(ThemeData theme) {
+    final query = _controller.text.trim();
+    if (query.length < _minQueryLength) {
+      return const _Hint(
+        icon: Icons.person_search_outlined,
+        message: 'Type at least 3 characters to search by username or email.',
+      );
+    }
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_results.isEmpty) {
       return const _Hint(
         icon: Icons.person_search_outlined,
-        message: 'No one matches that name or email.',
+        message: 'No matching users found.',
       );
     }
 
@@ -346,6 +387,23 @@ class _UserSearchPickerState extends ConsumerState<UserSearchPicker> {
             selected: _isSelected(user),
             multiSelect: widget.multiSelect,
             onTap: () => _activate(user),
+          ),
+        if (_hasMore)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Center(
+              child: _loadingMore
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : TextButton.icon(
+                      onPressed: _loadMore,
+                      icon: const Icon(Icons.expand_more, size: 18),
+                      label: const Text('Load more'),
+                    ),
+            ),
           ),
       ],
     );

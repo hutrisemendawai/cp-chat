@@ -179,8 +179,9 @@ class _UserProfileScreenState extends ConsumerState<UserProfileScreen> {
                   ],
                 ),
 
-              // Grouped contact + bio details card.
-              if (user.phoneOrEmail != null || (bio != null && bio.isNotEmpty)) ...[
+              // Grouped username + bio details card, deliberately without the
+              // email address.
+              if (user.username != null || (bio != null && bio.isNotEmpty)) ...[
                 const SizedBox(height: AppSpacing.lg),
                 Container(
                   decoration: BoxDecoration(
@@ -191,13 +192,13 @@ class _UserProfileScreenState extends ConsumerState<UserProfileScreen> {
                   clipBehavior: Clip.antiAlias,
                   child: Column(
                     children: [
-                      if (user.phoneOrEmail != null)
+                      if (user.username != null)
                         _DetailRow(
                           icon: Icons.alternate_email,
-                          label: 'Contact',
-                          value: user.phoneOrEmail!,
+                          label: 'Username',
+                          value: '@${user.username}',
                         ),
-                      if (user.phoneOrEmail != null &&
+                      if (user.username != null &&
                           bio != null &&
                           bio.isNotEmpty)
                         Divider(height: 1, color: scheme.outlineVariant),
