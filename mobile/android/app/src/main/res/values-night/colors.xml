@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches AppTheme.dark's surface (0xFF0E1512) so the native launch
+         background blends into the Flutter splash and the chat list. -->
+    <color name="splash_background">#0E1512</color>
+</resources>

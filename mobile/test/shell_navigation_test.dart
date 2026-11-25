@@ -15,11 +15,13 @@ import 'support/factories.dart' as factories;
 
 class _FakeAuth extends AuthController {
   @override
-  AuthSession? build() => AuthSession(
-        user: const User(id: 'me', name: 'Me'),
-        accessToken: 'access',
-        refreshToken: 'refresh',
-        expiresIn: 900,
+  AuthState build() => const AuthState.authenticated(
+        AuthSession(
+          user: User(id: 'me', name: 'Me'),
+          accessToken: 'access',
+          refreshToken: 'refresh',
+          expiresIn: 900,
+        ),
       );
 }
 

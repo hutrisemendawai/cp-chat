@@ -1,13 +1,19 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../models/models.dart';
+
 /// Persists JWT access/refresh tokens in the Android Keystore-backed storage,
-/// plus the stable per-install device id used for connection routing.
+/// plus the stable per-install device id used for connection routing and the
+/// cached profile of the signed-in user.
 class TokenStore {
   TokenStore([this._storage = const FlutterSecureStorage()]);
 
   static const _accessTokenKey = 'access_token';
   static const _refreshTokenKey = 'refresh_token';
   static const _userIdKey = 'user_id';
+  static const _userKey = 'user_profile';
   static const _deviceIdKey = 'device_id';
   static const _e2eeKeysKey = 'e2ee_keys';
   static const _e2eeSessionsKey = 'e2ee_sessions';
@@ -19,6 +25,21 @@ class TokenStore {
   Future<String?> readRefreshToken() => _storage.read(key: _refreshTokenKey);
 
   Future<String?> readUserId() => _storage.read(key: _userIdKey);
+
+  /// The cached profile of the signed-in user, or `null` when none was stored
+  /// (e.g. an install upgraded from a build that only persisted the user id).
+  Future<User?> readUser() async {
+    final raw = await _storage.read(key: _userKey);
+    if (raw == null) return null;
+    try {
+      return User.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveUser(User user) =>
+      _storage.write(key: _userKey, value: jsonEncode(user.toJson()));
 
   /// The device id survives logout so the gateway keeps a stable routing key.
   Future<String?> readDeviceId() => _storage.read(key: _deviceIdKey);
@@ -51,12 +72,7 @@ class TokenStore {
     await _storage.delete(key: _accessTokenKey);
     await _storage.delete(key: _refreshTokenKey);
     await _storage.delete(key: _userIdKey);
-  }
-
-  Future<bool> hasSession() async {
-    final access = await readAccessToken();
-    final refresh = await readRefreshToken();
-    return access != null || refresh != null;
+    await _storage.delete(key: _userKey);
   }
 
   /// Raw serialised private key material, encrypted at rest by the Android

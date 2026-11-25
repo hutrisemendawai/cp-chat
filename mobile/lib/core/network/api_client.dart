@@ -185,6 +185,7 @@ class ApiClient {
       refreshToken: session.refreshToken,
       userId: session.user.id,
     );
+    await _tokenStore.saveUser(session.user);
     return session;
   }
 
@@ -202,6 +203,7 @@ class ApiClient {
       refreshToken: session.refreshToken,
       userId: session.user.id,
     );
+    await _tokenStore.saveUser(session.user);
     return session;
   }
 

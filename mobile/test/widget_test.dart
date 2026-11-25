@@ -2,12 +2,46 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'package:cp_chat/core/models/models.dart';
+import 'package:cp_chat/core/notifications/local_notification_service.dart';
+import 'package:cp_chat/core/providers.dart';
 import 'package:cp_chat/features/auth/auth_screen.dart';
 import 'package:cp_chat/main.dart';
 
+/// A resolved signed-out session, so the router lands on the sign-in screen
+/// without waiting on storage.
+class _SignedOutAuth extends AuthController {
+  @override
+  AuthState build() => const AuthState.unauthenticated();
+}
+
+/// No-op notification tray so the platform plugin is never touched.
+class _FakeNotifications extends LocalNotificationService {
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<void> requestPermission() async {}
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  String? get coldStartConversationId => null;
+}
+
 void main() {
   testWidgets('signed-out users are routed to the sign-in screen', (tester) async {
-    await tester.pumpWidget(const ProviderScope(child: CpChatApp()));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authControllerProvider.overrideWith(_SignedOutAuth.new),
+          localNotificationServiceProvider.overrideWithValue(_FakeNotifications()),
+          bootstrapProvider.overrideWith((ref) async {}),
+        ],
+        child: const CpChatApp(),
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Welcome back'), findsOneWidget);

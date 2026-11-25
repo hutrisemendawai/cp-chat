@@ -96,6 +96,23 @@ class User {
       isFriend: isFriend ?? this.isFriend,
     );
   }
+
+  /// Serialises the profile for local caching (see `TokenStore.saveUser`) so a
+  /// cold start can restore the signed-in user without a network round trip.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'username': username,
+        'nickname': nickname,
+        'avatar_url': avatarUrl,
+        'phone_or_email': phoneOrEmail,
+        'status': status,
+        'effective_status': effectiveStatus,
+        'custom_status': customStatus,
+        'bio': bio,
+        'last_seen_at': lastSeenAt?.toIso8601String(),
+        'is_friend': isFriend,
+      };
 }
 
 /// One page of directory search results (`GET /api/v1/users/search`).
@@ -141,6 +158,52 @@ class AuthSession {
   final String accessToken;
   final String refreshToken;
   final int expiresIn;
+}
+
+/// Startup/session lifecycle of the signed-in user.
+///
+/// The states are mutually exclusive and explicit so the router can tell "still
+/// reading the persisted session" apart from "definitely signed out", and never
+/// shows the login screen while a stored session is being restored.
+enum AuthStatus {
+  /// The local session lookup has not resolved yet. The UI shows a neutral
+  /// splash, never the login screen.
+  initializing,
+
+  /// A session is available (from storage or a fresh login).
+  authenticated,
+
+  /// No session: a first-time or explicitly logged-out user.
+  unauthenticated,
+}
+
+/// The auth lifecycle plus the current [AuthSession], if any.
+class AuthState {
+  const AuthState._(this.status, this.session);
+
+  const AuthState.initializing() : this._(AuthStatus.initializing, null);
+
+  const AuthState.authenticated(AuthSession session)
+      : this._(AuthStatus.authenticated, session);
+
+  const AuthState.unauthenticated() : this._(AuthStatus.unauthenticated, null);
+
+  final AuthStatus status;
+
+  /// The active session, non-null exactly when [status] is
+  /// [AuthStatus.authenticated].
+  final AuthSession? session;
+
+  bool get isInitializing => status == AuthStatus.initializing;
+  bool get isAuthenticated => status == AuthStatus.authenticated;
+  bool get isUnauthenticated => status == AuthStatus.unauthenticated;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AuthState && other.status == status && other.session == session;
+
+  @override
+  int get hashCode => Object.hash(status, session);
 }
 
 class TokenPair {

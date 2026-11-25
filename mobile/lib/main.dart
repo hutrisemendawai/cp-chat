@@ -9,6 +9,7 @@ import 'core/notifications/crash_reporter.dart';
 import 'core/notifications/fcm_service.dart';
 import 'core/models/models.dart';
 import 'core/providers.dart';
+import 'core/storage/token_store.dart';
 import 'core/theme/app_theme.dart';
 import 'features/auth/auth_screen.dart';
 import 'features/chat/chat_screen.dart';
@@ -22,8 +23,9 @@ import 'features/presence/presence_controller.dart';
 import 'features/profile/my_profile_screen.dart';
 import 'features/profile/user_profile_screen.dart';
 import 'features/search/search_screen.dart';
+import 'features/splash/splash_screen.dart';
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Registered before runApp so a push that arrives while the app is backgrounded
   // or swiped away is handled by the headless isolate, not silently dropped.
@@ -31,13 +33,40 @@ void main() async {
   // Install the crash handlers before the first frame so an early error is not
   // lost. This is a no-op in debug builds.
   await CrashReporter.initialize();
-  runApp(const ProviderScope(child: CpChatApp()));
+
+  // Hydrate the persisted session from local storage before the first frame. It
+  // is a single secure-storage read (no network), so the native splash hands off
+  // straight to the chat list for a returning user instead of flashing the login
+  // screen while a restore runs. A storage failure must not abort launch: fall
+  // back to the initializing state so _bootstrap's restore can resolve it.
+  final tokenStore = TokenStore();
+  AuthState initialAuth;
+  try {
+    initialAuth = await hydrateAuthState(tokenStore);
+  } catch (error) {
+    debugPrint('Initial session hydration failed: $error');
+    initialAuth = const AuthState.initializing();
+  }
+
+  runApp(
+    ProviderScope(
+      overrides: [
+        tokenStoreProvider.overrideWithValue(tokenStore),
+        authControllerProvider.overrideWith(() => AuthController(initial: initialAuth)),
+      ],
+      child: const CpChatApp(),
+    ),
+  );
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
   final router = GoRouter(
     initialLocation: '/conversations',
     routes: [
+      GoRoute(
+        path: '/splash',
+        builder: (context, state) => const SplashScreen(),
+      ),
       GoRoute(
         path: '/auth',
         builder: (context, state) => const AuthScreen(),
@@ -103,11 +132,22 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
     ],
     redirect: (context, state) {
-      final session = ref.read(authControllerProvider);
+      final auth = ref.read(authControllerProvider);
       final atAuth = state.matchedLocation == '/auth';
-      if (session == null && !atAuth) return '/auth';
-      if (session != null && atAuth) return '/conversations';
-      return null;
+      final atSplash = state.matchedLocation == '/splash';
+
+      // While the local session is still being read, show the neutral splash —
+      // never the login screen. In production the state is resolved before the
+      // first frame, so this path is only reached by an unseeded scope.
+      if (auth.isInitializing) return atSplash ? null : '/splash';
+
+      // A restored or freshly logged-in session goes straight to the chat list.
+      if (auth.isAuthenticated) {
+        return (atAuth || atSplash) ? '/conversations' : null;
+      }
+
+      // First-time and explicitly logged-out users land on the login screen.
+      return atAuth ? null : '/auth';
     },
     refreshListenable: _AuthRefresh(ref),
   );
@@ -118,12 +158,12 @@ final routerProvider = Provider<GoRouter>((ref) {
 /// Bridges Riverpod auth state into GoRouter's redirect mechanism.
 class _AuthRefresh extends ChangeNotifier {
   _AuthRefresh(this._ref) {
-    _subscription = _ref.listen<AuthSession?>(
+    _subscription = _ref.listen<AuthState>(
       authControllerProvider,
       (previous, next) {
-        // A signed-out session must not leave the previous account's directory
-        // results and presence cached for the next user on this device.
-        if (next == null && previous != null) {
+        // Signing out must not leave the previous account's directory results
+        // and presence cached for the next user on this device.
+        if ((previous?.isAuthenticated ?? false) && !next.isAuthenticated) {
           _ref.invalidate(peopleControllerProvider);
           _ref.invalidate(presenceProvider);
           _ref.invalidate(friendsProvider);
@@ -134,7 +174,7 @@ class _AuthRefresh extends ChangeNotifier {
   }
 
   final Ref _ref;
-  late final ProviderSubscription<AuthSession?> _subscription;
+  late final ProviderSubscription<AuthState> _subscription;
 
   @override
   void dispose() {
@@ -177,7 +217,13 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
   }
 
   Future<void> _bootstrap() async {
-    await ref.read(bootstrapProvider.future);
+    // Resolve the local session first. In production it is already seeded before
+    // runApp, so this only runs for a scope that was not seeded; it must finish
+    // before the best-effort network bootstrap below so a failure there can
+    // never leave the app stuck on the splash.
+    if (ref.read(authControllerProvider).isInitializing) {
+      await ref.read(authControllerProvider.notifier).restore();
+    }
 
     // Keep the session runtime subscribed for the whole app lifetime so a
     // manual login (not just a cold-start restore) starts the socket. The
@@ -185,14 +231,21 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
     // constructs it before the first transition can occur.
     ref.read(sessionRuntimeProvider);
 
-    // Restore a persisted session before the router's first redirect settles.
-    await ref.read(authControllerProvider.notifier).restore();
+    // Device id and notifications are best-effort: a failure must not block
+    // routing or sign the user out, so it is caught rather than awaited bare.
+    try {
+      await ref.read(bootstrapProvider.future);
+    } catch (error) {
+      debugPrint('Bootstrap failed: $error');
+    }
 
-    // A restored session is applied by assigning state, which the runtime
-    // listener picks up; call start() explicitly so the first boot does not
-    // depend on listener ordering.
-    if (ref.read(authControllerProvider) != null) {
-      await ref.read(sessionRuntimeProvider.notifier).start();
+    // Entering with a restored session: start the realtime work and validate the
+    // session against the server in the background. Both are fire-and-forget so
+    // the chat list — served from the local mirror — is interactive immediately
+    // and an offline launch is never blocked.
+    if (ref.read(authControllerProvider).isAuthenticated) {
+      unawaited(ref.read(sessionRuntimeProvider.notifier).start());
+      unawaited(ref.read(authControllerProvider.notifier).validateSession());
     }
 
     // Local notifications are independent of Firebase, so they are always

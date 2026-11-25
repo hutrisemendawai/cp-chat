@@ -139,9 +139,11 @@ class _FakePush extends PushRegistration {
 /// Exposes a way to drive the auth state from a test without a network login.
 class _FakeAuth extends AuthController {
   @override
-  AuthSession? build() => null;
+  AuthState build() => const AuthState.unauthenticated();
 
-  void emit(AuthSession? session) => state = session;
+  void emit(AuthSession? session) => state = session == null
+      ? const AuthState.unauthenticated()
+      : AuthState.authenticated(session);
 }
 
 AuthSession _session() => AuthSession(
@@ -238,7 +240,7 @@ void main() {
 
       await auth.logout();
 
-      expect(container.read(authControllerProvider), isNull);
+      expect(container.read(authControllerProvider).isUnauthenticated, isTrue);
       expect(await container.read(chatDaoProvider).conversations(), isEmpty);
     });
 
@@ -248,7 +250,7 @@ void main() {
 
       await auth.logout();
 
-      expect(container.read(authControllerProvider), isNull);
+      expect(container.read(authControllerProvider).isUnauthenticated, isTrue);
     });
 
     test('does not hang when a teardown step stalls', () async {
@@ -258,7 +260,7 @@ void main() {
 
       await auth.logout();
 
-      expect(container.read(authControllerProvider), isNull);
+      expect(container.read(authControllerProvider).isUnauthenticated, isTrue);
     });
 
     test('ApiClient.logout clears tokens even when the server is unreachable', () async {

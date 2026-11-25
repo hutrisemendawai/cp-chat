@@ -213,7 +213,7 @@ class SessionLifecycle {
   /// call repeatedly: a run already in flight is awaited rather than duplicated,
   /// and a cold-start restore and the login listener share one boot.
   Future<void> start() async {
-    if (_ref.read(authControllerProvider) == null) return;
+    if (!_ref.read(authControllerProvider).isAuthenticated) return;
     _running = true;
     final existing = _starting;
     if (existing != null) return existing;
@@ -294,9 +294,9 @@ final sessionLifecycleProvider = Provider<SessionLifecycle>(SessionLifecycle.new
 class SessionRuntime extends Notifier<bool> {
   @override
   bool build() {
-    ref.listen<AuthSession?>(authControllerProvider, (previous, next) {
+    ref.listen<AuthState>(authControllerProvider, (previous, next) {
       final lifecycle = ref.read(sessionLifecycleProvider);
-      if (next != null) {
+      if (next.isAuthenticated) {
         unawaited(lifecycle.start());
       } else {
         unawaited(lifecycle.stop());
@@ -327,17 +327,56 @@ final bootstrapProvider = FutureProvider<void>((ref) async {
   await ref.read(localNotificationServiceProvider).initialize();
 });
 
-/// The authenticated session. `null` means signed out.
-class AuthController extends Notifier<AuthSession?> {
+/// Reads the persisted session from local storage without any network access.
+///
+/// Runs before `runApp` so the first frame already knows whether a session
+/// exists; it is a single secure-storage read, so it does not prolong the native
+/// splash. A session exists while the token store still holds credentials — the
+/// access token may be stale, which the background refresh rotates.
+Future<AuthState> hydrateAuthState(TokenStore tokenStore) async {
+  final access = await tokenStore.readAccessToken();
+  final refresh = await tokenStore.readRefreshToken();
+  if (access == null && refresh == null) return const AuthState.unauthenticated();
+
+  final userId = await tokenStore.readUserId();
+  if (userId == null) return const AuthState.unauthenticated();
+
+  // A cached profile lets the chat list render its avatar on the first frame. An
+  // upgrade from a build that did not persist it falls back to a bare identity
+  // that the background validation fills in.
+  final user = await tokenStore.readUser();
+  return AuthState.authenticated(
+    AuthSession(
+      user: user ?? User(id: userId, name: ''),
+      accessToken: access ?? '',
+      refreshToken: refresh ?? '',
+      expiresIn: 0,
+    ),
+  );
+}
+
+/// Owns the auth lifecycle. Its state starts from the session seeded before
+/// `runApp` (or, for an unseeded scope, [AuthStatus.initializing] that [restore]
+/// resolves) and is never null: an unresolved lookup is [AuthStatus.initializing],
+/// not a signed-out user, so the router never flashes the login screen.
+class AuthController extends Notifier<AuthState> {
+  // A named parameter keeps the seeding call sites readable; a private field
+  // cannot be an initializing formal.
+  // ignore: prefer_initializing_formals
+  AuthController({AuthState? initial}) : _initial = initial;
+
+  final AuthState? _initial;
+
   @override
-  AuthSession? build() => null;
+  AuthState build() => _initial ?? const AuthState.initializing();
 
   Future<void> login({required String identifier, required String password}) async {
     final session = await ref.read(apiClientProvider).login(
           identifier: identifier,
           password: password,
         );
-    state = session;
+    await ref.read(tokenStoreProvider).saveUser(session.user);
+    state = AuthState.authenticated(session);
   }
 
   Future<void> register({
@@ -352,27 +391,51 @@ class AuthController extends Notifier<AuthSession?> {
           name: name,
           password: password,
         );
-    state = session;
+    await ref.read(tokenStoreProvider).saveUser(session.user);
+    state = AuthState.authenticated(session);
   }
 
-  /// Restores a persisted session on cold start.
+  /// Resolves the initial state from local storage. Local-only: it never touches
+  /// the network, so an offline launch is neither blocked nor mistaken for a
+  /// signed-out one.
   Future<void> restore() async {
-    final tokenStore = ref.read(tokenStoreProvider);
-    if (!await tokenStore.hasSession()) return;
     try {
-      final user = await ref.read(apiClientProvider).me();
-      final access = await tokenStore.readAccessToken();
-      final refresh = await tokenStore.readRefreshToken();
-      if (access == null || refresh == null) return;
-      state = AuthSession(
-        user: user,
-        accessToken: access,
-        refreshToken: refresh,
-        expiresIn: 0,
-      );
+      state = await hydrateAuthState(ref.read(tokenStoreProvider));
     } catch (error) {
       debugPrint('Session restore failed: $error');
-      await tokenStore.clear();
+      // A storage failure must not strand the app on the splash: treat it as
+      // signed out rather than leaving the state unresolved.
+      state = const AuthState.unauthenticated();
+    }
+  }
+
+  /// Validates the restored session against the server after the shell is
+  /// already showing. A definitive auth rejection signs the user out; a
+  /// transient failure (offline, timeout, 5xx) keeps the cached session so an
+  /// offline launch stays usable.
+  Future<void> validateSession() async {
+    final current = state.session;
+    if (current == null) return;
+    try {
+      final user = await ref.read(apiClientProvider).me();
+      if (!state.isAuthenticated) return;
+      await ref.read(tokenStoreProvider).saveUser(user);
+      state = AuthState.authenticated(
+        AuthSession(
+          user: user,
+          accessToken: current.accessToken,
+          refreshToken: current.refreshToken,
+          expiresIn: current.expiresIn,
+        ),
+      );
+    } on ApiException catch (error) {
+      // Only a rejected/revoked session signs the user out; any other status
+      // keeps the locally cached data.
+      if (error.isAuthFailure || error.statusCode == 403) {
+        await logout();
+      }
+    } catch (error) {
+      debugPrint('Session validation skipped: $error');
     }
   }
 
@@ -414,9 +477,15 @@ class AuthController extends Notifier<AuthSession?> {
       }
       ref.read(activeConversationIdProvider.notifier).reset();
     } finally {
-      // Always clear the session locally, even if a step stalled, so the router
-      // can redirect to /auth instead of leaving the user on a dead session.
-      state = null;
+      // Clear the persisted credentials and always reach the signed-out state,
+      // even if a step stalled, so the router redirects to /auth and the next
+      // login starts from a clean slate.
+      try {
+        await ref.read(tokenStoreProvider).clear();
+      } catch (error) {
+        debugPrint('Logout token clear failed: $error');
+      }
+      state = const AuthState.unauthenticated();
     }
   }
 
@@ -424,22 +493,25 @@ class AuthController extends Notifier<AuthSession?> {
   /// [currentUserProvider] (chat list avatar, headers) refreshes immediately,
   /// without ending the session or re-fetching.
   void applyUser(User user) {
-    final current = state;
+    final current = state.session;
     if (current == null) return;
-    state = AuthSession(
-      user: user,
-      accessToken: current.accessToken,
-      refreshToken: current.refreshToken,
-      expiresIn: current.expiresIn,
+    state = AuthState.authenticated(
+      AuthSession(
+        user: user,
+        accessToken: current.accessToken,
+        refreshToken: current.refreshToken,
+        expiresIn: current.expiresIn,
+      ),
     );
+    unawaited(ref.read(tokenStoreProvider).saveUser(user));
   }
 }
 
 final authControllerProvider =
-    NotifierProvider<AuthController, AuthSession?>(AuthController.new);
+    NotifierProvider<AuthController, AuthState>(AuthController.new);
 
 final currentUserProvider = Provider<User?>((ref) {
-  return ref.watch(authControllerProvider)?.user;
+  return ref.watch(authControllerProvider).session?.user;
 });
 
 /// The chat list, backed by the local mirror.
