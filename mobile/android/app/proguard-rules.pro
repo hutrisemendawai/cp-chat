@@ -32,3 +32,10 @@
 # Do not warn about optional dependencies pulled in by Firebase.
 -dontwarn com.google.firebase.**
 -dontwarn io.flutter.embedding.engine.deferredcomponents.**
+
+# Flutter's engine ships FlutterPlayStoreSplitApplication, which references the
+# Play Core split-install classes. The app does not use deferred components, so
+# those classes are absent from the classpath. R8 treats a missing class
+# referenced by a kept class as a release-build error; this rule tells it to
+# ignore that optional reference.
+-dontwarn com.google.android.play.core.**
