@@ -120,6 +120,19 @@ export class NotificationService {
         this.logger.warn({ code, fid }, 'FCM rejected a send');
       });
 
+      // Handoff outcome. A rejected send logs per-install above, but a
+      // successful one logged nothing at all, which made "push silently never
+      // fired" indistinguishable from "FCM accepted it" in the gateway logs.
+      this.logger.info(
+        {
+          sent: response.successCount,
+          failed: response.failureCount,
+          total: fids.length,
+          pruned: stale.length,
+        },
+        'FCM multicast sent',
+      );
+
       if (stale.length > 0) {
         this.logger.info(
           { stale: stale.length, total: fids.length },

@@ -605,16 +605,25 @@ export class ChatGateway {
     // A recipient with any live socket receives the message in real time, so a
     // push would only duplicate it. The check reads actual open sockets first
     // and falls back to the registry for devices owned by other nodes.
-    if (await this.hasConnectedDevice(userId)) return;
+    if (await this.hasConnectedDevice(userId)) {
+      this.logger.debug({ user_id: userId }, 'push skipped: recipient has a live socket');
+      return;
+    }
 
     // Do Not Disturb suppresses pushes: the recipient will see the message when
     // they clear their status. Messages still arrive over the socket the moment
     // a device reconnects, so nothing is lost.
     const recipient = await this.ctx.users.findById(userId);
-    if (recipient?.status === 'dnd') return;
+    if (recipient?.status === 'dnd') {
+      this.logger.debug({ user_id: userId }, 'push skipped: recipient is dnd');
+      return;
+    }
 
     const tokens = await this.ctx.devices.tokensForUser(userId);
-    if (tokens.length === 0) return;
+    if (tokens.length === 0) {
+      this.logger.debug({ user_id: userId }, 'push skipped: no registered device token');
+      return;
+    }
 
     const isGroup = conversation?.type === 'group';
     const conversationName = conversation?.name ?? '';
