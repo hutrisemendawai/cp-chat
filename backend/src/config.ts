@@ -22,10 +22,19 @@ const envSchema = z.object({
   GATEWAY_PORT: z.coerce.number().int().positive().default(8081),
   GATEWAY_NODE_ID: z.string().optional(),
   PRESENCE_TTL_SECONDS: z.coerce.number().int().positive().default(45),
-  CONNECTION_TTL_SECONDS: z.coerce.number().int().positive().default(120),
+  // Kept short so a socket whose app was killed (no clean close frame) stops
+  // counting as "online" fast, letting the very next message fall through to
+  // FCM instead of being suppressed by a stale routing entry.
+  CONNECTION_TTL_SECONDS: z.coerce.number().int().positive().default(45),
   MEMBERS_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
   FCM_CREDENTIALS_FILE: z.string().optional(),
   FCM_PROJECT_ID: z.string().optional(),
+  // Inline service-account credentials, used when no credentials file is
+  // mounted (e.g. Docker/CI). `FIREBASE_PRIVATE_KEY` may carry literal `\n`
+  // escapes; the loader converts them to real newlines.
+  FIREBASE_PROJECT_ID: z.string().optional(),
+  FIREBASE_CLIENT_EMAIL: z.string().optional(),
+  FIREBASE_PRIVATE_KEY: z.string().optional(),
   MAX_GROUP_MEMBERS: z.coerce.number().int().positive().max(500).default(500),
   S3_ENDPOINT: z.string().default('http://localhost:9000'),
   // Host reachable by the mobile client. Presigned URLs are signed against this

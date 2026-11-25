@@ -2,16 +2,59 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
+import 'local_notification_service.dart';
+
+/// The tray content derived from an FCM payload.
+typedef FcmNotificationContent = ({
+  String conversationId,
+  String title,
+  String body,
+  String? messageId,
+});
+
+/// Maps a push to tray content, or `null` when it carries no conversation to
+/// route to. The body falls back to `New message` because the headless isolate
+/// cannot run E2EE decryption, and it never carries ciphertext.
+FcmNotificationContent? notificationContentFromFcm(RemoteMessage message) {
+  final conversationId = message.data['conversation_id']?.toString() ?? '';
+  if (conversationId.isEmpty) return null;
+  final senderName = message.data['sender_name']?.toString();
+  return (
+    conversationId: conversationId,
+    title: message.notification?.title ?? senderName ?? 'New message',
+    body: message.notification?.body ?? 'New message',
+    messageId: message.data['message_id']?.toString(),
+  );
+}
+
+/// Runs in a headless isolate when a push arrives with no UI. Riverpod providers
+/// and UI state do not exist here, so Firebase and the notification plugin are
+/// re-initialized from scratch. A push that also carries a `notification` block
+/// is already painted by Android, so it is left alone to avoid a duplicate
+/// banner; a data-only push is surfaced from here instead.
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+  if (message.notification != null) return;
+
+  final content = notificationContentFromFcm(message);
+  if (content == null) return;
+
+  final notifications = LocalNotificationService();
+  await notifications.initialize();
+  await notifications.showMessageNotification(
+    conversationId: content.conversationId,
+    title: content.title,
+    body: content.body,
+    messageId: content.messageId,
+  );
+}
+
 /// Firebase Cloud Messaging bootstrap.
 ///
 /// Initialization is best-effort: the app stays usable when
 /// `google-services.json` is absent (for example in fresh checkouts or in
 /// widget tests), which keeps CI and emulator runs free of Firebase setup.
-@pragma('vm:entry-point')
-Future<void> _backgroundHandler(RemoteMessage message) async {
-  await Firebase.initializeApp();
-}
-
 abstract final class FcmService {
   static bool _initialized = false;
 
@@ -26,10 +69,12 @@ abstract final class FcmService {
         badge: true,
         sound: true,
       );
-      FirebaseMessaging.onBackgroundMessage(_backgroundHandler);
       _initialized = true;
     } catch (error) {
-      debugPrint('FCM unavailable: $error');
+      debugPrint(
+        'FCM unavailable: Firebase is not configured '
+        '(missing google-services.json or invalid options): $error',
+      );
       _initialized = false;
     }
   }

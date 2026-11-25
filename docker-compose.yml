@@ -215,7 +215,13 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
       GATEWAY_PORT: 8081
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # FCM push. Inline credentials avoid needing a mounted file in the image;
+      # FCM_CREDENTIALS_FILE still works when the file is mounted.
       FCM_CREDENTIALS_FILE: ${FCM_CREDENTIALS_FILE:-}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL:-}
+      FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY:-}
       # Phase 2: the gateway writes into the same log timeline as the API.
       LOG_BUFFER_ENABLED: ${LOG_BUFFER_ENABLED:-true}
       LOG_RETENTION_SECONDS: ${LOG_RETENTION_SECONDS:-3600}

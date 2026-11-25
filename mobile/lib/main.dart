@@ -25,6 +25,9 @@ import 'features/search/search_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Registered before runApp so a push that arrives while the app is backgrounded
+  // or swiped away is handled by the headless isolate, not silently dropped.
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   // Install the crash handlers before the first frame so an early error is not
   // lost. This is a no-op in debug builds.
   await CrashReporter.initialize();
@@ -217,15 +220,14 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
   /// A foreground FCM push is only surfaced when the local rules allow it; a
   /// message that also arrives over the socket is deduplicated by id.
   void _onForegroundMessage(RemoteMessage message) {
-    final conversationId = message.data['conversation_id'] as String?;
-    final messageId = message.data['message_id'] as String?;
-    if (conversationId == null || messageId == null) return;
+    final content = notificationContentFromFcm(message);
+    if (content == null) return;
     unawaited(
       ref.read(messageNotifierProvider).onForegroundFcm(
-        conversationId: conversationId,
-        messageId: messageId,
-        title: message.notification?.title ?? 'New message',
-        body: message.notification?.body ?? 'New message',
+        conversationId: content.conversationId,
+        messageId: content.messageId ?? content.conversationId,
+        title: content.title,
+        body: content.body,
       ),
     );
   }
@@ -235,14 +237,10 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
     ref.read(routerProvider).push('/conversations/$conversationId');
   }
 
-  void _openFromMessage(dynamic message) {
-    try {
-      final conversationId = message.data['conversation_id'] as String?;
-      if (conversationId == null) return;
-      _openConversation(conversationId);
-    } catch (_) {
-      // Malformed payloads are ignored; the chat list still works.
-    }
+  void _openFromMessage(RemoteMessage message) {
+    final content = notificationContentFromFcm(message);
+    if (content == null) return;
+    _openConversation(content.conversationId);
   }
 
   @override

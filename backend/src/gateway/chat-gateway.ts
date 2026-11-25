@@ -35,7 +35,10 @@ type SocketContext = {
 
 const MAX_CONTENT_LENGTH = 16_384;
 const MAX_BUFFERED_BYTES = 1024 * 1024;
-const HEARTBEAT_INTERVAL_MS = 25_000;
+// Kept short so a killed app's half-open socket is reaped (and its routing map
+// cleared) within one interval, which is what lets the next message fall
+// through to FCM instead of being swallowed by a stale connection.
+const HEARTBEAT_INTERVAL_MS = 20_000;
 // A drained gateway reconnects clients with this code; the Flutter client
 // treats any close as a reconnect and backs off, so drains are seamless.
 const DRAIN_CLOSE_CODE = 1001;
@@ -599,8 +602,10 @@ export class ChatGateway {
     senderName: string,
   ): Promise<void> {
     if (!this.notifications.enabled) return;
-    const onlineDevices = await this.registry.liveDevices(userId);
-    if (onlineDevices.length > 0) return;
+    // A recipient with any live socket receives the message in real time, so a
+    // push would only duplicate it. The check reads actual open sockets first
+    // and falls back to the registry for devices owned by other nodes.
+    if (await this.hasConnectedDevice(userId)) return;
 
     // Do Not Disturb suppresses pushes: the recipient will see the message when
     // they clear their status. Messages still arrive over the socket the moment
@@ -624,15 +629,29 @@ export class ChatGateway {
         body,
         conversationId: message.conversation_id,
         messageId: message.id,
+        senderId: message.sender_id,
         senderName,
         conversationName,
         type: message.type,
       },
     );
 
-    for (const token of stale) {
-      await this.ctx.db.query(`DELETE FROM device_tokens WHERE fcm_token = $1`, [token]);
+    await this.ctx.devices.removeStale(stale);
+  }
+
+  /**
+   * Whether the user can receive a frame right now: a locally tracked open
+   * socket is authoritative, and anything connected to another replica is
+   * resolved through the registry. The registry keys carry a short TTL that the
+   * heartbeat keeps refreshed, so a socket whose app was closed without a clean
+   * close frame stops counting as connected within one interval and the next
+   * message falls through to FCM.
+   */
+  private async hasConnectedDevice(userId: string): Promise<boolean> {
+    for (const ws of this.socketsFor(userId)) {
+      if (ws.readyState === WebSocket.OPEN) return true;
     }
+    return (await this.registry.liveDevices(userId)).length > 0;
   }
 
   private async handleAck(

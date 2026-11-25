@@ -1,8 +1,15 @@
+import 'dart:async';
+
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:cp_chat/core/network/api_client.dart';
+import 'package:cp_chat/core/notifications/fcm_service.dart';
 import 'package:cp_chat/core/notifications/local_notification_service.dart';
 import 'package:cp_chat/core/notifications/message_notifier.dart';
 import 'package:cp_chat/core/notifications/notification_policy.dart';
+import 'package:cp_chat/core/notifications/push_registration.dart';
+import 'package:cp_chat/core/storage/token_store.dart';
 
 import 'support/factories.dart';
 
@@ -23,6 +30,26 @@ class _RecordingSink implements MessageNotificationSink {
       body: body,
       messageId: messageId,
     ));
+  }
+}
+
+/// Records push-token registrations and can be told to fail a fixed number of
+/// times so the retry path is exercised.
+class _RecordingApi extends ApiClient {
+  _RecordingApi() : super(TokenStore());
+
+  final List<String> tokens = [];
+  int attempts = 0;
+  int failuresRemaining = 0;
+
+  @override
+  Future<void> registerFcmToken(String fid) async {
+    attempts += 1;
+    if (failuresRemaining > 0) {
+      failuresRemaining -= 1;
+      throw StateError('offline');
+    }
+    tokens.add(fid);
   }
 }
 
@@ -324,6 +351,89 @@ void main() {
         body: 'hello',
       );
       expect(sink.shown, isEmpty);
+    });
+  });
+
+  group('notificationContentFromFcm (background isolate)', () {
+    test('renders the notification block when present', () {
+      final content = notificationContentFromFcm(
+        RemoteMessage(
+          data: {'conversation_id': 'c1', 'message_id': 'm1', 'sender_name': 'Alice'},
+          notification: const RemoteNotification(title: 'Alice', body: 'hey there'),
+        ),
+      );
+
+      expect(content, isNotNull);
+      expect(content!.conversationId, 'c1');
+      expect(content.title, 'Alice');
+      expect(content.body, 'hey there');
+      expect(content.messageId, 'm1');
+    });
+
+    test('falls back to the sender name and a generic body for a data-only push', () {
+      final content = notificationContentFromFcm(
+        RemoteMessage(
+          data: {'conversation_id': 'c1', 'message_id': 'm1', 'sender_name': 'Bob'},
+        ),
+      );
+
+      expect(content!.title, 'Bob');
+      expect(content.body, 'New message');
+      expect(content.body, isNot(contains('e2ee:v1:')));
+    });
+
+    test('ignores a payload with no conversation to route to', () {
+      expect(notificationContentFromFcm(RemoteMessage(data: {'message_id': 'm1'})), isNull);
+    });
+  });
+
+  group('PushRegistration', () {
+    test('registers the current token on start and again on refresh', () async {
+      final api = _RecordingApi();
+      final refresh = StreamController<String>.broadcast();
+      final push = PushRegistration(
+        api,
+        currentToken: () async => 'fid-1',
+        onTokenRefresh: refresh.stream,
+        retryDelay: (_) => Duration.zero,
+      );
+
+      await push.start();
+      expect(api.tokens, ['fid-1']);
+
+      refresh.add('fid-2');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(api.tokens, ['fid-1', 'fid-2']);
+
+      await push.stop();
+      await refresh.close();
+    });
+
+    test('retries a failed registration before succeeding', () async {
+      final api = _RecordingApi()..failuresRemaining = 2;
+      final push = PushRegistration(
+        api,
+        currentToken: () async => 'fid-1',
+        onTokenRefresh: const Stream<String>.empty(),
+        retryDelay: (_) => Duration.zero,
+      );
+
+      await push.start();
+      expect(api.attempts, 3);
+      expect(api.tokens, ['fid-1']);
+    });
+
+    test('does nothing when Firebase is unavailable', () async {
+      final api = _RecordingApi();
+      final push = PushRegistration(
+        api,
+        currentToken: () async => null,
+        onTokenRefresh: const Stream<String>.empty(),
+      );
+
+      await push.start();
+      expect(api.attempts, 0);
+      expect(api.tokens, isEmpty);
     });
   });
 }

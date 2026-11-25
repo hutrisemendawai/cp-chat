@@ -10,6 +10,13 @@ plugins {
     id("com.google.firebase.crashlytics")
 }
 
+// Applied only when a config is present so a fresh clone or CI without the file
+// still configures. Without it Firebase.initializeApp() finds no options and
+// FCM push stays disabled at runtime.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 /**
  * Release signing is read from `android/key.properties` (git-ignored) so the
  * keystore never lives in the repository. When the file is absent — a fresh

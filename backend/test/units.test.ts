@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ApiError } from '../src/lib/errors.js';
+import { normalizePrivateKey } from '../src/lib/fcm.js';
 import { directKey, isUuid, isUuidV4 } from '../src/lib/ids.js';
 import { hashPassword, verifyPassword } from '../src/lib/password.js';
 import {
@@ -102,10 +103,25 @@ describe('ids', () => {
   });
 });
 
+describe('fcm credentials', () => {
+  it('restores escaped newlines from an env-supplied PEM key', () => {
+    const escaped = '-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n';
+    const restored = normalizePrivateKey(escaped);
+
+    expect(restored).toContain('\n');
+    expect(restored).not.toContain('\\n');
+    expect(restored.split('\n')).toHaveLength(4);
+  });
+
+  it('leaves an already-decoded key untouched', () => {
+    const key = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
+    expect(normalizePrivateKey(key)).toBe(key);
+  });
+});
+
 describe('errors', () => {
   it('maps codes to HTTP statuses and an error envelope', () => {
     const error = new ApiError('not_a_member', 'no access', { conversation: 'c1' });
-
     expect(error.status).toBe(403);
     expect(error.toBody()).toEqual({
       error: { code: 'not_a_member', message: 'no access', details: { conversation: 'c1' } },

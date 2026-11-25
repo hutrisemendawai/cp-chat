@@ -14,6 +14,7 @@ backend/tmp/
 backend/dist/
 backend/node_modules/
 backend/.env.local
+backend/firebase-service-account.json
 
 # Flutter/Dart (mobile/ has its own .gitignore, kept here as a safety net)
 mobile/.dart_tool/
@@ -21,6 +22,7 @@ mobile/build/
 mobile/.flutter-plugins
 mobile/.flutter-plugins-dependencies
 mobile/android/google-services.json
+mobile/android/app/google-services.json
 mobile/android/local.properties
 mobile/android/key.properties
 *.jks

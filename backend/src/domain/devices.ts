@@ -30,6 +30,15 @@ export class DeviceRepository {
     ]);
   }
 
+  /**
+   * Drops installations FCM reported as unregistered so a dead token is never
+   * retried. Tokens are global identifiers, so this is not scoped to one user.
+   */
+  async removeStale(fcmTokens: string[]): Promise<void> {
+    if (fcmTokens.length === 0) return;
+    await this.db.query(`DELETE FROM device_tokens WHERE fcm_token = ANY($1::text[])`, [fcmTokens]);
+  }
+
   async tokensForUser(userId: string): Promise<{ device_id: string; fcm_token: string }[]> {
     const { rows } = await this.db.query<{ device_id: string; fcm_token: string }>(
       `SELECT device_id, fcm_token FROM device_tokens WHERE user_id = $1`,
