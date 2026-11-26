@@ -43,9 +43,13 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
     const query = parse(pageQuery, request.query);
     const id = conversationId(params.id);
 
-    await conversations.requireMemberConversation(id, request.userId);
-    const page = await messages.page(id, query.limit, query.before_seq);
-    return { messages: page.messages, has_more: page.hasMore };
+    const conversation = await conversations.requireMemberConversation(id, request.userId);
+    const page = await messages.page(id, query.limit, query.before_seq, conversation.cleared_seq);
+    return {
+      messages: page.messages,
+      has_more: page.hasMore,
+      cleared_seq: conversation.cleared_seq,
+    };
   });
 
   app.get('/api/v1/conversations/:id/sync', async (request) => {
@@ -54,11 +58,12 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
     const query = parse(syncQuery, request.query);
     const id = conversationId(params.id);
 
-    await conversations.requireMemberConversation(id, request.userId);
-    const result = await messages.sync(id, query.after_seq, query.limit);
+    const conversation = await conversations.requireMemberConversation(id, request.userId);
+    const result = await messages.sync(id, query.after_seq, query.limit, conversation.cleared_seq);
     return {
       messages: result.messages,
       latest_seq: result.latestSeq,
+      cleared_seq: result.clearedSeq,
     };
   });
 }

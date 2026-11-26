@@ -5,9 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'core/models/models.dart';
 import 'core/notifications/crash_reporter.dart';
 import 'core/notifications/fcm_service.dart';
-import 'core/models/models.dart';
+import 'core/notifications/local_notification_service.dart';
 import 'core/providers.dart';
 import 'core/storage/token_store.dart';
 import 'core/theme/app_theme.dart';
@@ -34,11 +35,7 @@ Future<void> main() async {
   // lost. This is a no-op in debug builds.
   await CrashReporter.initialize();
 
-  // Hydrate the persisted session from local storage before the first frame. It
-  // is a single secure-storage read (no network), so the native splash hands off
-  // straight to the chat list for a returning user instead of flashing the login
-  // screen while a restore runs. A storage failure must not abort launch: fall
-  // back to the initializing state so _bootstrap's restore can resolve it.
+  // Hydrate the persisted session from local storage before the first frame.
   final tokenStore = TokenStore();
   AuthState initialAuth;
   try {
@@ -52,6 +49,9 @@ Future<void> main() async {
     ProviderScope(
       overrides: [
         tokenStoreProvider.overrideWithValue(tokenStore),
+        activeAccountUserIdProvider.overrideWith(
+          () => ActiveAccountUserIdNotifier(initial: initialAuth.session?.user.id),
+        ),
         authControllerProvider.overrideWith(() => AuthController(initial: initialAuth)),
       ],
       child: const CpChatApp(),
@@ -60,6 +60,11 @@ Future<void> main() async {
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
+  ValueKey<String> accountKey(String route) {
+    final accountId = ref.read(accountScopeProvider)?.accountId ?? 'signed-out';
+    return ValueKey<String>('$accountId:$route');
+  }
+
   final router = GoRouter(
     initialLocation: '/conversations',
     routes: [
@@ -73,42 +78,51 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/search',
-        builder: (context, state) => const SearchScreen(),
+        builder: (context, state) => SearchScreen(key: accountKey('search')),
       ),
       GoRoute(
         path: '/users/:id',
         builder: (context, state) => UserProfileScreen(
+          key: accountKey('user:${state.pathParameters['id']}'),
           userId: state.pathParameters['id']!,
         ),
       ),
       // Detail routes live on the root navigator so they cover the bottom bar.
       GoRoute(
         path: '/conversations/new-group',
-        builder: (context, state) => const CreateGroupScreen(),
+        builder: (context, state) => CreateGroupScreen(
+          key: accountKey('new-group'),
+        ),
       ),
       GoRoute(
         path: '/conversations/:id',
         builder: (context, state) => ChatScreen(
+          key: accountKey('chat:${state.pathParameters['id']}'),
           conversationId: state.pathParameters['id']!,
         ),
         routes: [
           GoRoute(
             path: 'info',
             builder: (context, state) => GroupInfoScreen(
+              key: accountKey('info:${state.pathParameters['id']}'),
               conversationId: state.pathParameters['id']!,
             ),
           ),
         ],
       ),
       StatefulShellRoute.indexedStack(
-        builder: (context, state, navigationShell) =>
-            HomeShell(navigationShell: navigationShell),
+        builder: (context, state, navigationShell) => KeyedSubtree(
+          key: accountKey('shell'),
+          child: HomeShell(navigationShell: navigationShell),
+        ),
         branches: [
           StatefulShellBranch(
             routes: [
               GoRoute(
                 path: '/conversations',
-                builder: (context, state) => const ConversationsScreen(),
+                builder: (context, state) => ConversationsScreen(
+                  key: accountKey('conversations'),
+                ),
               ),
             ],
           ),
@@ -116,7 +130,9 @@ final routerProvider = Provider<GoRouter>((ref) {
             routes: [
               GoRoute(
                 path: '/people',
-                builder: (context, state) => const PeopleScreen(),
+                builder: (context, state) => PeopleScreen(
+                  key: accountKey('people'),
+                ),
               ),
             ],
           ),
@@ -124,7 +140,9 @@ final routerProvider = Provider<GoRouter>((ref) {
             routes: [
               GoRoute(
                 path: '/profile',
-                builder: (context, state) => const MyProfileScreen(),
+                builder: (context, state) => MyProfileScreen(
+                  key: accountKey('profile'),
+                ),
               ),
             ],
           ),
@@ -136,17 +154,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       final atAuth = state.matchedLocation == '/auth';
       final atSplash = state.matchedLocation == '/splash';
 
-      // While the local session is still being read, show the neutral splash —
-      // never the login screen. In production the state is resolved before the
-      // first frame, so this path is only reached by an unseeded scope.
       if (auth.isInitializing) return atSplash ? null : '/splash';
 
-      // A restored or freshly logged-in session goes straight to the chat list.
       if (auth.isAuthenticated) {
         return (atAuth || atSplash) ? '/conversations' : null;
       }
 
-      // First-time and explicitly logged-out users land on the login screen.
       return atAuth ? null : '/auth';
     },
     refreshListenable: _AuthRefresh(ref),
@@ -161,8 +174,7 @@ class _AuthRefresh extends ChangeNotifier {
     _subscription = _ref.listen<AuthState>(
       authControllerProvider,
       (previous, next) {
-        // Signing out must not leave the previous account's directory results
-        // and presence cached for the next user on this device.
+        // Belt-and-suspenders invalidation alongside accountScopeProvider.
         if ((previous?.isAuthenticated ?? false) && !next.isAuthenticated) {
           _ref.invalidate(peopleControllerProvider);
           _ref.invalidate(presenceProvider);
@@ -192,7 +204,7 @@ class CpChatApp extends ConsumerStatefulWidget {
 
 class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserver {
   StreamSubscription<dynamic>? _fcmTapSubscription;
-  StreamSubscription<String>? _localTapSubscription;
+  StreamSubscription<NotificationTapTarget>? _localTapSubscription;
   StreamSubscription<RemoteMessage>? _foregroundSubscription;
 
   @override
@@ -217,50 +229,38 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
   }
 
   Future<void> _bootstrap() async {
-    // Resolve the local session first. In production it is already seeded before
-    // runApp, so this only runs for a scope that was not seeded; it must finish
-    // before the best-effort network bootstrap below so a failure there can
-    // never leave the app stuck on the splash.
     if (ref.read(authControllerProvider).isInitializing) {
       await ref.read(authControllerProvider.notifier).restore();
     }
 
-    // Keep the session runtime subscribed for the whole app lifetime so a
-    // manual login (not just a cold-start restore) starts the socket. The
-    // provider's own listener reacts to every auth transition; this read also
-    // constructs it before the first transition can occur.
     ref.read(sessionRuntimeProvider);
 
-    // Device id and notifications are best-effort: a failure must not block
-    // routing or sign the user out, so it is caught rather than awaited bare.
     try {
       await ref.read(bootstrapProvider.future);
     } catch (error) {
       debugPrint('Bootstrap failed: $error');
     }
 
-    // Entering with a restored session: start the realtime work and validate the
-    // session against the server in the background. Both are fire-and-forget so
-    // the chat list — served from the local mirror — is interactive immediately
-    // and an offline launch is never blocked.
     if (ref.read(authControllerProvider).isAuthenticated) {
       unawaited(ref.read(sessionRuntimeProvider.notifier).start());
       unawaited(ref.read(authControllerProvider.notifier).validateSession());
     }
 
-    // Local notifications are independent of Firebase, so they are always
-    // wired; FCM streams are only touched when Firebase actually initialized.
     final notifications = ref.read(localNotificationServiceProvider);
-    _localTapSubscription ??= notifications.onNotificationTap.listen(_openConversation);
+    _localTapSubscription ??=
+        notifications.onNotificationTapTarget.listen(_openFromLocalTarget);
     if (FcmService.isAvailable) {
       _fcmTapSubscription ??= FcmService.onNotificationTap.listen(_openFromMessage);
       _foregroundSubscription ??=
           FcmService.onForegroundMessage.listen(_onForegroundMessage);
     }
 
-    // A notification that launched the app from terminated routes straight in.
-    final coldStart = notifications.coldStartConversationId;
-    if (coldStart != null) _openConversation(coldStart);
+    // Account-checked cold-start routing (§3.3): drop foreign or signed-out taps.
+    final coldStart = notifications.coldStartTarget;
+    if (coldStart != null) {
+      notifications.clearColdStart();
+      _openFromLocalTarget(coldStart);
+    }
     await _routeFromInitialNotification();
   }
 
@@ -270,42 +270,71 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
     if (initial != null) _openFromMessage(initial);
   }
 
-  /// A foreground FCM push is only surfaced when the local rules allow it; a
-  /// message that also arrives over the socket is deduplicated by id.
+  /// Drops foreground FCM pushes targeting a different or signed-out account (§3.3).
   void _onForegroundMessage(RemoteMessage message) {
     final content = notificationContentFromFcm(message);
     if (content == null) return;
+    final scope = ref.read(accountScopeProvider);
+    if (!shouldHandleFcmForAccount(
+      recipientUserId: content.recipientUserId,
+      activeAccountId: scope?.accountId,
+      hasSession: ref.read(authControllerProvider).isAuthenticated,
+    )) {
+      return;
+    }
     unawaited(
       ref.read(messageNotifierProvider).onForegroundFcm(
-        conversationId: content.conversationId,
-        messageId: content.messageId ?? content.conversationId,
-        title: content.title,
-        body: content.body,
-      ),
+            conversationId: content.conversationId,
+            messageId: content.messageId ?? content.conversationId,
+            title: content.title,
+            body: content.body,
+          ),
     );
+  }
+
+  void _openFromLocalTarget(NotificationTapTarget target) {
+    final activeAccountId = ref.read(accountScopeProvider)?.accountId;
+    if (!ref.read(authControllerProvider).isAuthenticated ||
+        !target.matchesActiveAccount(activeAccountId)) {
+      return;
+    }
+    _openConversation(target.conversationId);
   }
 
   void _openConversation(String conversationId) {
     if (conversationId.isEmpty) return;
+    if (!ref.read(authControllerProvider).isAuthenticated) return;
     ref.read(routerProvider).push('/conversations/$conversationId');
   }
 
   void _openFromMessage(RemoteMessage message) {
     final content = notificationContentFromFcm(message);
     if (content == null) return;
+    final scope = ref.read(accountScopeProvider);
+    if (!shouldHandleFcmForAccount(
+      recipientUserId: content.recipientUserId,
+      activeAccountId: scope?.accountId,
+      hasSession: ref.read(authControllerProvider).isAuthenticated,
+    )) {
+      return;
+    }
     _openConversation(content.conversationId);
   }
 
   @override
   Widget build(BuildContext context) {
     final router = ref.watch(routerProvider);
+    final accountId = ref.watch(accountScopeProvider)?.accountId ?? 'signed-out';
 
-    return MaterialApp.router(
-      title: 'CP Chat',
-      debugShowCheckedModeBanner: false,
-      routerConfig: router,
-      theme: AppTheme.light,
-      darkTheme: AppTheme.dark,
+    return KeyedSubtree(
+      key: ValueKey<String>('app:$accountId'),
+      child: MaterialApp.router(
+        title: 'CP Chat',
+        debugShowCheckedModeBanner: false,
+        routerConfig: router,
+        theme: AppTheme.light,
+        darkTheme: AppTheme.dark,
+      ),
     );
   }
 }

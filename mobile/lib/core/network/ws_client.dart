@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../account/account_scope.dart';
 import '../config/app_config.dart';
 import '../crypto/e2ee_service.dart'
     show isEncryptedContent, undecryptableContent;
@@ -44,13 +45,9 @@ class SocketStatus {
 
 /// Owns the realtime connection and keeps the local mirror consistent.
 ///
-/// Responsibilities, per `docs/ws-protocol.md`:
-/// - authenticate the upgrade and reconnect with exponential backoff + jitter;
-/// - on every (re)connect, sync each conversation after its local cursor
-///   *before* accepting live frames, so gaps can never be missed;
-/// - flush the outbox and retry unacknowledged sends;
-/// - persist `message` frames and reconcile optimistic rows by `client_msg_id`;
-/// - report `delivered` automatically for persisted messages.
+/// Bound to an optional [AccountScope]: every async continuation checks
+/// `_scopeClosed` so late frames, sync pages, or outbox flushes from a signing-
+/// out account can never write to another account's database (§2.2, §3.2).
 class ChatSocket {
   ChatSocket(
     this._dao,
@@ -60,14 +57,26 @@ class ChatSocket {
     this.sendTimeout = const Duration(seconds: 10),
     this.decrypt,
     this.logger,
+    this.scope,
+    this.serverRotatedAt,
+    this.beforeSync,
   });
 
   final ChatDao _dao;
   final ApiClient _api;
   final TokenStore _tokenStore;
+  final AccountScope? scope;
   final Duration heartbeatInterval;
   final Duration sendTimeout;
   final AppLogger? logger;
+
+  /// Latest server key-rotation timestamp (`/keys/me.rotated_at`), used as
+  /// client-side defence in depth during historic backfill (§2.7).
+  final DateTime? Function()? serverRotatedAt;
+
+  /// Optional hook run immediately before `syncAll` (used to flush offline
+  /// queued server history clears before pulling messages).
+  final Future<void> Function()? beforeSync;
 
   final Future<String?> Function(
     String conversationId,
@@ -89,9 +98,6 @@ class ChatSocket {
   final Map<String, Timer> _sendTimers = {};
   final Set<String> _awaitingAck = {};
 
-  /// Live `presence` frames for users who share a conversation with us.
-  /// Broadcast so several chat headers can listen at once; the latest snapshot
-  /// is still fetched over REST when a chat opens.
   final StreamController<Presence> _presenceController =
       StreamController<Presence>.broadcast();
 
@@ -108,6 +114,7 @@ class ChatSocket {
   Timer? _reconnect;
   Timer? _outboxTimer;
   int _attempt = 0;
+  int _disconnectToken = 0;
   bool _disposed = false;
   bool _syncing = false;
   bool _connecting = false;
@@ -116,32 +123,37 @@ class ChatSocket {
   final Map<String, (String, int)> _recoveryCursors = {};
 
   bool get isConnected => _channel != null;
+  bool get _scopeClosed => _disposed || (scope != null && !scope!.isOpen);
+
+  Future<String?> _selfId() async =>
+      scope?.userId ?? await _tokenStore.readUserId();
 
   Future<void> connect() async {
-    if (_disposed || _channel != null || _connecting) return;
+    if (_scopeClosed || _channel != null || _connecting) return;
+    final tokenBefore = _disconnectToken;
     _reconnect?.cancel();
     _connecting = true;
     connection.value = const SocketStatus(SocketState.connecting);
 
     try {
-      // A valid token is obtained up front so a reconnect after a long offline
-      // stretch does not fail on an access token that expired while asleep.
       final token = await _api.ensureFreshAccessToken();
+      if (_scopeClosed || tokenBefore != _disconnectToken) return;
       if (token == null) {
         connection.value = const SocketStatus.disconnected('Not signed in');
         return;
       }
       try {
-        await _open(token);
+        await _open(token, tokenBefore);
       } catch (error) {
-        // A rejected handshake usually means the token was rejected even though
-        // the client believed it valid. Force one rotation, then retry.
+        if (_scopeClosed || tokenBefore != _disconnectToken) return;
         if (!_authFailure(error) || !await _api.refreshAccessToken()) rethrow;
+        if (_scopeClosed || tokenBefore != _disconnectToken) return;
         final rotated = await _tokenStore.readAccessToken();
         if (rotated == null) rethrow;
-        await _open(rotated);
+        await _open(rotated, tokenBefore);
       }
     } catch (error) {
+      if (_scopeClosed || tokenBefore != _disconnectToken) return;
       debugPrint('ChatSocket connect failed: $error');
       logger?.warn('ws', 'connect failed', meta: {'error': error.toString()});
       _onDisconnected(error);
@@ -150,12 +162,10 @@ class ChatSocket {
     }
   }
 
-  /// Opens a channel and wires its listeners. Throws when the handshake fails so
-  /// [connect] can decide whether to refresh the token and retry.
-  Future<void> _open(String token) async {
+  Future<void> _open(String token, int disconnectToken) async {
     final channel = WebSocketChannel.connect(AppConfig.wsUri(token));
     await channel.ready;
-    if (_disposed) {
+    if (_scopeClosed || disconnectToken != _disconnectToken) {
       await channel.sink.close();
       return;
     }
@@ -177,13 +187,12 @@ class ChatSocket {
 
     // Recover anything missed while offline before accepting live traffic.
     await syncAll();
+    if (_scopeClosed || disconnectToken != _disconnectToken) return;
     await flushOutbox();
+    if (_scopeClosed || disconnectToken != _disconnectToken) return;
     _startOutboxRetry();
   }
 
-  /// A failed upgrade reports the HTTP status in its message on the `ws`
-  /// package (`... status code: 401`). Treat that, and an explicit auth error,
-  /// as a token problem worth one rotation.
   bool _authFailure(Object error) {
     final text = error.toString();
     return text.contains('401') ||
@@ -191,10 +200,11 @@ class ChatSocket {
         text.contains('Unauthorized');
   }
 
-  /// Closes the connection and stops every timer without scheduling a reconnect
-  /// and without marking the socket permanently disposed, so a later
-  /// [connect] (e.g. after signing in again) works. Logout calls this.
+  /// Closes the connection, stops every timer, invalidates in-flight syncs,
+  /// and awaits any in-flight sync barrier (bounded) so local DB teardown can
+  /// proceed cleanly.
   Future<void> disconnect() async {
+    _disconnectToken += 1;
     _reconnect?.cancel();
     _reconnect = null;
     _heartbeat?.cancel();
@@ -209,17 +219,15 @@ class ChatSocket {
     _recoveryCursors.clear();
     _attempt = 0;
     _connecting = false;
-    _syncing = false;
 
     final subscription = _subscription;
     _subscription = null;
     final channel = _channel;
     _channel = null;
-    connection.value = const SocketStatus.disconnected();
+    if (!_disposed) {
+      connection.value = const SocketStatus.disconnected();
+    }
 
-    // A half-open socket can leave `cancel`/`close` pending forever on a flaky
-    // mobile link, which would freeze logout. Bound each step and swallow any
-    // failure: local teardown must always finish.
     if (subscription != null) {
       try {
         await subscription.cancel().timeout(const Duration(seconds: 2));
@@ -234,27 +242,54 @@ class ChatSocket {
         debugPrint('ChatSocket channel close failed: $error');
       }
     }
+
+    // Wait briefly for any in-flight sync pass to observe cancellation and exit.
+    final barrier = _syncBarrier;
+    if (barrier != null && !barrier.isCompleted) {
+      try {
+        await barrier.future.timeout(const Duration(seconds: 2));
+      } catch (_) {
+        // Bounded: never stall logout.
+      }
+    }
+    _syncing = false;
   }
 
-  /// Pulls every conversation forward from its local `last_seq`.
+  /// Pulls every conversation forward from `max(localMaxSeq, clearedSeq)`.
   Future<void> syncAll({String? selfId}) async {
+    if (_scopeClosed) return;
     if (_syncing) {
       await _syncBarrier?.future;
       return;
     }
+    final tokenBefore = _disconnectToken;
     _syncing = true;
     final barrier = Completer<void>();
     _syncBarrier = barrier;
     try {
-      final user = selfId ?? await _tokenStore.readUserId();
+      // Flush any offline-queued server clears before pulling history (§3.5).
+      final hook = beforeSync;
+      if (hook != null) {
+        try {
+          await hook();
+        } catch (error) {
+          debugPrint('ChatSocket beforeSync hook failed: $error');
+        }
+      }
+      if (_scopeClosed || tokenBefore != _disconnectToken) return;
+
+      final user = selfId ?? await _selfId();
       final conversations = await _api.conversations(limit: 100);
+      if (_scopeClosed || tokenBefore != _disconnectToken) return;
+
       await _dao.upsertConversations(conversations, selfId: user);
 
       for (final conversation in conversations) {
+        if (_scopeClosed || tokenBefore != _disconnectToken) return;
         try {
           await _serializeMessages(
             conversation.id,
-            () => _syncSummary(conversation),
+            () => _syncSummary(conversation, disconnectToken: tokenBefore),
           );
         } catch (error) {
           debugPrint('ChatSocket conversation sync failed: $error');
@@ -265,7 +300,7 @@ class ChatSocket {
     } finally {
       _syncing = false;
       _syncBarrier = null;
-      barrier.complete();
+      if (!barrier.isCompleted) barrier.complete();
     }
   }
 
@@ -290,22 +325,33 @@ class ChatSocket {
     return result;
   }
 
-  Future<void> _syncSummary(Conversation conversation) async {
-    final cursor = await _dao.localMaxSeq(conversation.id);
+  Future<void> _syncSummary(
+    Conversation conversation, {
+    required int disconnectToken,
+  }) async {
+    if (_scopeClosed || disconnectToken != _disconnectToken) return;
+    final cursor = await _dao.effectiveCursor(conversation.id);
+    final clearedFloor = await _dao.clearedSeqFor(conversation.id);
     final latest = conversation.lastMessage;
     if (latest != null &&
         latest.conversationId == conversation.id &&
+        latest.seq > clearedFloor &&
         latest.seq > 0 &&
         latest.seq <= cursor &&
         latest.type == 'text' &&
         isEncryptedContent(latest.content) &&
-        latest.senderId != await _tokenStore.readUserId() &&
+        latest.senderId != await _selfId() &&
         !await _alreadyReadable(latest)) {
+      if (_scopeClosed || disconnectToken != _disconnectToken) return;
       final result = await _api.sync(
         conversation.id,
         afterSeq: latest.seq - 1,
         limit: 1,
       );
+      if (_scopeClosed || disconnectToken != _disconnectToken) return;
+      if (result.clearedSeq > 0) {
+        await _dao.applyClearedSeq(conversation.id, result.clearedSeq);
+      }
       if (result.messages.length == 1) {
         final candidate = result.messages.single;
         if (candidate.conversationId == conversation.id &&
@@ -316,58 +362,114 @@ class ChatSocket {
             candidate.type == latest.type &&
             candidate.content == latest.content) {
           final previous = _recoveryCursors[conversation.id];
-          final start = previous?.$1 == latest.clientMsgId ? previous!.$2 : 0;
+          final start = max(
+            clearedFloor,
+            previous?.$1 == latest.clientMsgId ? previous!.$2 : 0,
+          );
           if (start >= latest.seq) {
-            await _persistServerMessage(candidate);
+            await _persistServerMessage(candidate, isHistoricBackfill: true);
           } else {
             final recovered = await _syncConversation(
               conversation.id,
               start,
               throughSeq: latest.seq,
+              disconnectToken: disconnectToken,
             );
             _recoveryCursors[conversation.id] = (latest.clientMsgId, recovered);
           }
         }
       }
     }
+    if (_scopeClosed || disconnectToken != _disconnectToken) return;
     if (conversation.lastSeq > cursor) {
-      await _syncConversation(conversation.id, cursor);
+      await _syncConversation(
+        conversation.id,
+        cursor,
+        disconnectToken: disconnectToken,
+      );
     }
   }
 
-  Future<int> _syncConversation(String conversationId, int afterSeq, {int? throughSeq}) async {
+  Future<int> _syncConversation(
+    String conversationId,
+    int afterSeq, {
+    int? throughSeq,
+    int? disconnectToken,
+  }) async {
     var cursor = afterSeq;
+    var droppedPreRotation = 0;
+    DateTime? droppedAt;
     for (var page = 0; page < 50; page += 1) {
+      if (_scopeClosed) return cursor;
+      if (disconnectToken != null && disconnectToken != _disconnectToken) {
+        return cursor;
+      }
       if (throughSeq != null && cursor >= throughSeq) return cursor;
       final limit = throughSeq == null ? 200 : min(200, throughSeq - cursor);
       final result = await _api.sync(conversationId, afterSeq: cursor, limit: limit);
-      if (result.messages.isEmpty) return cursor;
+      if (_scopeClosed) return cursor;
+      if (disconnectToken != null && disconnectToken != _disconnectToken) {
+        return cursor;
+      }
+
+      if (result.clearedSeq > 0) {
+        await _dao.applyClearedSeq(conversationId, result.clearedSeq);
+        if (cursor < result.clearedSeq) {
+          cursor = result.clearedSeq;
+        }
+      }
+
+      if (result.messages.isEmpty) break;
       for (final message in result.messages) {
+        if (_scopeClosed) return cursor;
         if (message.conversationId != conversationId ||
             message.seq != cursor + 1) {
           throw StateError('Invalid sync message ordering');
         }
-        await _persistServerMessage(message);
+        final stored = await _persistServerMessage(
+          message,
+          isHistoricBackfill: true,
+        );
+        if (!stored) {
+          droppedPreRotation += 1;
+          droppedAt = message.createdAt;
+        }
         cursor = message.seq;
       }
-      if (cursor >= result.latestSeq) return cursor;
+      if (cursor >= result.latestSeq) break;
     }
+
+    if (droppedPreRotation > 0 && !_scopeClosed) {
+      await _dao.upsertSystemNotice(
+        clientMsgId: 'system:pre-rotation:$conversationId',
+        conversationId: conversationId,
+        content: 'Encrypted history is not restored on a new or cleared device.',
+        createdAt: droppedAt ?? DateTime.now().toUtc(),
+      );
+    }
+
     return cursor;
   }
 
   Future<void> storeServerMessages(List<Message> messages) async {
+    if (_scopeClosed) return;
     final barrier = _syncBarrier;
     if (barrier != null) await barrier.future;
+    if (_scopeClosed) return;
+
     final groups = <String, List<Message>>{};
     for (final message in messages) {
       (groups[message.conversationId] ??= []).add(message);
     }
     for (final entry in groups.entries) {
+      if (_scopeClosed) return;
       entry.value.sort((a, b) => a.seq.compareTo(b.seq));
       await _serializeMessages(entry.key, () async {
+        if (_scopeClosed) return;
         var blocked = false;
         for (final message in entry.value) {
-          final cursor = await _dao.localMaxSeq(entry.key);
+          if (_scopeClosed) return;
+          final cursor = await _dao.effectiveCursor(entry.key);
           if (!blocked && message.seq > cursor + 1) {
             var synced = cursor;
             try {
@@ -377,6 +479,7 @@ class ChatSocket {
             }
             blocked = synced < message.seq - 1;
           }
+          if (_scopeClosed) return;
           if (blocked && isEncryptedContent(message.content)) {
             await _dao.upsertServerMessage(Message(
               id: message.id,
@@ -389,7 +492,7 @@ class ChatSocket {
               createdAt: message.createdAt,
             ));
           } else {
-            await _persistServerMessage(message);
+            await _persistServerMessage(message, isHistoricBackfill: true);
           }
         }
       });
@@ -407,15 +510,6 @@ class ChatSocket {
         existing.content != undecryptableContent;
   }
 
-  /// Adds a message to the outbox and sends it if the socket is up.
-  ///
-  /// [content] is stored for display; [wireContent] is what goes on the wire
-  /// and defaults to the same value. A retry always resends [wireContent], so an
-  /// encrypted body is never re-encrypted (which would advance the ratchet).
-  ///
-  /// When the socket is down the entry stays queued and a connect is kicked
-  /// off, so the message flushes over the socket once it is up — rather than
-  /// sitting `pending` until the next reconnect timer fires.
   Future<void> send({
     required String conversationId,
     required String senderId,
@@ -424,6 +518,7 @@ class ChatSocket {
     String? wireContent,
     String type = 'text',
   }) async {
+    if (_scopeClosed) return;
     await _dao.enqueueOutgoing(
       clientMsgId: clientMsgId,
       conversationId: conversationId,
@@ -443,12 +538,8 @@ class ChatSocket {
     }
   }
 
-  /// Retries a failed or pending outbox entry with the same `client_msg_id`.
-  ///
-  /// Any prior `failed` state is cleared first so the bubble returns to
-  /// `pending` and the new attempt is visible, instead of staying red until the
-  /// server happens to answer.
   Future<void> retry(String conversationId, String clientMsgId) async {
+    if (_scopeClosed) return;
     final pending = await _dao.pendingOutbox();
     final entry = pending
         .where((item) => item.clientMsgId == clientMsgId)
@@ -467,8 +558,8 @@ class ChatSocket {
 
   Future<void> discard(String clientMsgId) => _dao.deleteMessage(clientMsgId);
 
-  /// Reports `delivered` for a message the client has persisted.
   void acknowledgeDelivered(String conversationId, int seq) {
+    if (_scopeClosed) return;
     _write({
       'type': 'ack',
       'conversation_id': conversationId,
@@ -477,8 +568,8 @@ class ChatSocket {
     });
   }
 
-  /// Reports `read` up to `seq`; the server clamps it monotonically.
   Future<void> acknowledgeRead(String conversationId, int seq) async {
+    if (_scopeClosed) return;
     await _dao.setReadCursor(conversationId, seq);
     await _dao.clearUnread(conversationId);
     _write({
@@ -489,11 +580,11 @@ class ChatSocket {
     });
   }
 
-  /// Re-sends every outbox entry. Called on connect and by the retry timer.
   Future<void> flushOutbox() async {
-    if (!isConnected) return;
+    if (_scopeClosed || !isConnected) return;
     final pending = await _dao.pendingOutbox();
     for (final entry in pending) {
+      if (_scopeClosed || !isConnected) return;
       if (_writeSend(
         entry.conversationId,
         entry.clientMsgId,
@@ -511,6 +602,7 @@ class ChatSocket {
     String content,
     String type,
   ) {
+    if (_scopeClosed) return false;
     final sent = _write({
       'type': 'send',
       'conversation_id': conversationId,
@@ -524,9 +616,8 @@ class ChatSocket {
     _sendTimers[clientMsgId]?.cancel();
     _sendTimers[clientMsgId] = Timer(sendTimeout, () {
       _sendTimers.remove(clientMsgId);
+      if (_scopeClosed) return;
       if (_awaitingAck.remove(clientMsgId)) {
-        // No ACK in time: mark it failed so the user can tap to retry, and the
-        // entry stays in the outbox so the retry loop keeps trying.
         unawaited(_dao.markFailed(clientMsgId));
         unawaited(checkConnection());
       }
@@ -534,11 +625,8 @@ class ChatSocket {
     return true;
   }
 
-  /// Verifies the socket is still usable after a send timed out. A dead link can
-  /// linger without a `done`/`error` callback (e.g. Wi-Fi dropped silently), so
-  /// reconnect when the socket is gone and otherwise probe with a ping — a
-  /// failed write tears the socket down and schedules the reconnect.
   Future<void> checkConnection() async {
+    if (_scopeClosed) return;
     if (_channel == null) {
       await connect();
       return;
@@ -548,7 +636,7 @@ class ChatSocket {
 
   bool _write(Map<String, dynamic> event) {
     final channel = _channel;
-    if (channel == null) return false;
+    if (channel == null || _scopeClosed) return false;
     try {
       channel.sink.add(jsonEncode(event));
       return true;
@@ -560,7 +648,7 @@ class ChatSocket {
   }
 
   void _onData(dynamic raw) {
-    if (raw is! String) return;
+    if (_scopeClosed || raw is! String) return;
     Map<String, dynamic>? decoded;
     try {
       final value = jsonDecode(raw);
@@ -582,6 +670,8 @@ class ChatSocket {
         unawaited(_handleReadReceipt(decoded));
       case 'read_state':
         unawaited(_handleReadState(decoded));
+      case 'history_cleared':
+        unawaited(_handleHistoryCleared(decoded));
       case 'presence':
         _handlePresence(decoded);
       case 'conversation_updated':
@@ -589,12 +679,12 @@ class ChatSocket {
       case 'error':
         unawaited(_handleError(decoded));
       default:
-        // Unknown server events are ignored by contract.
         return;
     }
   }
 
   Future<void> _handleMessage(Map<String, dynamic> frame) async {
+    if (_scopeClosed) return;
     try {
       final message = Message.fromJson({
         'id': frame['message_id'],
@@ -610,33 +700,37 @@ class ChatSocket {
 
       final barrier = _syncBarrier;
       if (barrier != null) await barrier.future;
+      if (_scopeClosed) return;
+
       var persisted = false;
       await _serializeMessages(message.conversationId, () async {
-        final localMax = await _dao.localMaxSeq(message.conversationId);
-        if (message.seq > localMax + 1) {
+        if (_scopeClosed) return;
+        final cursor = await _dao.effectiveCursor(message.conversationId);
+        if (message.seq > cursor + 1) {
           final synced = await _syncConversation(
             message.conversationId,
-            localMax,
+            cursor,
           );
+          if (_scopeClosed) return;
           if (synced < message.seq - 1) return;
         }
-        await _persistServerMessage(message);
+        await _persistServerMessage(message, isHistoricBackfill: false);
+        if (_scopeClosed) return;
         acknowledgeDelivered(message.conversationId, message.seq);
         persisted = true;
       });
-      if (persisted) unawaited(_emitIncoming(message, senderName));
+      if (persisted && !_scopeClosed) unawaited(_emitIncoming(message, senderName));
     } catch (error) {
       debugPrint('ChatSocket failed to persist message: $error');
     }
   }
 
-  /// Hands a freshly persisted live message to [onIncomingMessage], reading the
-  /// locally stored (decrypted) body so a notification never carries an
-  /// undecrypted `e2ee:v1:` envelope.
   Future<void> _emitIncoming(Message message, String? senderName) async {
+    if (_scopeClosed) return;
     final listener = onIncomingMessage;
     if (listener == null) return;
     final stored = await _dao.message(message.clientMsgId);
+    if (_scopeClosed) return;
     listener(
       Message(
         id: message.id,
@@ -652,21 +746,39 @@ class ChatSocket {
     );
   }
 
-  /// Persists one server message after decrypting an E2EE body, so every reader
-  /// of the local row (bubbles, previews, search) sees plaintext.
-  Future<void> _persistServerMessage(Message message) async {
-    // Already-decrypted content must not be decrypted a second time: the
-    // receiving chain has advanced past this message, so the retry fails and
-    // the local bubble would regress to a placeholder.
+  /// Persists one server message after decrypting an E2EE body.
+  ///
+  /// Returns `false` when a pre-rotation encrypted body during historic
+  /// backfill failed to decrypt and was intentionally dropped instead of
+  /// storing a stub row (§2.7).
+  Future<bool> _persistServerMessage(
+    Message message, {
+    bool isHistoricBackfill = false,
+  }) async {
+    if (_scopeClosed) return false;
     if (await _alreadyReadable(message)) {
       await _dao.upsertServerMessage(message, status: 'sent');
-      return;
+      return true;
     }
 
     final plaintext = await _decryptForStorage(message);
-    final content =
-        isEncryptedContent(message.content) &&
-            (plaintext == null || isEncryptedContent(plaintext))
+    if (_scopeClosed) return false;
+
+    final failedDecrypt = isEncryptedContent(message.content) &&
+        (plaintext == null ||
+            isEncryptedContent(plaintext) ||
+            plaintext == undecryptableContent);
+
+    if (failedDecrypt && isHistoricBackfill) {
+      final rotatedAt = serverRotatedAt?.call();
+      if (rotatedAt != null && message.createdAt.isBefore(rotatedAt)) {
+        // Defence in depth (§2.7): pre-rotation ciphertext is cryptographically
+        // unreadable; drop it instead of persisting a stub row.
+        return false;
+      }
+    }
+
+    final content = failedDecrypt
         ? undecryptableContent
         : plaintext ?? message.content;
     final stored = content == message.content
@@ -682,15 +794,18 @@ class ChatSocket {
             createdAt: message.createdAt,
           );
     await _dao.upsertServerMessage(stored, status: 'sent');
+    return true;
   }
 
   Future<String?> _decryptForStorage(Message message) async {
+    if (_scopeClosed) return null;
     final decryptor = decrypt;
     if (decryptor == null || message.type != 'text') return null;
     if (!isEncryptedContent(message.content)) return null;
     try {
       final isGroup =
           await _dao.conversationType(message.conversationId) == 'group';
+      if (_scopeClosed) return null;
       return await decryptor(
         message.conversationId,
         message.clientMsgId,
@@ -716,6 +831,7 @@ class ChatSocket {
   }
 
   Future<void> _handleStatus(Map<String, dynamic> frame) async {
+    if (_scopeClosed) return;
     final clientMsgId = frame['client_msg_id'];
     final status = frame['status'];
     if (clientMsgId is! String || status is! String) return;
@@ -724,8 +840,6 @@ class ChatSocket {
       _awaitingAck.remove(clientMsgId);
       _sendTimers.remove(clientMsgId)?.cancel();
     }
-    // `seq` is present on the `sent` ack; persisting it gives the optimistic row
-    // its server identity even before the `message` echo arrives.
     final seq = frame['seq'];
     await _dao.applyStatus(
       clientMsgId,
@@ -734,10 +848,8 @@ class ChatSocket {
     );
   }
 
-  /// A server `error` frame that references a `client_msg_id` means the send was
-  /// rejected (validation, membership, malformed envelope). Mark it failed so
-  /// the bubble offers a manual retry instead of spinning forever.
   Future<void> _handleError(Map<String, dynamic> frame) async {
+    if (_scopeClosed) return;
     final code = frame['code'];
     final message = frame['message'];
     debugPrint('ChatSocket server error: $code $message');
@@ -758,9 +870,8 @@ class ChatSocket {
     }
   }
 
-  /// A [ReadReceipt] means every message this user sent up to `seq` has been
-  /// read by that many members, not only the message at `seq`.
   Future<void> _handleReadReceipt(Map<String, dynamic> frame) async {
+    if (_scopeClosed) return;
     final conversationId = frame['conversation_id'];
     final seq = frame['seq'];
     final readCount = frame['read_count'];
@@ -772,8 +883,8 @@ class ChatSocket {
       return;
     }
 
-    final selfId = await _tokenStore.readUserId();
-    if (selfId == null) return;
+    final selfId = await _selfId();
+    if (selfId == null || _scopeClosed) return;
     await _dao.applyReadReceipt(
       conversationId: conversationId,
       selfId: selfId,
@@ -783,23 +894,26 @@ class ChatSocket {
     );
   }
 
-  /// A membership/name/avatar change happened elsewhere; refresh the metadata
-  /// and catch up on any messages, or drop the conversation if this user was
-  /// removed.
   Future<void> _handleConversationUpdated(Map<String, dynamic> frame) async {
+    if (_scopeClosed) return;
     final conversationId = frame['conversation_id'];
     if (conversationId is! String) return;
 
-    final selfId = await _tokenStore.readUserId();
+    final selfId = await _selfId();
+    final tokenBefore = _disconnectToken;
     try {
       final conversation = await _api.conversation(conversationId);
+      if (_scopeClosed || tokenBefore != _disconnectToken) return;
       final barrier = _syncBarrier;
       if (barrier != null) await barrier.future;
+      if (_scopeClosed || tokenBefore != _disconnectToken) return;
       await _serializeMessages(conversationId, () async {
+        if (_scopeClosed) return;
         await _dao.upsertConversation(conversation, selfId: selfId);
-        await _syncSummary(conversation);
+        await _syncSummary(conversation, disconnectToken: tokenBefore);
       });
     } on ApiException catch (error) {
+      if (_scopeClosed) return;
       if (error.statusCode == 403 || error.statusCode == 404) {
         await _dao.deleteConversation(conversationId);
       }
@@ -808,9 +922,8 @@ class ChatSocket {
     }
   }
 
-  /// Another of this user's devices advanced the read cursor. Move the local
-  /// cursor forward so the unread badge clears without a manual sync.
   Future<void> _handleReadState(Map<String, dynamic> frame) async {
+    if (_scopeClosed) return;
     final conversationId = frame['conversation_id'];
     final seq = frame['seq'];
     if (conversationId is! String || seq is! num) return;
@@ -819,7 +932,37 @@ class ChatSocket {
     await _dao.clearUnread(conversationId);
   }
 
+  /// Another device (or key rotation) advanced this member's `cleared_seq`
+  /// watermark. Apply it locally so cleared rows disappear immediately (§3.5).
+  Future<void> _handleHistoryCleared(Map<String, dynamic> frame) async {
+    if (_scopeClosed) return;
+    final conversationId = frame['conversation_id'];
+    final clearedSeq = frame['cleared_seq'];
+    if (conversationId is! String || clearedSeq is! num) return;
+
+    await _serializeMessages(conversationId, () async {
+      if (_scopeClosed) return;
+      await _dao.applyClearedSeq(conversationId, clearedSeq.toInt());
+    });
+  }
+
+  /// Exposed for tests simulating an inbound server frame without a live socket.
+  @visibleForTesting
+  Future<void> handleServerFrameForTesting(Map<String, dynamic> frame) async {
+    switch (frame['type']) {
+      case 'message':
+        await _handleMessage(frame);
+      case 'history_cleared':
+        await _handleHistoryCleared(frame);
+      case 'read_state':
+        await _handleReadState(frame);
+      case 'status':
+        await _handleStatus(frame);
+    }
+  }
+
   void _handlePresence(Map<String, dynamic> frame) {
+    if (_scopeClosed) return;
     final userId = frame['user_id'];
     final online = frame['online'];
     if (userId is! String || online is! bool) return;
@@ -835,9 +978,6 @@ class ChatSocket {
     );
   }
 
-  /// Pushes the caller's visible presence state to the gateway, which fans it
-  /// out to peers who share a conversation. Fire-and-forget: the profile is
-  /// already saved over REST, so a dropped frame only delays the badge update.
   void setPresence({required String status, String? customStatus}) {
     _write({
       'type': 'presence',
@@ -849,6 +989,7 @@ class ChatSocket {
   void _startHeartbeat() {
     _heartbeat?.cancel();
     _heartbeat = Timer.periodic(heartbeatInterval, (_) {
+      if (_scopeClosed) return;
       if (!_write({'type': 'ping'})) _onDisconnected();
     });
   }
@@ -856,7 +997,7 @@ class ChatSocket {
   void _startOutboxRetry() {
     _outboxTimer?.cancel();
     _outboxTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (isConnected) unawaited(flushOutbox());
+      if (!_scopeClosed && isConnected) unawaited(flushOutbox());
     });
   }
 
@@ -873,7 +1014,7 @@ class ChatSocket {
     }
     _sendTimers.clear();
     _awaitingAck.clear();
-    if (_disposed) return;
+    if (_scopeClosed) return;
 
     connection.value = SocketStatus.disconnected(error?.toString());
     if (error != null) {
@@ -890,8 +1031,8 @@ class ChatSocket {
   }
 
   Future<void> dispose() async {
-    await disconnect();
     _disposed = true;
+    await disconnect();
     _reconnect?.cancel();
     connection.dispose();
     await _presenceController.close();

@@ -2,11 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../logging/app_logger.dart';
 import '../models/models.dart';
 import '../network/api_client.dart';
+import '../storage/app_dirs.dart';
 
 /// Attaches media to a conversation: compress (images only), upload through the
 /// API, then hand back the object key to put in a websocket message.
@@ -15,11 +15,15 @@ import '../network/api_client.dart';
 /// connectivity to the API host. The API streams the bytes to object storage
 /// server-side; the device never has to reach MinIO/S3 directly.
 class MediaService {
-  // ignore: prefer_initializing_formals
-  MediaService(this._api, {AppLogger? logger}) : _logger = logger;
+  MediaService(
+    this._api, {
+    this.logger,
+    this.uploadTempDir,
+  });
 
   final ApiClient _api;
-  final AppLogger? _logger;
+  final AppLogger? logger;
+  final Future<Directory> Function()? uploadTempDir;
 
   /// Compression target. Large camera photos are typically 3–8 MB; 1600 px at
   /// quality 80 lands well under a megabyte for most screenshots and photos.
@@ -83,7 +87,7 @@ class MediaService {
       );
       return uploaded.objectKey;
     } catch (error) {
-      _logger?.error('media', 'upload failed', meta: {
+      logger?.error('media', 'upload failed', meta: {
         'filename': filename,
         'content_type': contentType,
         'size_bytes': bytes.length,
@@ -93,11 +97,15 @@ class MediaService {
     }
   }
 
-  /// Compresses an image on-device. Falls back to the original file when the
-  /// platform plugin is unavailable (e.g. widget tests).
+  /// Compresses an image on-device into the account-scoped upload temp dir.
+  /// Falls back to the original file when the platform plugin is unavailable
+  /// (e.g. widget tests).
   Future<File> _compressImage(File source) async {
     try {
-      final directory = await getTemporaryDirectory();
+      final directory = await (uploadTempDir?.call() ?? AppDirs.cache());
+      if (!await directory.exists()) {
+        await directory.create(recursive: true);
+      }
       final target = '${directory.path}/${DateTime.now().microsecondsSinceEpoch}.jpg';
       final result = await FlutterImageCompress.compressAndGetFile(
         source.absolute.path,

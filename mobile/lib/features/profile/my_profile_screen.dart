@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/account/account_registry.dart';
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
 import '../../core/theme/app_theme.dart';
@@ -176,12 +178,181 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
   Future<void> _signOut() async {
     if (_signingOut) return;
     FocusManager.instance.primaryFocus?.unfocus();
+
+    var wipeData = false;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          final scheme = Theme.of(dialogContext).colorScheme;
+          return AlertDialog(
+            title: const Text('Sign out'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Your chats and encryption keys stay safely isolated on this '
+                  'device so you can pick up where you left off when you sign '
+                  'back in.',
+                ),
+                const SizedBox(height: AppSpacing.md),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: wipeData,
+                  onChanged: (value) =>
+                      setDialogState(() => wipeData = value ?? false),
+                  title: const Text('Also remove my data from this device'),
+                ),
+                if (wipeData)
+                  Container(
+                    margin: const EdgeInsets.only(top: AppSpacing.xs),
+                    padding: const EdgeInsets.all(AppSpacing.sm),
+                    decoration: BoxDecoration(
+                      color: scheme.errorContainer,
+                      borderRadius: BorderRadius.circular(AppRadius.sm),
+                    ),
+                    child: Text(
+                      'This permanently deletes your local chat history, media '
+                      'cache, and encryption keys on this device. Encrypted '
+                      'history is not restored on a new or cleared device.',
+                      style: Theme.of(dialogContext).textTheme.bodySmall?.copyWith(
+                            color: scheme.onErrorContainer,
+                          ),
+                    ),
+                  ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                style: wipeData
+                    ? FilledButton.styleFrom(
+                        backgroundColor: scheme.error,
+                        foregroundColor: scheme.onError,
+                      )
+                    : null,
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: Text(wipeData ? 'Sign out & remove data' : 'Sign out'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
     setState(() => _signingOut = true);
     try {
-      await ref.read(authControllerProvider.notifier).logout();
+      await ref.read(authControllerProvider.notifier).logout(
+            wipeDeviceData: wipeData,
+          );
     } finally {
       if (mounted) context.go('/auth');
     }
+  }
+
+  Future<void> _clearAllChats() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Clear all chats?'),
+        content: const Text(
+          'This removes all chat messages and cached media on this device and '
+          'prevents cleared history from re-syncing. You stay signed in and '
+          'your encryption keys remain intact for new messages.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Clear all chats'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final scope = ref.read(accountScopeProvider);
+    if (scope == null) return;
+    await ref.read(accountWiperProvider).clearAllChats(
+          accountId: scope.accountId,
+          dao: ref.read(chatDaoProvider),
+          api: ref.read(apiClientProvider),
+          mediaCache: ref.read(mediaCacheProvider),
+        );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('All chats cleared')),
+      );
+    }
+  }
+
+  Future<void> _showAccountsOnDevice() async {
+    final registry = ref.read(accountRegistryProvider);
+    final activeId = ref.read(accountScopeProvider)?.accountId;
+    var accounts = await registry.list();
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.pageMargin,
+                    vertical: AppSpacing.xs,
+                  ),
+                  child: Text(
+                    'Accounts on this device',
+                    style: Theme.of(sheetContext).textTheme.titleLarge,
+                  ),
+                ),
+                if (accounts.isEmpty)
+                  const ListTile(
+                    title: Text('No local account partitions stored.'),
+                  )
+                else
+                  for (final AccountRecord record in accounts)
+                    ListTile(
+                      leading: const Icon(Icons.account_circle_outlined),
+                      title: Text(record.displayName ?? record.username ?? record.accountId),
+                      subtitle: Text(
+                        record.accountId == activeId
+                            ? 'Signed in now'
+                            : 'Stored offline · ${record.accountId.substring(0, 8)}',
+                      ),
+                      trailing: record.accountId == activeId
+                          ? null
+                          : TextButton(
+                              onPressed: () async {
+                                await ref.read(accountWiperProvider).wipeAccountPartition(
+                                      accountId: record.accountId,
+                                    );
+                                final next = await registry.list();
+                                setSheetState(() => accounts = next);
+                              },
+                              child: const Text('Remove'),
+                            ),
+                    ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   /// AppBar sign-out, available even while the profile is still loading or has
@@ -284,6 +455,8 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
             minLines: 3,
             maxLines: 6,
           ),
+          const SizedBox(height: AppSpacing.xl),
+          _privacySection(theme),
           const SizedBox(height: AppSpacing.xl),
           SafeArea(
             top: false,
@@ -401,6 +574,45 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                 child: const Text('Remove'),
               ),
           ],
+        ),
+      ],
+    );
+  }
+
+  /// Privacy & Storage controls (L1 Clear all chats, Accounts on this device).
+  Widget _privacySection(ThemeData theme) {
+    final scheme = theme.colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Privacy & Storage', style: theme.textTheme.titleMedium),
+        const SizedBox(height: AppSpacing.sm),
+        Material(
+          color: scheme.surfaceContainerLow,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.card),
+            side: BorderSide(color: scheme.outlineVariant),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.cleaning_services_outlined),
+                title: const Text('Clear all chats'),
+                subtitle: const Text(
+                  'Remove chat history and cached media, keep keys & login',
+                ),
+                onTap: _clearAllChats,
+              ),
+              Divider(height: 1, color: scheme.outlineVariant),
+              ListTile(
+                leading: const Icon(Icons.switch_account_outlined),
+                title: const Text('Accounts on this device'),
+                subtitle: const Text('Manage local isolated account data'),
+                onTap: _showAccountsOnDevice,
+              ),
+            ],
+          ),
         ),
       ],
     );

@@ -155,28 +155,47 @@ export class ScyllaMessageRepository {
     );
   }
 
-  /** Newest first, matching the Postgres `page()` contract. */
+  /** Newest first, matching the Postgres `page()` contract with `clearedSeq` lower bound. */
   async page(
     conversationId: string,
     limit: number,
     beforeSeq?: number,
+    clearedSeq = 0,
   ): Promise<{ messages: MessageRow[]; hasMore: boolean }> {
     const options = { prepare: true };
-    const result =
-      beforeSeq !== undefined
-        ? await this.client.execute(
-            `SELECT ${COLUMNS} FROM messages_by_conversation
-              WHERE conversation_id = ? AND seq < ?
-              ORDER BY seq DESC LIMIT ?`,
-            [conversationId, beforeSeq, limit + 1],
-            options,
-          )
-        : await this.client.execute(
-            `SELECT ${COLUMNS} FROM messages_by_conversation
-              WHERE conversation_id = ? LIMIT ?`,
-            [conversationId, limit + 1],
-            options,
-          );
+    let result: { rows: Record<string, unknown>[] };
+    if (beforeSeq !== undefined && clearedSeq > 0) {
+      result = await this.client.execute(
+        `SELECT ${COLUMNS} FROM messages_by_conversation
+          WHERE conversation_id = ? AND seq < ? AND seq > ?
+          ORDER BY seq DESC LIMIT ?`,
+        [conversationId, beforeSeq, clearedSeq, limit + 1],
+        options,
+      );
+    } else if (beforeSeq !== undefined) {
+      result = await this.client.execute(
+        `SELECT ${COLUMNS} FROM messages_by_conversation
+          WHERE conversation_id = ? AND seq < ?
+          ORDER BY seq DESC LIMIT ?`,
+        [conversationId, beforeSeq, limit + 1],
+        options,
+      );
+    } else if (clearedSeq > 0) {
+      result = await this.client.execute(
+        `SELECT ${COLUMNS} FROM messages_by_conversation
+          WHERE conversation_id = ? AND seq > ?
+          ORDER BY seq DESC LIMIT ?`,
+        [conversationId, clearedSeq, limit + 1],
+        options,
+      );
+    } else {
+      result = await this.client.execute(
+        `SELECT ${COLUMNS} FROM messages_by_conversation
+          WHERE conversation_id = ? LIMIT ?`,
+        [conversationId, limit + 1],
+        options,
+      );
+    }
 
     const rows = result.rows.map(mapRow);
     return { messages: rows.slice(0, limit), hasMore: rows.length > limit };

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:cp_chat/core/account/account_id.dart';
 import 'package:cp_chat/core/logging/app_logger.dart';
 import 'package:cp_chat/core/network/api_client.dart';
 import 'package:cp_chat/core/notifications/fcm_service.dart';
@@ -16,7 +17,8 @@ import 'support/factories.dart';
 
 /// Captures what would have been raised in the notification tray.
 class _RecordingSink implements MessageNotificationSink {
-  final List<({String conversationId, String title, String body, String? messageId})> shown = [];
+  final List<({String conversationId, String title, String body, String? messageId, String? accountId})>
+      shown = [];
 
   @override
   Future<void> showMessageNotification({
@@ -24,12 +26,14 @@ class _RecordingSink implements MessageNotificationSink {
     required String title,
     required String body,
     String? messageId,
+    String? accountId,
   }) async {
     shown.add((
       conversationId: conversationId,
       title: title,
       body: body,
       messageId: messageId,
+      accountId: accountId,
     ));
   }
 }
@@ -511,4 +515,81 @@ void main() {
       expect(push.isRegistered, isFalse);
     });
   });
+
+  group('Multi-account notification isolation (§3.3)', () {
+    test('payload encodes {a,c} JSON and drops foreign or signed-out taps', () {
+      final acctA = accountIdForUser('user-a');
+      final acctB = accountIdForUser('user-b');
+      final encoded = NotificationTapTarget(conversationId: 'conv-1', accountId: acctA).encode();
+      expect(encoded, '{"a":"$acctA","c":"conv-1"}');
+
+      final parsed = NotificationTapTarget.parse(encoded);
+      expect(parsed, isNotNull);
+      expect(parsed!.accountId, acctA);
+      expect(parsed.conversationId, 'conv-1');
+
+      // Matches active account A; dropped for B and when signed out.
+      expect(parsed.matchesActiveAccount(acctA), isTrue);
+      expect(parsed.matchesActiveAccount(acctB), isFalse);
+      expect(parsed.matchesActiveAccount(null), isFalse);
+
+      // Notification ids differ across accounts for the same conversation id.
+      expect(
+        LocalNotificationService.notificationIdFor('conv-1', accountId: acctA),
+        isNot(LocalNotificationService.notificationIdFor('conv-1', accountId: acctB)),
+      );
+    });
+
+    test('headless FCM handler drops pushes for non-active or signed-out accounts', () async {
+      final store = _InMemoryTokenStore();
+      final acctA = accountIdForUser('user-a');
+      final acctB = accountIdForUser('user-b');
+
+      final pushForA = RemoteMessage(
+        data: {
+          'conversation_id': 'conv-1',
+          'message_id': 'm1',
+          'sender_name': 'Peer',
+          'recipient_user_id': 'user-a',
+        },
+      );
+
+      // 1. Signed out -> dropped.
+      expect(await resolveHeadlessFcmDisplay(pushForA, tokenStore: store), isNull);
+
+      // 2. B signed in -> push for A dropped.
+      await store.saveSession(
+        accessToken: 'acc-b',
+        refreshToken: 'ref-b',
+        userId: 'user-b',
+        accountId: acctB,
+      );
+      expect(await resolveHeadlessFcmDisplay(pushForA, tokenStore: store), isNull);
+
+      // 3. A signed in -> push for A allowed and tagged with A's accountId.
+      await store.saveSession(
+        accessToken: 'acc-a',
+        refreshToken: 'ref-a',
+        userId: 'user-a',
+        accountId: acctA,
+      );
+      final resolved = await resolveHeadlessFcmDisplay(pushForA, tokenStore: store);
+      expect(resolved, isNotNull);
+      expect(resolved!.accountId, acctA);
+      expect(resolved.content.conversationId, 'conv-1');
+    });
+  });
+}
+
+class _InMemoryTokenStore extends TokenStore {
+  final Map<String, String> data = {};
+
+  @override
+  Future<String?> readValue(String key) async => data[key];
+
+  @override
+  Future<void> writeValue(String key, String value) async => data[key] = value;
+
+  @override
+  Future<void> deleteValue(String key) async => data.remove(key);
 }

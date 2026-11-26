@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/media/account_media_cache.dart';
 import '../../core/media/media_service.dart';
 import '../../core/providers.dart';
 
@@ -45,12 +46,16 @@ class MediaAvatar extends ConsumerWidget {
 
     final api = ref.watch(apiClientProvider);
     final token = ref.watch(accessTokenProvider).value;
+    final scope = ref.watch(accountScopeProvider);
+    final cacheManager = ref.watch(mediaCacheProvider);
     final headers =
         token == null ? const <String, String>{} : {'Authorization': 'Bearer $token'};
 
     return circle(
       CachedNetworkImage(
         imageUrl: api.mediaUrl(key),
+        cacheKey: accountMediaCacheKey(scope?.accountId, key),
+        cacheManager: cacheManager,
         httpHeaders: headers,
         fit: BoxFit.cover,
         width: radius * 2,
@@ -76,6 +81,8 @@ class ImageMessage extends ConsumerWidget {
     final theme = Theme.of(context);
     final (:key, :caption) = splitMediaContent(content);
     final token = ref.watch(accessTokenProvider).value;
+    final scope = ref.watch(accountScopeProvider);
+    final cacheManager = ref.watch(mediaCacheProvider);
     final headers = token == null
         ? const <String, String>{}
         : {'Authorization': 'Bearer $token'};
@@ -88,6 +95,8 @@ class ImageMessage extends ConsumerWidget {
           borderRadius: BorderRadius.circular(12),
           child: CachedNetworkImage(
             imageUrl: api.mediaUrl(key),
+            cacheKey: accountMediaCacheKey(scope?.accountId, key),
+            cacheManager: cacheManager,
             httpHeaders: headers,
             fit: BoxFit.cover,
             width: 240,

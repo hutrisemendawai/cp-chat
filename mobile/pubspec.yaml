@@ -53,6 +53,10 @@ dependencies:
   flutter_image_compress: ^2.5.1
   url_launcher: ^6.3.3
   cryptography: ^2.9.0
+  crypto: ^3.0.8
+  file: ^7.0.1
+  flutter_cache_manager: ^3.5.0
+  path: ^1.9.1
   firebase_crashlytics: ^6.1.0
 
 # Host-side tests (CI and local `flutter test`) run against the Linux desktop
@@ -81,6 +85,7 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   drift_dev: ^2.35.3
   build_runner: ^2.17.1
+  xml: ^7.1.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

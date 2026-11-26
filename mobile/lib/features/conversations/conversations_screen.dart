@@ -28,6 +28,7 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
   _ChatFilter _filter = _ChatFilter.all;
   String _query = '';
   bool _refreshing = false;
+  bool _freshPromptOpen = false;
 
   @override
   void dispose() {
@@ -118,10 +119,88 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
     }
   }
 
+  Future<void> _showFreshPartitionPrompt() async {
+    if (_freshPromptOpen || !mounted) return;
+    _freshPromptOpen = true;
+    var startFresh = true;
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: const Text('Start fresh on this device?'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Encrypted history is not restored on a new or cleared device. '
+                  'Choose what to do with your group chat history:',
+                ),
+                const SizedBox(height: AppSpacing.md),
+                RadioGroup<bool>(
+                  groupValue: startFresh,
+                  onChanged: (value) =>
+                      setDialogState(() => startFresh = value ?? true),
+                  child: const Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      RadioListTile<bool>(
+                        contentPadding: EdgeInsets.zero,
+                        value: true,
+                        title: Text('Start fresh'),
+                        subtitle: Text('Clear group chat history too'),
+                      ),
+                      RadioListTile<bool>(
+                        contentPadding: EdgeInsets.zero,
+                        value: false,
+                        title: Text('Keep group history'),
+                        subtitle: Text('Restore existing plaintext group chats'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('Continue'),
+              ),
+            ],
+          ),
+        ),
+      );
+      ref.read(freshPartitionPromptProvider.notifier).dismiss();
+      if (confirmed == true && startFresh && mounted) {
+        final scope = ref.read(accountScopeProvider);
+        if (scope != null) {
+          await ref.read(accountWiperProvider).clearAllChats(
+                accountId: scope.accountId,
+                dao: ref.read(chatDaoProvider),
+                api: ref.read(apiClientProvider),
+                mediaCache: ref.read(mediaCacheProvider),
+              );
+        }
+      }
+    } finally {
+      _freshPromptOpen = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final conversations = ref.watch(conversationsProvider);
     final user = ref.watch(currentUserProvider);
+
+    ref.listen<bool>(freshPartitionPromptProvider, (previous, next) {
+      if (next && !(previous ?? false)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _showFreshPartitionPrompt();
+        });
+      }
+    });
 
     return Scaffold(
       appBar: AppBar(

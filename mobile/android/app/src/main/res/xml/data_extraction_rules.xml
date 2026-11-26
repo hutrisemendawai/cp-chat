@@ -2,23 +2,33 @@
 <!--
   Android 12+ data extraction rules.
 
-  E2EE identity keys, signed prekeys, and ratchet sessions live in
-  Keystore-backed secure storage. They must never leave the device through
-  cloud backup or device-to-device transfer: a restored copy on another device
-  would let that device decrypt this one's history and would fork the ratchet.
-  Chat history itself is also excluded; it is re-synced from the server.
+  E2EE identity keys, signed prekeys, ratchet sessions, and per-account local
+  SQLite partitions must never leave the device through cloud backup or
+  device-to-device transfer: a restored copy on another device would let that
+  device decrypt this one's history and would fork the ratchet.
+
+  Chat history is NOT silently re-synced after a wipe; E2EE history is
+  intentionally non-restorable on new or cleared devices.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <exclude domain="sharedpref" path="." />
-        <exclude domain="database" path="." />
+        <exclude domain="root" path="." />
         <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
         <exclude domain="external" path="." />
+        <exclude domain="device_root" path="." />
+        <exclude domain="device_file" path="." />
+        <exclude domain="device_database" path="." />
     </cloud-backup>
     <device-transfer>
-        <exclude domain="sharedpref" path="." />
-        <exclude domain="database" path="." />
+        <exclude domain="root" path="." />
         <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
         <exclude domain="external" path="." />
+        <exclude domain="device_root" path="." />
+        <exclude domain="device_file" path="." />
+        <exclude domain="device_database" path="." />
     </device-transfer>
 </data-extraction-rules>

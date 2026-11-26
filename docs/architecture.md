@@ -125,8 +125,23 @@ messages forever.
   `messages.content`. The Compose stack pins a verified community mirror of
   MinIO `RELEASE.2025-09-07` by digest, because MinIO no longer publishes
   official images to Docker Hub; API, console, and `mc` are unchanged.
-- **Drift/SQLite** on the device mirrors conversations and messages, plus an
-  outbox table for unsent messages.
+- **Drift/SQLite** on the device mirrors conversations, messages, drafts, and
+  outbox entries in **per-account isolated partitions** under Android's
+  `Context.getNoBackupFilesDir()/accounts/<accountId>/cpchat_<accountId>.sqlite`
+  (WAL mode, `busy_timeout=5000`, `foreign_keys=ON`). Each account's E2EE keys
+  and ratchet sessions are namespaced under `acct.<accountId>.*` in Keystore
+  secure storage, media caches live under `<cacheDir>/accounts/<accountId>/media/`,
+  and all user-bound Riverpod providers watch `accountScopeProvider` so switching
+  accounts disposes the previous graph cleanly.
+- **Android backup hygiene:** `allowBackup="false"`, `fullBackupContent`
+  (`backup_rules.xml`), and `dataExtractionRules` (`data_extraction_rules.xml`)
+  exclude all backup and device-transfer domains (`root`, `file`, `database`,
+  `sharedpref`, `external`, `device_root`, `device_file`, `device_database`),
+  and partitions live in `noBackupFilesDir`.
+- **Per-member history watermarks:** `conversation_members.cleared_seq` lets a
+  user clear chat history (in-app L1/L2 or automatically on identity key rotation
+  after OS Clear Data / reinstall) without physically deleting shared message
+  rows; `list`, `messages`, `sync`, and `search` only return `seq > cleared_seq`.
 
 ## Client structure
 

@@ -33,6 +33,7 @@ export type ConversationSummary = ConversationRow & {
     created_at: Date;
   } | null;
   last_read_seq: number;
+  cleared_seq: number;
   unread_count: number;
 };
 
@@ -343,16 +344,77 @@ export class ConversationRepository {
     };
   }
 
-  /** Returns the conversation the caller may access, or throws. */
-  async requireMemberConversation(conversationId: string, userId: string): Promise<ConversationRow> {
+  /** Returns the conversation the caller may access plus their cleared watermark, or throws. */
+  async requireMemberConversation(
+    conversationId: string,
+    userId: string,
+  ): Promise<ConversationRow & { cleared_seq: number }> {
     const conversation = await this.getRow(conversationId);
     if (!conversation) {
       throw new ApiError('conversation_not_found', 'Conversation not found');
     }
-    if (!(await this.isMember(conversationId, userId))) {
+    const { rows } = await this.db.query<{ cleared_seq: string }>(
+      `SELECT cleared_seq FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`,
+      [conversationId, userId],
+    );
+    if (!rows[0]) {
       throw new ApiError('not_a_member', 'You are not a member of this conversation');
     }
-    return conversation;
+    return { ...conversation, cleared_seq: Number(rows[0].cleared_seq) };
+  }
+
+  /**
+   * Advances this member's per-conversation history watermark to `last_seq` so
+   * cleared messages are no longer served on sync, pagination, search, or list
+   * previews. Monotonic and idempotent; other members are unaffected.
+   */
+  async clearHistory(
+    conversationId: string,
+    userId: string,
+  ): Promise<{ clearedSeq: number }> {
+    await this.requireMemberConversation(conversationId, userId);
+    const { rows } = await this.db.query<{ cleared_seq: string }>(
+      `UPDATE conversation_members cm
+          SET cleared_seq = GREATEST(cm.cleared_seq, c.last_seq),
+              last_read_seq = GREATEST(cm.last_read_seq, c.last_seq)
+         FROM conversations c
+        WHERE cm.conversation_id = c.id
+          AND cm.conversation_id = $1
+          AND cm.user_id = $2
+       RETURNING cm.cleared_seq`,
+      [conversationId, userId],
+    );
+    if (!rows[0]) {
+      throw new ApiError('not_a_member', 'You are not a member of this conversation');
+    }
+    return { clearedSeq: Number(rows[0].cleared_seq) };
+  }
+
+  /**
+   * Advances the history watermark across every conversation (direct and group)
+   * that `userId` belongs to. Monotonic and idempotent.
+   */
+  async clearAllHistory(userId: string): Promise<{
+    conversations: { conversationId: string; clearedSeq: number }[];
+    clearedAt: Date;
+  }> {
+    const { rows } = await this.db.query<{ conversation_id: string; cleared_seq: string }>(
+      `UPDATE conversation_members cm
+          SET cleared_seq = GREATEST(cm.cleared_seq, c.last_seq),
+              last_read_seq = GREATEST(cm.last_read_seq, c.last_seq)
+         FROM conversations c
+        WHERE cm.conversation_id = c.id
+          AND cm.user_id = $1
+       RETURNING cm.conversation_id, cm.cleared_seq`,
+      [userId],
+    );
+    return {
+      conversations: rows.map((row) => ({
+        conversationId: row.conversation_id,
+        clearedSeq: Number(row.cleared_seq),
+      })),
+      clearedAt: new Date(),
+    };
   }
 
   async list(userId: string, limit: number, before?: string): Promise<{
@@ -370,9 +432,13 @@ export class ConversationRepository {
         ) < (
           SELECT COALESCE(cursor_activity.last_message_at, cur.created_at), cur.id
             FROM conversations cur
+            JOIN conversation_members cm_cur
+              ON cm_cur.conversation_id = cur.id AND cm_cur.user_id = $1
             LEFT JOIN LATERAL (
               SELECT created_at AS last_message_at FROM messages
-               WHERE conversation_id = cur.id ORDER BY seq DESC LIMIT 1
+               WHERE conversation_id = cur.id
+                 AND seq > cm_cur.cleared_seq
+               ORDER BY seq DESC LIMIT 1
             ) cursor_activity ON true
            WHERE cur.id = $2
         )`;
@@ -382,6 +448,7 @@ export class ConversationRepository {
     const { rows } = await this.db.query<
       ConversationRow & {
         last_read_seq: string;
+        cleared_seq: string;
         unread_count: string;
         activity_at: Date;
         lm_id: string | null;
@@ -395,10 +462,11 @@ export class ConversationRepository {
     >(
       `SELECT c.id, c.type, c.name, c.avatar_url, c.created_by, c.created_at, c.last_seq,
               cm.last_read_seq,
+              cm.cleared_seq,
               COALESCE(activity.last_message_at, c.created_at) AS activity_at,
               (SELECT count(*) FROM messages m
                 WHERE m.conversation_id = c.id
-                  AND m.seq > cm.last_read_seq
+                  AND m.seq > GREATEST(cm.last_read_seq, cm.cleared_seq)
                   AND m.sender_id <> $1)::text AS unread_count,
               lm.id AS lm_id, lm.seq AS lm_seq, lm.sender_id AS lm_sender_id,
               lm.client_msg_id AS lm_client_msg_id, lm.type AS lm_type,
@@ -408,11 +476,15 @@ export class ConversationRepository {
            ON cm.conversation_id = c.id AND cm.user_id = $1
          LEFT JOIN LATERAL (
            SELECT created_at AS last_message_at FROM messages
-            WHERE conversation_id = c.id ORDER BY seq DESC LIMIT 1
+            WHERE conversation_id = c.id
+              AND seq > cm.cleared_seq
+            ORDER BY seq DESC LIMIT 1
          ) activity ON true
          LEFT JOIN LATERAL (
            SELECT ${MESSAGE_COLUMNS} FROM messages
-            WHERE conversation_id = c.id ORDER BY seq DESC LIMIT 1
+            WHERE conversation_id = c.id
+              AND seq > cm.cleared_seq
+            ORDER BY seq DESC LIMIT 1
          ) lm ON true
         WHERE true ${cursorClause}
         ORDER BY activity_at DESC, c.id DESC
@@ -431,6 +503,7 @@ export class ConversationRepository {
         created_at: row.created_at,
         last_seq: Number(row.last_seq),
         last_read_seq: Number(row.last_read_seq),
+        cleared_seq: Number(row.cleared_seq),
         unread_count: Number(row.unread_count),
         last_message: row.lm_id
           ? {
@@ -455,26 +528,33 @@ export class ConversationRepository {
 
   async getSummary(conversationId: string, userId: string): Promise<ConversationSummary> {
     const conversation = await this.requireMemberConversation(conversationId, userId);
-    const { rows } = await this.db.query<{ last_read_seq: string; unread_count: string }>(
+    const { rows } = await this.db.query<{
+      last_read_seq: string;
+      cleared_seq: string;
+      unread_count: string;
+    }>(
       `SELECT cm.last_read_seq,
+              cm.cleared_seq,
               (SELECT count(*) FROM messages m
                 WHERE m.conversation_id = cm.conversation_id
-                  AND m.seq > cm.last_read_seq
+                  AND m.seq > GREATEST(cm.last_read_seq, cm.cleared_seq)
                   AND m.sender_id <> $2)::text AS unread_count
          FROM conversation_members cm
         WHERE cm.conversation_id = $1 AND cm.user_id = $2`,
       [conversationId, userId],
     );
+    const clearedSeq = Number(rows[0]?.cleared_seq ?? conversation.cleared_seq);
     const { rows: lastRows } = await this.db.query<MessageJoinRow>(
       `SELECT ${MESSAGE_COLUMNS} FROM messages
-        WHERE conversation_id = $1 ORDER BY seq DESC LIMIT 1`,
-      [conversationId],
+        WHERE conversation_id = $1 AND seq > $2 ORDER BY seq DESC LIMIT 1`,
+      [conversationId, clearedSeq],
     );
 
     const [summary] = await this.attachMembers([
       {
         ...conversation,
         last_read_seq: Number(rows[0]?.last_read_seq ?? 0),
+        cleared_seq: clearedSeq,
         unread_count: Number(rows[0]?.unread_count ?? 0),
         last_message: lastRows[0] ? mapMessage(lastRows[0]) : null,
       },

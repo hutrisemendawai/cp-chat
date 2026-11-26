@@ -352,6 +352,7 @@ describe('dnd notification suppression', () => {
         messageId: 'm',
         senderId: 'sender',
         senderName: 'Alice',
+        recipientUserId: alice.id,
         conversationName: '',
         type: 'text',
       });
@@ -372,6 +373,7 @@ describe('dnd notification suppression', () => {
       messageId: 'm',
       senderId: 'sender',
       senderName: 'Alice',
+      recipientUserId: 'recipient',
       conversationName: '',
       type: 'text',
     })).toEqual([]);

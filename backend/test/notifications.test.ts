@@ -166,6 +166,7 @@ describe('fcm dispatch', () => {
       conversationId,
       senderId: alice.id,
       senderName: 'Alice',
+      recipientUserId: bob.id,
       type: 'text',
       body: 'are you there?',
     });

@@ -27,9 +27,11 @@ Each device generates, once:
 - one **signed prekey** (X25519, signed by the signing key),
 - a batch of **one-time prekeys** (X25519).
 
-Private halves live in `flutter_secure_storage` (Android Keystore). The public
-halves are published to `POST /api/v1/keys`; only the public halves reach the
-server.
+Private halves live in `flutter_secure_storage` (Android Keystore), strictly
+namespaced per account (`acct.<accountId>.e2ee_keys` and
+`acct.<accountId>.e2ee_sessions`) so switching accounts on the same device can
+never cross-load or overwrite another user's identity keys. The public halves
+are published to `POST /api/v1/keys`; only the public halves reach the server.
 
 ### X3DH session setup
 
@@ -93,11 +95,18 @@ below its cursor, which stops replay.
 
 The body stored in the message is `e2ee:v1:` followed by this JSON. `ek`, `spk`,
 and `opk` open a session, so an initiator attaches them to **every** message it
-sends until the peer answers; after that they are omitted. Re-attaching is what
-lets a peer that lost its session (restart without persisted state, reinstall,
-cleared app data) rebuild it from any later message instead of being stuck. The
-server validates that `v`, `ik`, `ct`, `n`, and `m` are present and correctly
-typed, and rejects a malformed prefixed body instead of delivering it as text
+sends until the peer answers; after that they are omitted. Re-attaching lets a
+peer that lost only its session state rebuild it from any later message, while
+**cleared app data / reinstalls** are handled by the **key-epoch history
+watermark** model below: when a fresh install publishes a new identity key with
+`history_watermark: true`, the server increments `user_identity_keys.key_epoch`,
+records `rotated_at`, discards orphaned one-time prekeys, and advances
+`conversation_members.cleared_seq = last_seq` on all of that user's direct
+conversations inside the same transaction. **Encrypted history is intentionally
+not restored on a new or cleared device**, and the watermark ensures pre-rotation
+ciphertexts are never re-synced as undecryptable stubs. The server validates
+that `v`, `ik`, `ct`, `n`, and `m` are present and correctly typed, and rejects
+a malformed prefixed body instead of delivering it as text
 (`backend/src/lib/e2ee.ts`).
 
 ### Session identification and recovery

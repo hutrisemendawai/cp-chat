@@ -197,21 +197,22 @@ export class MessageRepository {
     return rows[0] ? mapMessage(rows[0]) : null;
   }
 
-  /** Newest first; `before_seq` is exclusive so pages do not overlap. */
+  /** Newest first; `before_seq` is exclusive and `clearedSeq` sets the member's lower bound. */
   async page(
     conversationId: string,
     limit: number,
     beforeSeq?: number,
+    clearedSeq = 0,
   ): Promise<{ messages: MessageRow[]; hasMore: boolean }> {
     if (this.scylla) {
-      return this.scylla.page(conversationId, limit, beforeSeq);
+      return this.scylla.page(conversationId, limit, beforeSeq, clearedSeq);
     }
 
-    const params: unknown[] = [conversationId];
-    let seqClause = '';
+    const params: unknown[] = [conversationId, clearedSeq];
+    let seqClause = 'AND seq > $2';
     if (beforeSeq !== undefined) {
       params.push(beforeSeq);
-      seqClause = `AND seq < $${params.length}`;
+      seqClause += ` AND seq < $${params.length}`;
     }
     params.push(limit + 1);
 
@@ -229,12 +230,13 @@ export class MessageRepository {
     };
   }
 
-  /** Offline catch-up: ascending from the caller's cursor, never the clock. */
+  /** Offline catch-up: ascending from `max(afterSeq, clearedSeq)`, never the clock. */
   async sync(
     conversationId: string,
     afterSeq: number,
     limit: number,
-  ): Promise<{ messages: MessageRow[]; latestSeq: number; hasMore: boolean }> {
+    clearedSeq = 0,
+  ): Promise<{ messages: MessageRow[]; latestSeq: number; clearedSeq: number; hasMore: boolean }> {
     // `latest_seq` always comes from Postgres: `conversations.last_seq` is the
     // authoritative allocation counter and is never behind Scylla's mirror.
     const { rows: latest } = await this.db.query<{ last_seq: string }>(
@@ -242,10 +244,11 @@ export class MessageRepository {
       [conversationId],
     );
     const latestSeq = Number(latest[0]?.last_seq ?? 0);
+    const effectiveAfterSeq = Math.max(afterSeq, clearedSeq);
 
     if (this.scylla) {
-      const page = await this.scylla.sync(conversationId, afterSeq, limit);
-      return { messages: page.messages, latestSeq, hasMore: page.hasMore };
+      const page = await this.scylla.sync(conversationId, effectiveAfterSeq, limit);
+      return { messages: page.messages, latestSeq, clearedSeq, hasMore: page.hasMore };
     }
 
     const { rows } = await this.db.query<RawMessageRow>(
@@ -253,12 +256,13 @@ export class MessageRepository {
         WHERE conversation_id = $1 AND seq > $2
         ORDER BY seq ASC
         LIMIT $3`,
-      [conversationId, afterSeq, limit + 1],
+      [conversationId, effectiveAfterSeq, limit + 1],
     );
 
     return {
       messages: rows.slice(0, limit).map(mapMessage),
       latestSeq,
+      clearedSeq,
       hasMore: rows.length > limit,
     };
   }
@@ -301,6 +305,7 @@ export class MessageRepository {
            ON cm.conversation_id = m.conversation_id AND cm.user_id = $1
          CROSS JOIN LATERAL websearch_to_tsquery('simple', $2) AS tsq
         WHERE m.search_vector @@ tsq
+          AND m.seq > cm.cleared_seq
           ${clauses.map((clause) => `AND ${clause}`).join('\n          ')}
         ORDER BY rank DESC, m.seq DESC
         LIMIT $${params.length}`,

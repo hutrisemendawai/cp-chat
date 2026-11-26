@@ -1,14 +1,26 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
+import 'account/account_id.dart';
+import 'account/account_paths.dart';
+import 'account/account_registry.dart';
+import 'account/account_scope.dart';
+import 'account/account_store.dart';
+import 'account/account_wiper.dart';
+import 'account/legacy_migration.dart';
+import 'account/partition_guard.dart';
+import 'crypto/e2ee_manager.dart';
 import 'database/app_database.dart';
 import 'database/chat_dao.dart';
-import 'crypto/e2ee_manager.dart';
 import 'logging/app_logger.dart';
+import 'media/account_media_cache.dart';
 import 'media/media_service.dart';
 import 'models/models.dart';
 import 'network/api_client.dart';
@@ -17,23 +29,46 @@ import 'notifications/fcm_service.dart';
 import 'notifications/local_notification_service.dart';
 import 'notifications/message_notifier.dart';
 import 'notifications/push_registration.dart';
+import 'storage/app_dirs.dart';
 import 'storage/token_store.dart';
 
-final appDatabaseProvider = Provider<AppDatabase>((ref) {
-  final database = AppDatabase();
-  ref.onDispose(database.close);
-  return database;
-});
+int _nextScopeEpoch = 0;
 
-final chatDaoProvider = Provider<ChatDao>((ref) {
-  return ChatDao(ref.watch(appDatabaseProvider));
-});
+// ---------------------------------------------------------------------------
+// Device-global providers (survive account switches)
+// ---------------------------------------------------------------------------
 
 final tokenStoreProvider = Provider<TokenStore>((ref) => TokenStore());
 
-/// Client diagnostics with an in-memory ring buffer. Created before the network
-/// stack so early failures can be recorded; the API client is attached to it
-/// once constructed so `warn`/`error` entries can be forwarded to the server.
+final appDirsProvider = Provider<AppDirs>((ref) => AppDirs());
+
+final dbGateProvider = Provider<DbGate>((ref) => DbGate());
+
+final accountRegistryProvider = Provider<AccountRegistry>((ref) {
+  return AccountRegistry(ref.watch(tokenStoreProvider));
+});
+
+final legacyMigrationProvider = Provider<LegacyMigration>((ref) {
+  return LegacyMigration(
+    tokenStore: ref.watch(tokenStoreProvider),
+    dirs: ref.watch(appDirsProvider),
+    registry: ref.watch(accountRegistryProvider),
+    logger: ref.watch(appLoggerProvider),
+  );
+});
+
+final accountWiperProvider = Provider<AccountWiper>((ref) {
+  return AccountWiper(
+    tokenStore: ref.watch(tokenStoreProvider),
+    dirs: ref.watch(appDirsProvider),
+    registry: ref.watch(accountRegistryProvider),
+    dbGate: ref.watch(dbGateProvider),
+    logger: ref.watch(appLoggerProvider),
+  );
+});
+
+/// Client diagnostics with an in-memory ring buffer. Cleared automatically on
+/// account switches so logs from one account never bleed into another.
 final appLoggerProvider = Provider<AppLogger>((ref) {
   final logger = AppLogger();
   ref.onDispose(logger.clear);
@@ -52,80 +87,7 @@ class DeviceIdNotifier extends Notifier<String?> {
 final deviceIdProvider =
     NotifierProvider<DeviceIdNotifier, String?>(DeviceIdNotifier.new);
 
-final apiClientProvider = Provider<ApiClient>((ref) {
-  final logger = ref.watch(appLoggerProvider);
-  final api = ApiClient(
-    ref.watch(tokenStoreProvider),
-    deviceId: ref.watch(deviceIdProvider),
-    logger: logger,
-  );
-  logger.attach(api);
-  return api;
-});
-
-final mediaServiceProvider = Provider<MediaService>((ref) {
-  return MediaService(
-    ref.watch(apiClientProvider),
-    logger: ref.watch(appLoggerProvider),
-  );
-});
-
-/// End-to-end encryption for direct chats. Key material is generated lazily on
-/// first use and stored in secure storage; only public keys reach the server.
-final e2eeManagerProvider = Provider<E2eeManager>((ref) {
-  return E2eeManager(
-    tokenStore: ref.watch(tokenStoreProvider),
-    api: ref.watch(apiClientProvider),
-    logger: ref.watch(appLoggerProvider),
-  );
-});
-
-/// The stored access token, exposed for widgets that fetch private media.
-/// Rebuilds when the session changes so a rotated token is picked up.
-final accessTokenProvider = FutureProvider<String?>((ref) async {
-  ref.watch(authControllerProvider);
-  return ref.watch(tokenStoreProvider).readAccessToken();
-});
-
-final chatSocketProvider = Provider<ChatSocket>((ref) {
-  final socket = ChatSocket(
-    ref.watch(chatDaoProvider),
-    ref.watch(apiClientProvider),
-    ref.watch(tokenStoreProvider),
-    logger: ref.watch(appLoggerProvider),
-    decrypt: (conversationId, clientMsgId, senderId, content, {required isGroup}) {
-      return ref.read(e2eeManagerProvider).plaintextFor(
-            clientMsgId,
-            conversationId,
-            content,
-            isGroup: isGroup,
-            senderId: senderId,
-          );
-    },
-  );
-  // Live inbound messages raise a local notification; the sync/pagination paths
-  // never call this, so catch-up never floods the tray.
-  socket.onIncomingMessage = (message, {String? senderName}) {
-    unawaited(
-      ref.read(messageNotifierProvider).onLiveMessage(message, senderName: senderName),
-    );
-  };
-  ref.onDispose(socket.dispose);
-  return socket;
-});
-
-/// Registers this install for push delivery while a session is active.
-final pushRegistrationProvider = Provider<PushRegistration>((ref) {
-  final registration = PushRegistration(
-    ref.watch(apiClientProvider),
-    logger: ref.watch(appLoggerProvider),
-  );
-  ref.onDispose(() => unawaited(registration.stop()));
-  return registration;
-});
-
-/// Android notification-tray integration for incoming messages. Initialized
-/// during bootstrap and independent of Firebase, so self-hosted builds notify.
+/// Android notification-tray integration for incoming messages.
 final localNotificationServiceProvider = Provider<LocalNotificationService>((ref) {
   final service = LocalNotificationService();
   ref.onDispose(() => unawaited(service.dispose()));
@@ -144,10 +106,272 @@ class AppLifecycleNotifier extends Notifier<AppLifecycleState> {
 final appLifecycleProvider =
     NotifierProvider<AppLifecycleNotifier, AppLifecycleState>(AppLifecycleNotifier.new);
 
+// ---------------------------------------------------------------------------
+// Account identity & scope boundary
+// ---------------------------------------------------------------------------
+
+/// Root account-identity notifier driven by [AuthController] transitions.
+///
+/// Kept independent of `authControllerProvider` so the provider graph stays
+/// strictly acyclic in Riverpod 3: [AuthController] can read account-scoped
+/// services during teardown without forming a circular dependency, while every
+/// user-bound provider watches [accountScopeProvider] (which watches this).
+class ActiveAccountUserIdNotifier extends Notifier<String?> {
+  // ignore: prefer_initializing_formals
+  ActiveAccountUserIdNotifier({String? initial}) : _initial = initial;
+
+  final String? _initial;
+
+  @override
+  String? build() => _initial;
+
+  void set(String? userId) {
+    if (state == userId) return;
+    state = userId;
+  }
+}
+
+final activeAccountUserIdProvider =
+    NotifierProvider<ActiveAccountUserIdNotifier, String?>(
+  ActiveAccountUserIdNotifier.new,
+);
+
+/// Stable user id of the currently authenticated session.
+///
+/// Token rotations and profile edits keep the same user id, so they do NOT
+/// rebuild [accountScopeProvider] or reopen the local database.
+final currentUserIdProvider = Provider<String?>((ref) {
+  return ref.watch(activeAccountUserIdProvider);
+});
+
+/// Active account partition scope. Rebuilds ONLY when the signed-in user id
+/// changes (login, logout, or account switch). Every user-bound provider
+/// watches this provider so switching accounts cleanly disposes the entire
+/// previous graph (§2.2).
+final accountScopeProvider = Provider<AccountScope?>((ref) {
+  final userId = ref.watch(currentUserIdProvider);
+  if (userId == null) return null;
+
+  final logger = ref.read(appLoggerProvider);
+  final scope = AccountScope(
+    accountId: accountIdForUser(userId),
+    userId: userId,
+    epoch: ++_nextScopeEpoch,
+  );
+  ref.onDispose(() {
+    scope.beginClose();
+    logger.clear();
+    evictMemoryImageCache();
+  });
+  return scope;
+});
+
+final accountStoreProvider = Provider<AccountStore?>((ref) {
+  final scope = ref.watch(accountScopeProvider);
+  if (scope == null) return null;
+  return AccountStore(ref.watch(tokenStoreProvider), scope.accountId);
+});
+
+final accountPathsProvider = FutureProvider<AccountPaths?>((ref) async {
+  final scope = ref.watch(accountScopeProvider);
+  if (scope == null) return null;
+  return AccountPaths.resolve(scope.accountId, ref.watch(appDirsProvider));
+});
+
+/// Tracks whether the one-time D1 prompt ("Start fresh" vs "Keep group history")
+/// should be displayed after a fresh-partition login with existing group chats.
+class FreshPartitionPromptNotifier extends Notifier<bool> {
+  @override
+  bool build() {
+    ref.watch(accountScopeProvider);
+    return false;
+  }
+
+  void show() => state = true;
+  void dismiss() => state = false;
+}
+
+final freshPartitionPromptProvider =
+    NotifierProvider<FreshPartitionPromptNotifier, bool>(
+  FreshPartitionPromptNotifier.new,
+);
+
+// ---------------------------------------------------------------------------
+// Account-scoped providers (all watch accountScopeProvider)
+// ---------------------------------------------------------------------------
+
+final appDatabaseProvider = Provider<AppDatabase>((ref) {
+  final scope = ref.watch(accountScopeProvider);
+  final dirs = ref.watch(appDirsProvider);
+  final gate = ref.watch(dbGateProvider);
+
+  if (scope == null) {
+    final memoryDb = AppDatabase.forTesting(NativeDatabase.memory());
+    ref.onDispose(() => unawaited(memoryDb.close()));
+    return memoryDb;
+  }
+
+  final database = AppDatabase.forAccountLazy(
+    accountId: scope.accountId,
+    dirs: dirs,
+    gate: gate,
+  );
+  ref.onDispose(() {
+    unawaited(_closeDbSafely(database, scope.accountId, dirs, gate));
+  });
+  return database;
+});
+
+Future<void> _closeDbSafely(
+  AppDatabase database,
+  String accountId,
+  AppDirs dirs,
+  DbGate gate,
+) async {
+  if (database.isClosed) return;
+  try {
+    final filePath = database.filePath ??
+        (dirs.cachedNoBackupDir == null
+            ? null
+            : AccountPaths(
+                accountId: accountId,
+                noBackupRoot: dirs.cachedNoBackupDir!,
+                cacheRoot: dirs.cachedCacheDir ?? dirs.cachedNoBackupDir!,
+              ).dbFile.path);
+    if (filePath != null) {
+      await gate.run(filePath, database.close);
+    } else {
+      await database.close();
+    }
+  } catch (_) {
+    try {
+      await database.close();
+    } catch (_) {}
+  }
+}
+
+final chatDaoProvider = Provider<ChatDao>((ref) {
+  final scope = ref.watch(accountScopeProvider);
+  return ChatDao(ref.watch(appDatabaseProvider), scope: scope);
+});
+
+final apiClientProvider = Provider<ApiClient>((ref) {
+  ref.watch(accountScopeProvider);
+  final logger = ref.watch(appLoggerProvider);
+  final api = ApiClient(
+    ref.watch(tokenStoreProvider),
+    deviceId: ref.watch(deviceIdProvider),
+    logger: logger,
+  );
+  logger.attach(api);
+  return api;
+});
+
+final mediaCacheProvider = Provider<AccountMediaCache?>((ref) {
+  final scope = ref.watch(accountScopeProvider);
+  if (scope == null) return null;
+  final dirs = ref.watch(appDirsProvider);
+  final cacheRoot = dirs.cachedCacheDir ??
+      Directory(p.join(Directory.systemTemp.path, 'cpchat_app_dirs', 'cache'));
+  final mediaDir = Directory(
+    p.join(cacheRoot.path, 'accounts', scope.accountId, 'media'),
+  );
+  return AccountMediaCache(accountId: scope.accountId, mediaDir: mediaDir);
+});
+
+final mediaServiceProvider = Provider<MediaService>((ref) {
+  final scope = ref.watch(accountScopeProvider);
+  final dirs = ref.watch(appDirsProvider);
+  return MediaService(
+    ref.watch(apiClientProvider),
+    logger: ref.watch(appLoggerProvider),
+    uploadTempDir: scope == null
+        ? null
+        : () async => (await AccountPaths.resolve(scope.accountId, dirs)).uploadTmpDir,
+  );
+});
+
+/// End-to-end encryption for direct chats, strictly scoped per account.
+final e2eeManagerProvider = Provider<E2eeManager>((ref) {
+  final scope = ref.watch(accountScopeProvider);
+  final accountStore = ref.watch(accountStoreProvider);
+  return E2eeManager(
+    tokenStore: ref.watch(tokenStoreProvider),
+    accountStore: accountStore,
+    scope: scope,
+    legacyMigration: ref.watch(legacyMigrationProvider),
+    api: ref.watch(apiClientProvider),
+    logger: ref.watch(appLoggerProvider),
+  );
+});
+
+/// The stored access token, exposed for widgets that fetch private media.
+final accessTokenProvider = FutureProvider<String?>((ref) async {
+  ref.watch(accountScopeProvider);
+  return ref.watch(tokenStoreProvider).readAccessToken();
+});
+
+final chatSocketProvider = Provider<ChatSocket>((ref) {
+  final scope = ref.watch(accountScopeProvider);
+  final dao = ref.watch(chatDaoProvider);
+  final api = ref.watch(apiClientProvider);
+  final tokenStore = ref.watch(tokenStoreProvider);
+  final wiper = ref.watch(accountWiperProvider);
+
+  final socket = ChatSocket(
+    dao,
+    api,
+    tokenStore,
+    scope: scope,
+    logger: ref.watch(appLoggerProvider),
+    serverRotatedAt: () => ref.read(e2eeManagerProvider).serverRotatedAt,
+    beforeSync: scope == null
+        ? null
+        : () => wiper.flushPendingServerClears(
+              accountId: scope.accountId,
+              api: api,
+              dao: dao,
+            ),
+    decrypt: (conversationId, clientMsgId, senderId, content, {required isGroup}) {
+      return ref.read(e2eeManagerProvider).plaintextFor(
+            clientMsgId,
+            conversationId,
+            content,
+            isGroup: isGroup,
+            senderId: senderId,
+          );
+    },
+  );
+  // Live inbound messages raise a local notification; the sync/pagination paths
+  // never call this, so catch-up never floods the tray.
+  socket.onIncomingMessage = (message, {String? senderName}) {
+    if (scope != null && !scope.isOpen) return;
+    unawaited(
+      ref.read(messageNotifierProvider).onLiveMessage(message, senderName: senderName),
+    );
+  };
+  ref.onDispose(socket.dispose);
+  return socket;
+});
+
+/// Registers this install for push delivery while a session is active.
+final pushRegistrationProvider = Provider<PushRegistration>((ref) {
+  ref.watch(accountScopeProvider);
+  final registration = PushRegistration(
+    ref.watch(apiClientProvider),
+    logger: ref.watch(appLoggerProvider),
+  );
+  ref.onDispose(() => unawaited(registration.stop()));
+  return registration;
+});
+
 /// The conversation currently on screen, set by `ChatScreen` while it is mounted.
 class ActiveConversationNotifier extends Notifier<String?> {
   @override
-  String? build() => null;
+  String? build() {
+    ref.watch(accountScopeProvider);
+    return null;
+  }
 
   void open(String conversationId) => state = conversationId;
 
@@ -159,15 +383,19 @@ class ActiveConversationNotifier extends Notifier<String?> {
 }
 
 final activeConversationIdProvider =
-    NotifierProvider<ActiveConversationNotifier, String?>(ActiveConversationNotifier.new);
+    NotifierProvider<ActiveConversationNotifier, String?>(
+  ActiveConversationNotifier.new,
+);
 
-/// Raises local notifications for live incoming messages, applying the DND and
-/// active-chat suppression rules and deduplicating against FCM pushes.
+/// Raises local notifications for live incoming messages, tagged with the
+/// active account id so foreign-account taps can be dropped (§3.3).
 final messageNotifierProvider = Provider<MessageNotifier>((ref) {
+  final scope = ref.watch(accountScopeProvider);
   final dao = ref.watch(chatDaoProvider);
   return MessageNotifier(
     notifications: ref.watch(localNotificationServiceProvider),
-    selfId: () => ref.read(currentUserProvider)?.id,
+    accountId: () => scope?.accountId,
+    selfId: () => scope?.userId ?? ref.read(currentUserProvider)?.id,
     selfStatus: () => ref.read(currentUserProvider)?.status,
     appResumed: () => ref.read(appLifecycleProvider) == AppLifecycleState.resumed,
     activeConversationId: () => ref.read(activeConversationIdProvider),
@@ -185,7 +413,6 @@ final messageNotifierProvider = Provider<MessageNotifier>((ref) {
   );
 });
 
-/// "Name (nickname)" from a cached direct-chat peer, or `null` when unnamed.
 String? _directPeerLabel(LocalConversation conversation) {
   final name = conversation.peerName;
   if (name == null || name.isEmpty) return null;
@@ -194,16 +421,9 @@ String? _directPeerLabel(LocalConversation conversation) {
   return '$name ($nickname)';
 }
 
-/// Owns the realtime session lifecycle: it boots the E2EE keys, connects the
-/// chat socket, and starts push registration, then tears all three down on
-/// logout.
-///
-/// It lives in its own provider (rather than inside [SessionRuntime]) so an
-/// explicit `logout()` can stop the session without reading `sessionRuntime`,
-/// which listens to the auth controller and would otherwise form a circular
-/// dependency. `stop()` is a no-op unless a session is running, so the
-/// auth-transition listener firing after an explicit `logout()` does not start a
-/// second teardown.
+/// Owns the realtime session lifecycle: verifies partition integrity, boots
+/// E2EE keys, connects the chat socket, starts push registration, and tears
+/// everything down cleanly on logout (without wiping local history).
 class SessionLifecycle {
   SessionLifecycle(this._ref);
 
@@ -213,6 +433,9 @@ class SessionLifecycle {
   bool _running = false;
   ChatSocket? _watchedSocket;
   VoidCallback? _socketConnectionListener;
+  ChatSocket? _activeSocket;
+  E2eeManager? _activeE2ee;
+  PushRegistration? _activePush;
 
   void _attachSocketReconnectListener(ChatSocket socket) {
     if (identical(_watchedSocket, socket) && _socketConnectionListener != null) {
@@ -241,10 +464,22 @@ class SessionLifecycle {
     _socketConnectionListener = null;
   }
 
-  /// Starts the socket and push registration for the active session. Safe to
-  /// call repeatedly: a run already in flight is awaited rather than duplicated,
-  /// and a cold-start restore and the login listener share one boot.
   Future<void> start() async {
+    final auth = _ref.read(authControllerProvider);
+    if (!auth.isAuthenticated) return;
+    // Ensure the account scope is synced even if auth was seeded without
+    // overriding activeAccountUserIdProvider (e.g. cold-start widget tests).
+    final userId = auth.session?.user.id;
+    if (userId != null && _ref.read(activeAccountUserIdProvider) != userId) {
+      _ref.read(activeAccountUserIdProvider.notifier).set(userId);
+    }
+    // Await any in-flight teardown before booting the next session (§Phase 3).
+    final stopping = _stopping;
+    if (stopping != null) {
+      try {
+        await stopping;
+      } catch (_) {}
+    }
     if (!_ref.read(authControllerProvider).isAuthenticated) return;
     _running = true;
     final existing = _starting;
@@ -259,39 +494,96 @@ class SessionLifecycle {
   }
 
   Future<void> _start() async {
-    // Encryption keys must be ready before the first inbound frame is decrypted
-    // and before the outbox is flushed, so bootstrap them first.
+    final scope = _ref.read(accountScopeProvider);
+    final db = _ref.read(appDatabaseProvider);
+    final e2ee = _ref.read(e2eeManagerProvider);
+    final socket = _ref.read(chatSocketProvider);
+    final push = _ref.read(pushRegistrationProvider);
+    final notifications = _ref.read(localNotificationServiceProvider);
+    final logger = _ref.read(appLoggerProvider);
+    _activeSocket = socket;
+    _activeE2ee = e2ee;
+    _activePush = push;
+
+    var freshPartition = false;
+
+    // 1. Verify partition integrity for file-backed account databases (§2.9).
+    if (scope != null && db.filePath != null) {
+      final accountStore = _ref.read(accountStoreProvider);
+      if (accountStore != null) {
+        try {
+          final paths = await AccountPaths.resolve(
+            scope.accountId,
+            _ref.read(appDirsProvider),
+          );
+          final guard = PartitionGuard(
+            store: accountStore,
+            userId: scope.userId,
+            paths: paths,
+            gate: _ref.read(dbGateProvider),
+            logger: logger,
+          );
+          final check = await guard.verify(db);
+          freshPartition = check.isFreshStart;
+        } catch (error) {
+          debugPrint('PartitionGuard check failed: $error');
+        }
+      }
+    }
+    if (!_running || (scope != null && !scope.isOpen)) return;
+
+    // 2. Encryption keys must be ready before the first inbound frame is
+    //    decrypted and before the outbox is flushed.
     try {
-      await _ref.read(e2eeManagerProvider).bootstrap();
+      await e2ee.bootstrap();
     } catch (error) {
       debugPrint('E2EE bootstrap failed: $error');
     }
+    if (!_running || (scope != null && !scope.isOpen)) return;
 
-    final socket = _ref.read(chatSocketProvider);
+    // 3. Connect socket (runs pending_server_clear flush + syncAll + outbox).
     _attachSocketReconnectListener(socket);
     await socket.connect();
+    if (!_running || (scope != null && !scope.isOpen)) return;
 
-    try {
-      await _ref.read(pushRegistrationProvider).start();
-    } catch (error) {
-      _ref.read(appLoggerProvider).warn(
-            'fcm',
-            'Push registration start failed',
-            meta: {'error': error.toString()},
-          );
+    // 4. D1 fresh-partition group-history prompt.
+    if (freshPartition && scope != null && _ref.mounted) {
+      await _maybeShowFreshGroupPrompt();
     }
 
-    // Ask Android 13+ for the notification permission once a session exists.
+    // 5. Start push registration & ask notification permission.
     try {
-      await _ref.read(localNotificationServiceProvider).requestPermission();
+      await push.start();
+    } catch (error) {
+      logger.warn(
+        'fcm',
+        'Push registration start failed',
+        meta: {'error': error.toString()},
+      );
+    }
+
+    try {
+      await notifications.requestPermission();
     } catch (error) {
       debugPrint('Notification permission request failed: $error');
     }
   }
 
-  /// Stops realtime work on logout. An in-flight boot is awaited first so a late
-  /// connect cannot revive a socket that is being torn down, then each step is
-  /// individually guarded so a stalled socket cannot block the rest.
+  Future<void> _maybeShowFreshGroupPrompt() async {
+    try {
+      final dao = _ref.read(chatDaoProvider);
+      final convs = await dao.conversations();
+      final hasGroupHistory = convs.any(
+        (c) => c.type == 'group' && c.lastSeq > c.clearedSeq,
+      );
+      if (hasGroupHistory) {
+        _ref.read(freshPartitionPromptProvider.notifier).show();
+      }
+    } catch (_) {
+      // Best effort.
+    }
+  }
+
   Future<void> stop() {
     final existing = _stopping;
     if (existing != null) return existing;
@@ -309,31 +601,45 @@ class SessionLifecycle {
     final starting = _starting;
     if (starting != null) {
       try {
-        await starting;
+        await starting.timeout(const Duration(seconds: 2));
       } catch (error) {
         debugPrint('Session stop awaiting boot failed: $error');
       }
     }
-    try {
-      await _ref.read(chatSocketProvider).disconnect();
-    } catch (error) {
-      debugPrint('Session teardown socket disconnect failed: $error');
+    final socket = _activeSocket ?? (_ref.mounted ? _ref.read(chatSocketProvider) : null);
+    final e2ee = _activeE2ee ?? (_ref.mounted ? _ref.read(e2eeManagerProvider) : null);
+    final push = _activePush ?? (_ref.mounted ? _ref.read(pushRegistrationProvider) : null);
+    _activeSocket = null;
+    _activeE2ee = null;
+    _activePush = null;
+
+    if (socket != null) {
+      try {
+        await socket.disconnect();
+      } catch (error) {
+        debugPrint('Session teardown socket disconnect failed: $error');
+      }
     }
-    try {
-      await _ref.read(pushRegistrationProvider).stop();
-    } catch (error) {
-      debugPrint('Session teardown push stop failed: $error');
+    if (e2ee != null) {
+      try {
+        await e2ee.flush();
+      } catch (error) {
+        debugPrint('Session teardown E2EE flush failed: $error');
+      }
     }
-    _ref.read(e2eeManagerProvider).reset();
+    if (push != null) {
+      try {
+        await push.stop();
+      } catch (error) {
+        debugPrint('Session teardown push stop failed: $error');
+      }
+    }
+    e2ee?.reset();
   }
 }
 
 final sessionLifecycleProvider = Provider<SessionLifecycle>(SessionLifecycle.new);
 
-/// Watches the auth state and drives [SessionLifecycle] so session transitions
-/// are handled in one place and cannot be missed: `ref.listen` inside a
-/// lifecycle method is not permitted, and a boot that ran only once would never
-/// react to a manual login.
 class SessionRuntime extends Notifier<bool> {
   @override
   bool build() {
@@ -356,8 +662,26 @@ class SessionRuntime extends Notifier<bool> {
 final sessionRuntimeProvider =
     NotifierProvider<SessionRuntime, bool>(SessionRuntime.new);
 
-/// Resolves the device id and boots push registration before the app renders.
+/// Resolves storage roots, resumes interrupted L2 wipes, migrates legacy
+/// single-DB installs, resolves the device id, and initializes notifications.
 final bootstrapProvider = FutureProvider<void>((ref) async {
+  final dirs = ref.watch(appDirsProvider);
+  await dirs.initialize();
+
+  // Finish any crash-interrupted L2 partition deletions before opening DBs.
+  try {
+    await ref.read(accountWiperProvider).resumePendingWipes();
+  } catch (error) {
+    debugPrint('Pending wipe janitor failed: $error');
+  }
+
+  // Upgrade pre-partition installs safely and idempotently (§3.1).
+  try {
+    await ref.read(legacyMigrationProvider).runIfNeeded();
+  } catch (error) {
+    debugPrint('Legacy migration failed: $error');
+  }
+
   final tokenStore = ref.watch(tokenStoreProvider);
   var deviceId = await tokenStore.readDeviceId();
   if (deviceId == null) {
@@ -371,11 +695,6 @@ final bootstrapProvider = FutureProvider<void>((ref) async {
 });
 
 /// Reads the persisted session from local storage without any network access.
-///
-/// Runs before `runApp` so the first frame already knows whether a session
-/// exists; it is a single secure-storage read, so it does not prolong the native
-/// splash. A session exists while the token store still holds credentials — the
-/// access token may be stale, which the background refresh rotates.
 Future<AuthState> hydrateAuthState(TokenStore tokenStore) async {
   final access = await tokenStore.readAccessToken();
   final refresh = await tokenStore.readRefreshToken();
@@ -384,9 +703,6 @@ Future<AuthState> hydrateAuthState(TokenStore tokenStore) async {
   final userId = await tokenStore.readUserId();
   if (userId == null) return const AuthState.unauthenticated();
 
-  // A cached profile lets the chat list render its avatar on the first frame. An
-  // upgrade from a build that did not persist it falls back to a bare identity
-  // that the background validation fills in.
   final user = await tokenStore.readUser();
   return AuthState.authenticated(
     AuthSession(
@@ -398,13 +714,7 @@ Future<AuthState> hydrateAuthState(TokenStore tokenStore) async {
   );
 }
 
-/// Owns the auth lifecycle. Its state starts from the session seeded before
-/// `runApp` (or, for an unseeded scope, [AuthStatus.initializing] that [restore]
-/// resolves) and is never null: an unresolved lookup is [AuthStatus.initializing],
-/// not a signed-out user, so the router never flashes the login screen.
 class AuthController extends Notifier<AuthState> {
-  // A named parameter keeps the seeding call sites readable; a private field
-  // cannot be an initializing formal.
   // ignore: prefer_initializing_formals
   AuthController({AuthState? initial}) : _initial = initial;
 
@@ -413,12 +723,18 @@ class AuthController extends Notifier<AuthState> {
   @override
   AuthState build() => _initial ?? const AuthState.initializing();
 
+  @override
+  set state(AuthState value) {
+    super.state = value;
+    ref.read(activeAccountUserIdProvider.notifier).set(value.session?.user.id);
+  }
+
   Future<void> login({required String identifier, required String password}) async {
     final session = await ref.read(apiClientProvider).login(
           identifier: identifier,
           password: password,
         );
-    await ref.read(tokenStoreProvider).saveUser(session.user);
+    await _activateAccount(session.user);
     state = AuthState.authenticated(session);
   }
 
@@ -434,28 +750,45 @@ class AuthController extends Notifier<AuthState> {
           name: name,
           password: password,
         );
-    await ref.read(tokenStoreProvider).saveUser(session.user);
+    await _activateAccount(session.user);
     state = AuthState.authenticated(session);
   }
 
-  /// Resolves the initial state from local storage. Local-only: it never touches
-  /// the network, so an offline launch is neither blocked nor mistaken for a
-  /// signed-out one.
+  Future<void> _activateAccount(User user) async {
+    final accountId = accountIdForUser(user.id);
+    final tokenStore = ref.read(tokenStoreProvider);
+    await tokenStore.saveUser(user);
+    await tokenStore.writeActiveAccountId(accountId);
+    await ref.read(accountRegistryProvider).register(
+          user.id,
+          displayName: user.name,
+          username: user.username,
+        );
+    try {
+      await ref.read(localNotificationServiceProvider).cancelForeignAccounts(accountId);
+    } catch (_) {}
+  }
+
   Future<void> restore() async {
     try {
-      state = await hydrateAuthState(ref.read(tokenStoreProvider));
+      final restored = await hydrateAuthState(ref.read(tokenStoreProvider));
+      final user = restored.session?.user;
+      if (user != null) {
+        final accountId = accountIdForUser(user.id);
+        await ref.read(tokenStoreProvider).writeActiveAccountId(accountId);
+        await ref.read(accountRegistryProvider).register(
+              user.id,
+              displayName: user.name.isEmpty ? null : user.name,
+              username: user.username,
+            );
+      }
+      state = restored;
     } catch (error) {
       debugPrint('Session restore failed: $error');
-      // A storage failure must not strand the app on the splash: treat it as
-      // signed out rather than leaving the state unresolved.
       state = const AuthState.unauthenticated();
     }
   }
 
-  /// Validates the restored session against the server after the shell is
-  /// already showing. A definitive auth rejection signs the user out; a
-  /// transient failure (offline, timeout, 5xx) keeps the cached session so an
-  /// offline launch stays usable.
   Future<void> validateSession() async {
     final current = state.session;
     if (current == null) return;
@@ -463,6 +796,11 @@ class AuthController extends Notifier<AuthState> {
       final user = await ref.read(apiClientProvider).me();
       if (!state.isAuthenticated) return;
       await ref.read(tokenStoreProvider).saveUser(user);
+      await ref.read(accountRegistryProvider).register(
+            user.id,
+            displayName: user.name,
+            username: user.username,
+          );
       state = AuthState.authenticated(
         AuthSession(
           user: user,
@@ -472,8 +810,6 @@ class AuthController extends Notifier<AuthState> {
         ),
       );
     } on ApiException catch (error) {
-      // Only a rejected/revoked session signs the user out; any other status
-      // keeps the locally cached data.
       if (error.isAuthFailure || error.statusCode == 403) {
         await logout();
       }
@@ -482,64 +818,136 @@ class AuthController extends Notifier<AuthState> {
     }
   }
 
-  /// Upper bound on each logout teardown step. A step that overruns it is
-  /// abandoned (its work continues in the background) so signing out always
-  /// reaches the signed-out state instead of hanging on a stalled socket or an
-  /// unreachable server.
-  Duration logoutStepTimeout = const Duration(seconds: 5);
+  /// Upper bound on each network teardown step (§2.3: <= 3s, configurable in tests).
+  Duration logoutStepTimeout = const Duration(seconds: 3);
 
-  Future<void> logout() async {
+  /// Strict 9-step teardown (§2.3).
+  ///
+  /// Standard logout (`wipeDeviceData: false`) preserves the account's isolated
+  /// SQLite partition and `acct.<id>.e2ee_*` keys for R2 same-user re-login.
+  /// Passing `wipeDeviceData: true` runs L2 ("remove my data from this device"):
+  /// clears server history (best-effort / queued if offline) and deletes the
+  /// entire local partition, keys, media cache, and registry entry.
+  Future<void> logout({bool wipeDeviceData = false}) async {
+    final scope = ref.read(accountScopeProvider);
+    final accountId = scope?.accountId;
     final api = ref.read(apiClientProvider);
-    final chatDao = ref.read(chatDaoProvider);
+    final db = ref.read(appDatabaseProvider);
+    final e2ee = ref.read(e2eeManagerProvider);
+    final push = ref.read(pushRegistrationProvider);
+    final notifications = ref.read(localNotificationServiceProvider);
+    final messageNotifier = ref.read(messageNotifierProvider);
+    final mediaCache = ref.read(mediaCacheProvider);
+    final wiper = ref.read(accountWiperProvider);
+    final dirs = ref.read(appDirsProvider);
+    final dbGate = ref.read(dbGateProvider);
+    final registry = ref.read(accountRegistryProvider);
+    final tokenStore = ref.read(tokenStoreProvider);
+
     try {
-      // Tear down the socket before clearing tokens so it stops reconnecting
-      // with a session that is about to disappear, and reset E2EE state so a
-      // different account signing in next cannot see the previous account's
-      // plaintext.
+      // 0. Invalidate current account epoch so stale async continuations fail closed.
+      scope?.beginClose();
+
+      // 1. Push unregister (needs auth token still present; best-effort).
+      try {
+        await push.unregister(timeout: logoutStepTimeout).timeout(logoutStepTimeout);
+      } catch (error) {
+        debugPrint('Logout push unregister failed: $error');
+      }
+
+      // 2. Clear notifications for this account and reset dedupe buffer.
+      try {
+        if (accountId != null) {
+          await notifications.cancelForAccount(accountId).timeout(logoutStepTimeout);
+        } else {
+          await notifications.cancelAll().timeout(logoutStepTimeout);
+        }
+      } catch (error) {
+        debugPrint('Logout notification clear failed: $error');
+      }
+      messageNotifier.reset();
+      ref.read(activeConversationIdProvider.notifier).reset();
+
+      // 3. Stop realtime session (disconnect socket, await sync barrier, flush E2EE).
       try {
         await ref.read(sessionLifecycleProvider).stop().timeout(logoutStepTimeout);
       } catch (error) {
         debugPrint('Logout teardown failed: $error');
       }
+
+      // 4. Flush any remaining pending ratchet-session writes (R-2).
       try {
-        await ref.read(pushRegistrationProvider).unregister().timeout(logoutStepTimeout);
+        await e2ee.flush().timeout(logoutStepTimeout);
       } catch (error) {
-        debugPrint('Logout push unregister failed: $error');
+        debugPrint('Logout E2EE flush failed: $error');
       }
+
+      // 5a. If L2 wipe requested, clear server history while auth is still valid.
+      if (wipeDeviceData && accountId != null) {
+        try {
+          await api.clearAllHistory().timeout(logoutStepTimeout);
+          await registry.setPendingL2ServerClear(accountId, false);
+        } catch (error) {
+          debugPrint('Logout L2 server clear offline, flagging for next login: $error');
+          await registry.setPendingL2ServerClear(accountId, true);
+        }
+      }
+
+      // 5b. Revoke refresh token on the server (best-effort).
       try {
         await api.logout().timeout(logoutStepTimeout);
       } catch (error) {
         debugPrint('Logout API call failed: $error');
       }
-      try {
-        await chatDao.clearAll().timeout(logoutStepTimeout);
-      } catch (error) {
-        debugPrint('Logout local clear failed: $error');
+
+      // 6. Close account DB via DbGate, clear memory image cache and upload tmp.
+      //    If L2 wipe requested, delete the entire partition + keys + registry.
+      if (wipeDeviceData && accountId != null) {
+        try {
+          await wiper.wipeAccountPartition(
+            accountId: accountId,
+            openDb: db,
+            mediaCache: mediaCache,
+            notifyServer: false, // already attempted in step 5a
+          );
+        } catch (error) {
+          debugPrint('Logout L2 partition wipe failed: $error');
+        }
+      } else {
+        if (accountId != null) {
+          try {
+            await _closeDbSafely(db, accountId, dirs, dbGate)
+                .timeout(logoutStepTimeout);
+          } catch (error) {
+            debugPrint('Logout DB close failed: $error');
+          }
+          try {
+            if (dirs.cachedCacheDir != null) {
+              final paths = AccountPaths(
+                accountId: accountId,
+                noBackupRoot: dirs.cachedNoBackupDir ?? dirs.cachedCacheDir!,
+                cacheRoot: dirs.cachedCacheDir!,
+              );
+              await paths.clearUploadTmp();
+            }
+          } catch (_) {}
+        }
+        evictMemoryImageCache();
       }
-      // Drop any banners so the next account never sees the previous one's
-      // notification, and stop suppressing the last chat's conversation id.
-      try {
-        await ref.read(localNotificationServiceProvider).cancelAll().timeout(logoutStepTimeout);
-      } catch (error) {
-        debugPrint('Logout notification clear failed: $error');
-      }
-      ref.read(activeConversationIdProvider.notifier).reset();
     } finally {
-      // Clear the persisted credentials and always reach the signed-out state,
-      // even if a step stalled, so the router redirects to /auth and the next
-      // login starts from a clean slate.
+      // 7. Clear session pointers ONLY (preserves device_id, registry, and
+      //    non-wiped account DB + acct.<id>.e2ee_*).
       try {
-        await ref.read(tokenStoreProvider).clear();
+        await tokenStore.clear();
       } catch (error) {
         debugPrint('Logout token clear failed: $error');
       }
+      ref.read(appLoggerProvider).clear();
+      // 8. Flip auth state -> disposes every provider watching accountScopeProvider.
       state = const AuthState.unauthenticated();
     }
   }
 
-  /// Replaces the cached user after a profile edit so every screen reading
-  /// [currentUserProvider] (chat list avatar, headers) refreshes immediately,
-  /// without ending the session or re-fetching.
   void applyUser(User user) {
     final current = state.session;
     if (current == null) return;
@@ -562,13 +970,15 @@ final currentUserProvider = Provider<User?>((ref) {
   return ref.watch(authControllerProvider).session?.user;
 });
 
-/// The chat list, backed by the local mirror.
+/// The chat list, backed by the account's local mirror.
 final conversationsProvider = StreamProvider<List<LocalConversation>>((ref) {
+  ref.watch(accountScopeProvider);
   return ref.watch(chatDaoProvider).watchConversations();
 });
 
-/// Messages for one conversation, backed by the local mirror.
+/// Messages for one conversation, backed by the account's local mirror.
 final messagesProvider =
     StreamProvider.family<List<LocalMessage>, String>((ref, conversationId) {
+  ref.watch(accountScopeProvider);
   return ref.watch(chatDaoProvider).watchMessages(conversationId);
 });

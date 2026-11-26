@@ -1,35 +1,112 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../models/models.dart';
 
-/// Persists JWT access/refresh tokens in the Android Keystore-backed storage,
+/// Persists JWT access/refresh tokens in Android Keystore-backed storage,
 /// plus the stable per-install device id used for connection routing and the
 /// cached profile of the signed-in user.
+///
+/// Every read is guarded against [PlatformException] (for example after an OS
+/// backup restore whose Keystore master key is missing or after a credential
+/// reset). On such a failure the store reports `null` rather than crashing so
+/// cold start cleanly treats the device as signed out with a fresh partition.
 class TokenStore {
-  TokenStore([this._storage = const FlutterSecureStorage()]);
+  TokenStore([
+    FlutterSecureStorage? storage,
+    this.onStorageError,
+  ]) : _storage = storage ??
+            const FlutterSecureStorage(
+              aOptions: AndroidOptions(resetOnError: true),
+            );
 
   static const _accessTokenKey = 'access_token';
   static const _refreshTokenKey = 'refresh_token';
   static const _userIdKey = 'user_id';
   static const _userKey = 'user_profile';
   static const _deviceIdKey = 'device_id';
-  static const _e2eeKeysKey = 'e2ee_keys';
-  static const _e2eeSessionsKey = 'e2ee_sessions';
+  static const _activeAccountIdKey = 'active_account_id';
+
+  /// Legacy global E2EE keys (pre-partition layout). Read/deleted during
+  /// migration or by callers that have not yet switched to `AccountStore`.
+  static const legacyE2eeKeysKey = 'e2ee_keys';
+  static const legacyE2eeSessionsKey = 'e2ee_sessions';
 
   final FlutterSecureStorage _storage;
+  final void Function(String op, String key, Object error)? onStorageError;
 
-  Future<String?> readAccessToken() => _storage.read(key: _accessTokenKey);
+  Future<String?> readValue(String key) async {
+    try {
+      return await _storage.read(key: key);
+    } on PlatformException catch (error) {
+      _reportError('read', key, error);
+      return null;
+    } on MissingPluginException catch (error) {
+      _reportError('read', key, error);
+      return null;
+    }
+  }
 
-  Future<String?> readRefreshToken() => _storage.read(key: _refreshTokenKey);
+  Future<void> writeValue(String key, String value) async {
+    try {
+      await _storage.write(key: key, value: value);
+    } on PlatformException catch (error) {
+      _reportError('write', key, error);
+    } on MissingPluginException catch (error) {
+      _reportError('write', key, error);
+    }
+  }
 
-  Future<String?> readUserId() => _storage.read(key: _userIdKey);
+  Future<void> deleteValue(String key) async {
+    try {
+      await _storage.delete(key: key);
+    } on PlatformException catch (error) {
+      _reportError('delete', key, error);
+    } on MissingPluginException catch (error) {
+      _reportError('delete', key, error);
+    }
+  }
+
+  Future<Map<String, String>> readAllValues() async {
+    try {
+      return await _storage.readAll();
+    } on PlatformException catch (error) {
+      _reportError('readAll', '*', error);
+      return const {};
+    } on MissingPluginException catch (error) {
+      _reportError('readAll', '*', error);
+      return const {};
+    }
+  }
+
+  void _reportError(String op, String key, Object error) {
+    onStorageError?.call(op, key, error);
+    debugPrint('TokenStore.$op($key) failed: $error');
+  }
+
+  Future<String?> readAccessToken() => readValue(_accessTokenKey);
+
+  Future<String?> readRefreshToken() => readValue(_refreshTokenKey);
+
+  Future<String?> readUserId() => readValue(_userIdKey);
+
+  Future<String?> readActiveAccountId() => readValue(_activeAccountIdKey);
+
+  Future<void> writeActiveAccountId(String? accountId) async {
+    if (accountId == null) {
+      await deleteValue(_activeAccountIdKey);
+    } else {
+      await writeValue(_activeAccountIdKey, accountId);
+    }
+  }
 
   /// The cached profile of the signed-in user, or `null` when none was stored
   /// (e.g. an install upgraded from a build that only persisted the user id).
   Future<User?> readUser() async {
-    final raw = await _storage.read(key: _userKey);
+    final raw = await readValue(_userKey);
     if (raw == null) return null;
     try {
       return User.fromJson(jsonDecode(raw) as Map<String, dynamic>);
@@ -39,58 +116,60 @@ class TokenStore {
   }
 
   Future<void> saveUser(User user) =>
-      _storage.write(key: _userKey, value: jsonEncode(user.toJson()));
+      writeValue(_userKey, jsonEncode(user.toJson()));
 
   /// The device id survives logout so the gateway keeps a stable routing key.
-  Future<String?> readDeviceId() => _storage.read(key: _deviceIdKey);
+  Future<String?> readDeviceId() => readValue(_deviceIdKey);
 
   Future<void> writeDeviceId(String deviceId) =>
-      _storage.write(key: _deviceIdKey, value: deviceId);
+      writeValue(_deviceIdKey, deviceId);
 
   Future<void> saveTokens({
     required String accessToken,
     required String refreshToken,
   }) async {
-    await _storage.write(key: _accessTokenKey, value: accessToken);
-    await _storage.write(key: _refreshTokenKey, value: refreshToken);
+    await writeValue(_accessTokenKey, accessToken);
+    await writeValue(_refreshTokenKey, refreshToken);
   }
 
   Future<void> saveSession({
     required String accessToken,
     required String refreshToken,
     required String userId,
+    String? accountId,
   }) async {
     await saveTokens(accessToken: accessToken, refreshToken: refreshToken);
-    await _storage.write(key: _userIdKey, value: userId);
+    await writeValue(_userIdKey, userId);
+    if (accountId != null) {
+      await writeValue(_activeAccountIdKey, accountId);
+    }
   }
 
-  /// Clears the session but keeps the device id and encryption keys.
-  ///
-  /// E2EE keys are per-device and survive logout: discarding them would make
-  /// every existing session unreadable and would orphan published prekeys.
+  /// Clears only the current session pointers. Does NOT delete the device id,
+  /// account registry, or any per-account E2EE keys/sessions.
   Future<void> clear() async {
-    await _storage.delete(key: _accessTokenKey);
-    await _storage.delete(key: _refreshTokenKey);
-    await _storage.delete(key: _userIdKey);
-    await _storage.delete(key: _userKey);
+    await deleteValue(_accessTokenKey);
+    await deleteValue(_refreshTokenKey);
+    await deleteValue(_userIdKey);
+    await deleteValue(_userKey);
+    await deleteValue(_activeAccountIdKey);
   }
 
-  /// Raw serialised private key material, encrypted at rest by the Android
-  /// Keystore-backed storage. `null` when this device has not yet generated
-  /// keys.
-  Future<String?> readE2eeKeys() => _storage.read(key: _e2eeKeysKey);
+  /// Legacy global E2EE key blob. Kept for migration and backward-compatible
+  /// tests; new code should use `AccountStore`.
+  Future<String?> readE2eeKeys() => readValue(legacyE2eeKeysKey);
 
-  Future<void> writeE2eeKeys(String json) => _storage.write(key: _e2eeKeysKey, value: json);
+  Future<void> writeE2eeKeys(String json) => writeValue(legacyE2eeKeysKey, json);
 
-  /// Serialised per-peer ratchet sessions.
-  Future<String?> readE2eeSessions() => _storage.read(key: _e2eeSessionsKey);
+  /// Legacy global E2EE sessions blob.
+  Future<String?> readE2eeSessions() => readValue(legacyE2eeSessionsKey);
 
   Future<void> writeE2eeSessions(String json) =>
-      _storage.write(key: _e2eeSessionsKey, value: json);
+      writeValue(legacyE2eeSessionsKey, json);
 
-  /// Removes identity keys and sessions. Only for a deliberate key reset.
+  /// Removes legacy global E2EE keys and sessions.
   Future<void> clearE2ee() async {
-    await _storage.delete(key: _e2eeKeysKey);
-    await _storage.delete(key: _e2eeSessionsKey);
+    await deleteValue(legacyE2eeKeysKey);
+    await deleteValue(legacyE2eeSessionsKey);
   }
 }

@@ -21,6 +21,7 @@ class MessageNotifier {
     required this.appResumed,
     required this.activeConversationId,
     required this.resolveNames,
+    this.accountId,
     Duration dedupeWindow = const Duration(seconds: 60),
   }) : _recent = RecentIdSet(window: dedupeWindow);
 
@@ -30,7 +31,13 @@ class MessageNotifier {
   final bool Function() appResumed;
   final String? Function() activeConversationId;
   final Future<ConversationNames?> Function(String conversationId) resolveNames;
+  final String? Function()? accountId;
   final RecentIdSet _recent;
+
+  /// Clears recent deduplication history (called on logout).
+  void reset() {
+    _recent.clear();
+  }
 
   /// A live WebSocket message, already decrypted and persisted. Silent when
   /// [NotificationPolicy] suppresses it or the same message was shown recently.
@@ -53,6 +60,7 @@ class MessageNotifier {
       title: rendered.title,
       body: rendered.body,
       messageId: message.id,
+      accountId: accountId?.call(),
     );
   }
 
@@ -71,6 +79,7 @@ class MessageNotifier {
       title: title,
       body: body,
       messageId: messageId,
+      accountId: accountId?.call(),
     );
   }
 

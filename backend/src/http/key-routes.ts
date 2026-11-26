@@ -31,6 +31,7 @@ const publishSchema = z.object({
     )
     .max(200)
     .optional(),
+  history_watermark: z.boolean().optional(),
 });
 
 const prekeysSchema = z.object({
@@ -66,10 +67,11 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: AppContext): void {
     requireAuth(request, config);
     const input = parse(publishSchema, request.body);
 
-    await keys.upsertIdentity({
+    const upsert = await keys.upsertIdentity({
       userId: request.userId,
       identityPublicKey: input.identity_key,
       signingPublicKey: input.signing_key,
+      historyWatermark: input.history_watermark === true,
     });
     await keys.upsertSignedPrekey({
       userId: request.userId,
@@ -85,10 +87,27 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: AppContext): void {
       })),
     );
 
+    for (const item of upsert.clearedDirectConversations) {
+      await ctx.broker.publishBroadcast(
+        {
+          user_ids: [request.userId],
+          frame: {
+            type: 'history_cleared',
+            conversation_id: item.conversationId,
+            cleared_seq: item.clearedSeq,
+          },
+        },
+        `u:${request.userId}`,
+      );
+    }
+
     reply.status(201).send({
       // The client replenishes when this drops below its threshold.
       one_time_prekeys: await keys.countOneTimePrekeys(request.userId),
       added,
+      key_epoch: upsert.identity.key_epoch,
+      rotated_at: upsert.identity.rotated_at,
+      rotated: upsert.rotated,
     });
   });
 
@@ -120,6 +139,8 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: AppContext): void {
       user_id: identity.user_id,
       identity_key: identity.identity_public_key,
       signing_key: identity.signing_public_key,
+      key_epoch: identity.key_epoch,
+      rotated_at: identity.rotated_at,
       one_time_prekeys: await keys.countOneTimePrekeys(request.userId),
       updated_at: identity.updated_at,
     };

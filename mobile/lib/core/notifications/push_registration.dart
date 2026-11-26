@@ -75,12 +75,13 @@ class PushRegistration {
   }
 
   /// Unregisters this device's push token on explicit logout so a signed-out
-  /// install stops receiving alerts for the previous account.
-  Future<void> unregister() async {
+  /// install stops receiving alerts for the previous account. Bounded so a
+  /// slow or unreachable server never stalls logout.
+  Future<void> unregister({Duration timeout = const Duration(seconds: 3)}) async {
     if (_started) await stop();
     if (!_registered && !_isAvailable()) return;
     try {
-      await _api.unregisterFcmToken();
+      await _api.unregisterFcmToken().timeout(timeout);
     } finally {
       _registered = false;
     }

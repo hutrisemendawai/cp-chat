@@ -5,11 +5,25 @@ import android.app.NotificationManager
 import android.os.Build
 import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         createMessageChannel()
+    }
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, STORAGE_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getNoBackupFilesDir" -> result.success(noBackupFilesDir.absolutePath)
+                    "getCacheDir" -> result.success(cacheDir.absolutePath)
+                    else -> result.notImplemented()
+                }
+            }
     }
 
     /**
@@ -31,5 +45,9 @@ class MainActivity : FlutterActivity() {
         }
 
         getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+    }
+
+    companion object {
+        private const val STORAGE_CHANNEL = "cpchat/storage"
     }
 }

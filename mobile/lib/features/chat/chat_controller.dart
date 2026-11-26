@@ -160,5 +160,6 @@ class ChatController {
 
 final chatControllerProvider =
     Provider.family<ChatController, String>((ref, conversationId) {
+  ref.watch(accountScopeProvider);
   return ChatController(ref, conversationId);
 });

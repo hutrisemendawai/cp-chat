@@ -166,6 +166,28 @@ export function registerConversationRoutes(app: FastifyInstance, ctx: AppContext
     reply.status(204).send();
   });
 
+  app.post('/api/v1/conversations/:id/clear', async (request) => {
+    requireAuth(request, config);
+    const { id } = request.params as { id: string };
+    const convId = conversationId(id);
+    const { clearedSeq } = await conversations.clearHistory(convId, request.userId);
+
+    // Notify any other live device of the caller so its local mirror clears too.
+    await ctx.broker.publishBroadcast(
+      {
+        user_ids: [request.userId],
+        frame: {
+          type: 'history_cleared',
+          conversation_id: convId,
+          cleared_seq: clearedSeq,
+        },
+      },
+      `u:${request.userId}`,
+    );
+
+    return { cleared_seq: clearedSeq };
+  });
+
   /** Pushes a lightweight refresh hint to online members of a conversation. */
   async function announce(conversationId: string, userIds: string[]): Promise<void> {
     await ctx.broker.publishBroadcast(

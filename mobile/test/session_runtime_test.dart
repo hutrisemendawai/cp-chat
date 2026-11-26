@@ -145,7 +145,7 @@ class _FakePush extends PushRegistration {
   }
 
   @override
-  Future<void> unregister() async {
+  Future<void> unregister({Duration timeout = const Duration(seconds: 3)}) async {
     unregisters += 1;
   }
 }
@@ -271,7 +271,7 @@ void main() {
       return auth;
     }
 
-    test('clears state and local data even when the logout request throws', () async {
+    test('signs out and preserves isolated account data even when logout request throws', () async {
       final auth = await signIn();
       api.throwOnLogout = true;
       await container
@@ -282,7 +282,9 @@ void main() {
 
       expect(push.unregisters, 1);
       expect(container.read(authControllerProvider).isUnauthenticated, isTrue);
-      expect(await container.read(chatDaoProvider).conversations(), isEmpty);
+      // Standard logout keeps the account's isolated DB intact for R2 re-login
+      // (DB is closed and reopened cleanly on re-login).
+      expect(database.isClosed, isTrue);
     });
 
     test('clears state even when the socket teardown throws', () async {

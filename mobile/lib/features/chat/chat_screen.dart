@@ -108,13 +108,86 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
   Future<void> _onOpen() async {
     // Opening the chat clears any banner already raised for it.
     unawaited(
-      ref.read(localNotificationServiceProvider).cancelForConversation(widget.conversationId),
+      ref.read(localNotificationServiceProvider).cancelForConversation(
+            widget.conversationId,
+            accountId: ref.read(accountScopeProvider)?.accountId,
+          ),
     );
     final controller = ref.read(chatControllerProvider(widget.conversationId));
     // Catch up on anything missed, then mark the newest message read.
     await ref.read(chatSocketProvider).syncAll(selfId: ref.read(currentUserProvider)?.id);
     await controller.markRead();
     await _scrollToBottom();
+  }
+
+  Future<void> _confirmClearChat() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Clear chat?'),
+        content: const Text(
+          'This removes all messages in this chat from this device and prevents '
+          'cleared history from re-syncing. Your encryption keys stay intact so '
+          'future messages continue to work.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Clear chat'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final scope = ref.read(accountScopeProvider);
+    if (scope == null) return;
+    await ref.read(accountWiperProvider).clearConversation(
+          accountId: scope.accountId,
+          conversationId: widget.conversationId,
+          dao: ref.read(chatDaoProvider),
+          api: ref.read(apiClientProvider),
+        );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Chat history cleared')),
+      );
+    }
+  }
+
+  Future<void> _confirmResetEncryption() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset encryption on this device?'),
+        content: const Text(
+          'Your account published different encryption keys on another device. '
+          'Resetting generates fresh keys for this device so you can send '
+          'messages again. Local readable history stays on this device; '
+          'earlier encrypted history on the server is not restored.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Reset encryption'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await ref.read(e2eeManagerProvider).resetEncryption();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Encryption keys reset on this device')),
+      );
+    }
   }
 
   Future<void> _send() async {
@@ -371,11 +444,33 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
               icon: const Icon(Icons.info_outline),
               onPressed: () => context.push('/conversations/${widget.conversationId}/info'),
             ),
+          PopupMenuButton<String>(
+            tooltip: 'Chat options',
+            onSelected: (value) {
+              if (value == 'clear') {
+                unawaited(_confirmClearChat());
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem<String>(
+                value: 'clear',
+                child: Text('Clear chat'),
+              ),
+            ],
+          ),
         ],
       ),
       body: Column(
         children: [
           const ConnectionBanner(),
+          if (!isGroup)
+            ValueListenableBuilder<bool>(
+              valueListenable: ref.watch(e2eeManagerProvider).keyMismatch,
+              builder: (context, mismatch, _) {
+                if (!mismatch) return const SizedBox.shrink();
+                return _KeyMismatchBanner(onReset: _confirmResetEncryption);
+              },
+            ),
           if (_uploading)
             LinearProgressIndicator(value: _uploadProgress == 0 ? null : _uploadProgress),
           Expanded(
@@ -393,6 +488,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                     ),
                   );
                 }
+                final displayItems = _collapseUndecryptableRuns(items);
                 return ListView.builder(
                   controller: _scrollController,
                   // Reversed so offset 0 is the newest message pinned right above
@@ -404,9 +500,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                     horizontal: AppSpacing.pageMargin,
                     vertical: AppSpacing.lg,
                   ),
-                  itemCount: items.length + (_hasMoreHistory ? 1 : 0),
+                  itemCount: displayItems.length + (_hasMoreHistory ? 1 : 0),
                   itemBuilder: (context, index) {
-                    if (_hasMoreHistory && index == items.length) {
+                    if (_hasMoreHistory && index == displayItems.length) {
                       return Center(
                         child: TextButton(
                           onPressed: _loadingOlder ? null : _loadOlder,
@@ -414,7 +510,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
                         ),
                       );
                     }
-                    final message = items[items.length - 1 - index];
+                    final entry = displayItems[displayItems.length - 1 - index];
+                    if (entry.systemText != null) {
+                      return _SystemNoticeRow(text: entry.systemText!);
+                    }
+                    final message = entry.message!;
                     return _MessageBubble(
                       message: message,
                       isMine: message.senderId == selfId,
@@ -432,14 +532,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
               },
             ),
           ),
-          _Composer(
-            controller: _composer,
-            focusNode: _composerFocusNode,
-            uploading: _uploading,
-            canSend: _composer.text.trim().isNotEmpty && !_sending && !_uploading,
-            onPickImage: _pickImage,
-            onPickFile: _pickFile,
-            onSend: _send,
+          ValueListenableBuilder<bool>(
+            valueListenable: ref.watch(e2eeManagerProvider).keyMismatch,
+            builder: (context, mismatch, _) {
+              final sendBlocked = !isGroup && mismatch;
+              return _Composer(
+                controller: _composer,
+                focusNode: _composerFocusNode,
+                uploading: _uploading,
+                canSend: !sendBlocked &&
+                    _composer.text.trim().isNotEmpty &&
+                    !_sending &&
+                    !_uploading,
+                onPickImage: _pickImage,
+                onPickFile: _pickFile,
+                onSend: _send,
+              );
+            },
           ),
         ],
       ),
@@ -564,8 +673,125 @@ class _Composer extends StatelessWidget {
 /// Live local row for the header, so the peer name appears without a round trip.
 final conversationLocalProvider =
     StreamProvider.family<LocalConversation?, String>((ref, conversationId) {
+  ref.watch(accountScopeProvider);
   return ref.watch(chatDaoProvider).watchConversation(conversationId);
 });
+
+/// Either a regular message bubble or a collapsed system notice row.
+class _FeedItem {
+  const _FeedItem.message(this.message) : systemText = null;
+  const _FeedItem.system(this.systemText) : message = null;
+
+  final LocalMessage? message;
+  final String? systemText;
+}
+
+/// Collapses consecutive undecryptable messages into a single neutral system
+/// notice ("Secure session reset – ask them to resend") instead of flooding the
+/// timeline with N stub bubbles (§2.7).
+List<_FeedItem> _collapseUndecryptableRuns(List<LocalMessage> items) {
+  final out = <_FeedItem>[];
+  var inUndecryptableRun = false;
+  for (final msg in items) {
+    if (msg.type == 'system') {
+      inUndecryptableRun = false;
+      out.add(_FeedItem.system(msg.content));
+      continue;
+    }
+    final unreadable = msg.type == 'text' &&
+        (msg.content == undecryptableContent || isEncryptedContent(msg.content));
+    if (unreadable) {
+      if (!inUndecryptableRun) {
+        inUndecryptableRun = true;
+        out.add(const _FeedItem.system('Secure session reset – ask them to resend'));
+      }
+      continue;
+    }
+    inUndecryptableRun = false;
+    out.add(_FeedItem.message(msg));
+  }
+  return out;
+}
+
+class _SystemNoticeRow extends StatelessWidget {
+  const _SystemNoticeRow({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md,
+          vertical: AppSpacing.xs,
+        ),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(AppRadius.full),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.lock_reset, size: 14, color: scheme.onSurfaceVariant),
+            const SizedBox(width: AppSpacing.xs),
+            Flexible(
+              child: Text(
+                text,
+                textAlign: TextAlign.center,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _KeyMismatchBanner extends StatelessWidget {
+  const _KeyMismatchBanner({required this.onReset});
+
+  final VoidCallback onReset;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Material(
+      color: scheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.pageMargin,
+          vertical: AppSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.vpn_key_off_outlined, size: 18, color: scheme.onErrorContainer),
+            const SizedBox(width: AppSpacing.sm),
+            Expanded(
+              child: Text(
+                'Encryption keys changed on another device. Sending is paused.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onErrorContainer,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: onReset,
+              child: const Text('Reset encryption'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 /// "Name (nickname)" from the cached direct-chat peer fields.
 String _peerLabelFromCache(LocalConversation conversation) {

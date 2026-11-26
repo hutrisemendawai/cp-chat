@@ -541,9 +541,44 @@ class ApiClient {
         .toList();
   }
 
+  /// Advances the caller's history watermark for one conversation.
+  Future<int> clearConversation(String conversationId) async {
+    final response = await dio.post<dynamic>('/api/v1/conversations/$conversationId/clear');
+    final body = _ok(response);
+    return (body['cleared_seq'] as num?)?.toInt() ?? 0;
+  }
+
+  /// Advances the caller's history watermark across every conversation (direct
+  /// and group). Returns a map of `conversationId -> clearedSeq`.
+  Future<Map<String, int>> clearAllHistory() async {
+    final response = await dio.post<dynamic>('/api/v1/users/me/history/clear');
+    final body = _ok(response);
+    final result = <String, int>{};
+    final cleared = body['cleared'];
+    if (cleared is List<dynamic>) {
+      for (final item in cleared) {
+        if (item is Map<String, dynamic>) {
+          final id = item['conversation_id'];
+          final seq = item['cleared_seq'];
+          if (id is String && seq is num) {
+            result[id] = seq.toInt();
+          }
+        }
+      }
+    }
+    return result;
+  }
+
   /// Publishes this device's public encryption keys. The server stores only
   /// public halves; private keys stay in secure storage on the device.
-  Future<int> publishKeys(PublicKeyBundle bundle) async {
+  ///
+  /// [historyWatermark] advertises that this client honours server-side
+  /// `cleared_seq` watermarks, enabling automatic direct-chat watermarking on
+  /// identity key rotation.
+  Future<int> publishKeys(
+    PublicKeyBundle bundle, {
+    bool historyWatermark = true,
+  }) async {
     final response = await dio.post<dynamic>(
       '/api/v1/keys',
       data: {
@@ -558,6 +593,7 @@ class ApiClient {
           for (final prekey in bundle.prekeys)
             {'key_id': prekey.keyId, 'public_key': prekey.publicKey},
         ],
+        'history_watermark': historyWatermark,
       },
     );
     final body = _ok(response, expected: 201);
@@ -598,12 +634,18 @@ class ApiClient {
     );
   }
 
+  /// The caller's published identity key, key epoch, rotation timestamp, and
+  /// remaining one-time prekey count (`GET /api/v1/keys/me`).
+  Future<MyKeyStatus> keysMe() async {
+    final response = await dio.get<dynamic>('/api/v1/keys/me');
+    return MyKeyStatus.fromJson(_ok(response));
+  }
+
   /// The caller's own published key status, including how many one-time
   /// prekeys the server still holds. Used to decide when to top up.
   Future<int> myPrekeyCount() async {
-    final response = await dio.get<dynamic>('/api/v1/keys/me');
-    final body = _ok(response);
-    return (body['one_time_prekeys'] as num?)?.toInt() ?? 0;
+    final status = await keysMe();
+    return status.oneTimePrekeys;
   }
 
   /// Registers the Firebase Installation ID for push delivery.

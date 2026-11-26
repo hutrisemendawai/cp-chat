@@ -362,7 +362,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('sign-out clears tokens, local data, and returns to /auth',
+  testWidgets('sign-out clears session tokens, retains isolated history, and returns to /auth',
       (tester) async {
     final store = _MemoryTokenStore(access: 'a', refresh: 'r', userId: 'me');
     final api = _ProfileApi(user('me', name: 'Me'), store);
@@ -404,11 +404,14 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Sign out'));
     await tester.pumpAndSettle();
+    // Confirm the sign-out dialog (keep local data checked off by default).
+    await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+    await tester.pumpAndSettle();
 
     expect(api.logouts, 1);
     expect(store.access, isNull);
     expect(store.refresh, isNull);
-    expect(await dao.conversations(), isEmpty);
+    expect(await dao.conversations(), hasLength(1));
     expect(find.text('auth-screen'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

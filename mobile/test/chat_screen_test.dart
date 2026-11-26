@@ -66,6 +66,7 @@ LocalConversation _cachedGroup({String name = 'Weekend Squad'}) => LocalConversa
   name: name,
   lastSeq: 0,
   lastReadSeq: 0,
+  clearedSeq: 0,
   unreadCount: 0,
   updatedAt: DateTime.utc(2026, 1, 1),
 );

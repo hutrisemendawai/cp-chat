@@ -1,5 +1,11 @@
+import 'dart:io';
+
 import 'package:drift/drift.dart';
-import 'package:drift_flutter/drift_flutter.dart';
+import 'package:drift/native.dart';
+
+import '../account/account_paths.dart';
+import '../account/account_scope.dart';
+import '../storage/app_dirs.dart';
 
 part 'app_database.g.dart';
 
@@ -26,6 +32,10 @@ class LocalConversations extends Table {
 
   IntColumn get lastSeq => integer().withDefault(const Constant(0))();
   IntColumn get lastReadSeq => integer().withDefault(const Constant(0))();
+
+  /// Per-member history watermark (`conversation_members.cleared_seq`).
+  /// Messages with `seq <= clearedSeq` are cleared for this account.
+  IntColumn get clearedSeq => integer().withDefault(const Constant(0))();
   IntColumn get unreadCount => integer().withDefault(const Constant(0))();
   DateTimeColumn get updatedAt => dateTime()();
 
@@ -81,14 +91,98 @@ class OutboxEntries extends Table {
   Set<Column<Object>> get primaryKey => {clientMsgId};
 }
 
-@DriftDatabase(tables: [LocalConversations, LocalMessages, OutboxEntries])
-class AppDatabase extends _$AppDatabase {
-  AppDatabase() : super(driftDatabase(name: 'cp_chat'));
-
-  AppDatabase.forTesting(super.executor);
+/// Partition metadata stored inside each per-account database.
+///
+/// Tracks `owner_user_id` (asserted on open) and `partition_id` (paired with
+/// secure storage `acct.<id>.partition_id` to detect split DB/Keystore state).
+class AccountMeta extends Table {
+  TextColumn get key => text()();
+  TextColumn get value => text()();
 
   @override
-  int get schemaVersion => 5;
+  Set<Column<Object>> get primaryKey => {key};
+}
+
+/// Unsent composer drafts per conversation, isolated inside the account DB.
+class Drafts extends Table {
+  TextColumn get conversationId => text()();
+  TextColumn get body => text()();
+  DateTimeColumn get updatedAt => dateTime()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {conversationId};
+}
+
+@DriftDatabase(
+  tables: [LocalConversations, LocalMessages, OutboxEntries, AccountMeta, Drafts],
+)
+class AppDatabase extends _$AppDatabase {
+  /// Opens a file-backed database for a single account partition.
+  AppDatabase.forFile(File file)
+      : filePath = file.path,
+        super(
+          LazyDatabase(() async {
+            await file.parent.create(recursive: true);
+            return NativeDatabase(file);
+          }),
+        );
+
+  /// Opens the database located at [paths.dbFile].
+  AppDatabase.forAccount(AccountPaths paths) : this.forFile(paths.dbFile);
+
+  /// Opens an account database lazily after resolving [AppDirs] and awaiting
+  /// any pending close of the same file in [DbGate] (§3.2).
+  AppDatabase.forAccountLazy({
+    required String accountId,
+    required AppDirs dirs,
+    required DbGate gate,
+  })  : filePath = dirs.cachedNoBackupDir == null
+            ? null
+            : AccountPaths(
+                accountId: accountId,
+                noBackupRoot: dirs.cachedNoBackupDir!,
+                cacheRoot: dirs.cachedCacheDir ?? dirs.cachedNoBackupDir!,
+              ).dbFile.path,
+        super(
+          LazyDatabase(() async {
+            final paths = await AccountPaths.resolve(accountId, dirs);
+            await gate.waitFor(paths.dbFile.path);
+            await paths.partitionDir.create(recursive: true);
+            return NativeDatabase(paths.dbFile);
+          }),
+        );
+
+  AppDatabase.forTesting(super.executor, {this.filePath});
+
+  /// Canonical file path for [DbGate] serialisation, or `null` for in-memory DBs.
+  final String? filePath;
+
+  bool _closed = false;
+  bool get isClosed => _closed;
+
+  @override
+  int get schemaVersion => 6;
+
+  @override
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    await super.close();
+  }
+
+  /// Reads a metadata key from `account_meta`.
+  Future<String?> readMeta(String key) async {
+    final row = await (select(accountMeta)..where((t) => t.key.equals(key)))
+        .getSingleOrNull();
+    return row?.value;
+  }
+
+  /// Upserts a metadata key in `account_meta`.
+  Future<void> writeMeta(String key, String value) async {
+    await into(accountMeta).insertOnConflictUpdate(
+      AccountMetaCompanion.insert(key: key, value: value),
+    );
+  }
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -118,11 +212,18 @@ class AppDatabase extends _$AppDatabase {
             await migrator.addColumn(localConversations, localConversations.peerNickname);
             await migrator.addColumn(localConversations, localConversations.peerAvatarUrl);
           }
+          if (from < 6) {
+            await migrator.addColumn(localConversations, localConversations.clearedSeq);
+            await migrator.createTable(accountMeta);
+            await migrator.createTable(drafts);
+          }
         },
         beforeOpen: (details) async {
-          // The outbox is the source of truth for unsent work; foreign keys and
-          // WAL keep reads fast while a send is in flight.
+          // Enforce FK integrity, enable WAL for concurrent reads during writes,
+          // and set busy_timeout so brief open/close handoffs never throw SQLITE_BUSY.
           await customStatement('PRAGMA foreign_keys = ON');
+          await customStatement('PRAGMA journal_mode = WAL');
+          await customStatement('PRAGMA busy_timeout = 5000');
         },
       );
 }

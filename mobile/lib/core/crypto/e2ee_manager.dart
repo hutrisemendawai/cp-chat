@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart' show SecretBoxAuthenticationError;
 import 'package:flutter/foundation.dart';
 
+import '../account/account_scope.dart';
+import '../account/account_store.dart';
+import '../account/legacy_migration.dart';
 import '../crypto/e2ee_service.dart';
 import '../logging/app_logger.dart';
 import '../models/models.dart';
@@ -13,25 +17,18 @@ import '../storage/token_store.dart';
 /// app does not remember every failure forever.
 const int _maxLoggedFailures = 100;
 
-/// Coordinates end-to-end encryption for 1:1 chats.
+/// Coordinates end-to-end encryption for 1:1 chats within a single account.
 ///
-/// Responsibilities:
-/// - **Bootstrap:** generate key material on first run, persist the private
-///   halves in secure storage, and publish only the public keys.
-/// - **Prekey replenishment:** top the server's one-time prekeys back up when a
-///   peer's fetch has consumed them.
-/// - **Send:** encrypt a text body for a direct peer, fetching and verifying a
-///   prekey bundle the first time a session is needed.
-/// - **Receive:** decrypt an inbound body, falling back to the raw text for
-///   plaintext (Phase 1-3) messages, and persist the ratchet state so a restart
-///   does not break the chain.
-///
-/// Server-visible metadata (sender, timestamps, `seq`, ciphertext length) is
-/// unchanged; only the message body is opaque.
+/// Key material and ratchet sessions live under `acct.<accountId>.*` via
+/// [AccountStore] so switching accounts on the same device can never cross-load
+/// or overwrite another user's identity keys.
 class E2eeManager {
   E2eeManager({
     required TokenStore tokenStore,
     required ApiClient api,
+    AccountStore? accountStore,
+    AccountScope? scope,
+    LegacyMigration? legacyMigration,
     E2eeService? service,
     this.replenishThreshold = 5,
     this.batchSize = 20,
@@ -43,11 +40,20 @@ class E2eeManager {
         // ignore: prefer_initializing_formals
         _api = api,
         // ignore: prefer_initializing_formals
+        _accountStore = accountStore,
+        // ignore: prefer_initializing_formals
+        _scope = scope,
+        // ignore: prefer_initializing_formals
+        _legacyMigration = legacyMigration,
+        // ignore: prefer_initializing_formals
         _logger = logger,
         _service = service ?? E2eeService();
 
   final TokenStore _tokenStore;
   final ApiClient _api;
+  final AccountStore? _accountStore;
+  final AccountScope? _scope;
+  final LegacyMigration? _legacyMigration;
   final E2eeService _service;
   final AppLogger? _logger;
 
@@ -59,6 +65,21 @@ class E2eeManager {
 
   LocalKeyMaterial? _keys;
   bool _bootstrapped = false;
+
+  /// True when local identity keys disagree with the server's `/keys/me`
+  /// (e.g. the user signed in on another phone and rotated keys). Sending
+  /// encrypted direct messages is blocked until the user explicitly chooses
+  /// "Reset encryption on this device" (§3.4).
+  final ValueNotifier<bool> keyMismatch = ValueNotifier<bool>(false);
+
+  /// Latest server rotation timestamp reported by `/keys/me` or key publish,
+  /// used as client-side defence in depth during historic backfill (§2.7).
+  DateTime? _serverRotatedAt;
+  DateTime? get serverRotatedAt => _serverRotatedAt;
+
+  /// Latest server key epoch reported by `/keys/me`.
+  int _serverKeyEpoch = 1;
+  int get serverKeyEpoch => _serverKeyEpoch;
 
   /// Decrypted plaintext cache so the UI can render without awaiting on every
   /// rebuild. Keyed by `client_msg_id` (unique per message).
@@ -73,7 +94,28 @@ class E2eeManager {
   /// interleaved calls would corrupt it.
   Future<void> _decryptQueue = Future<void>.value();
 
+  /// Tracks in-flight session writes so [flush] can await them before logout
+  /// closes storage (risk R-2).
+  Future<void> _persistQueue = Future<void>.value();
+
   bool get isReady => _keys != null;
+  bool get hasKeyMismatch => keyMismatch.value;
+  bool get _isClosed => _scope != null && !_scope.isOpen;
+
+  Future<String?> _readKeysBlob() =>
+      _accountStore != null ? _accountStore.readE2eeKeys() : _tokenStore.readE2eeKeys();
+
+  Future<void> _writeKeysBlob(String json) => _accountStore != null
+      ? _accountStore.writeE2eeKeys(json)
+      : _tokenStore.writeE2eeKeys(json);
+
+  Future<String?> _readSessionsBlob() => _accountStore != null
+      ? _accountStore.readE2eeSessions()
+      : _tokenStore.readE2eeSessions();
+
+  Future<void> _writeSessionsBlob(String json) => _accountStore != null
+      ? _accountStore.writeE2eeSessions(json)
+      : _tokenStore.writeE2eeSessions(json);
 
   Future<T> _serializeDecrypts<T>(Future<T> Function() action) {
     final result = _decryptQueue.then((_) => action());
@@ -81,13 +123,19 @@ class E2eeManager {
     return result;
   }
 
-  /// Clears in-memory session state on logout.
-  ///
-  /// Key material and persisted sessions stay in secure storage: they are
-  /// per-device and discarding them would make existing chats unreadable. What
-  /// must not survive is state belonging to the signed-out account — the
-  /// decrypted plaintext cache and the peer map — so a different user signing
-  /// in on this device cannot read or target the previous user's conversations.
+  /// Waits for all in-flight decryptions and ratchet-session writes to finish
+  /// before logout tears down the account scope.
+  Future<void> flush() async {
+    try {
+      await _decryptQueue;
+    } catch (_) {}
+    try {
+      await _persistQueue;
+    } catch (_) {}
+  }
+
+  /// Clears in-memory session state on logout. Persisted per-account keys and
+  /// sessions remain isolated under `acct.<id>.*` for R2 same-user re-login.
   void reset() {
     _plaintext.clear();
     _loggedFailures.clear();
@@ -95,38 +143,121 @@ class E2eeManager {
     _service.reset();
     _bootstrapped = false;
     _keys = null;
+    keyMismatch.value = false;
+    _serverRotatedAt = null;
   }
 
-  /// Generates keys on first run or restores them from secure storage, then
-  /// ensures the server has a publishable bundle.
+  /// Generates keys on first run or restores them from per-account secure
+  /// storage, adopts quarantined legacy keys if `/keys/me` proves ownership,
+  /// and reconciles local identity against `/keys/me` (§2.4, §3.1, §3.4).
   Future<void> bootstrap() async {
-    if (_bootstrapped) return;
+    if (_bootstrapped || _isClosed) return;
 
-    final stored = await _tokenStore.readE2eeKeys();
+    var stored = await _readKeysBlob();
+
+    // If this account has no keys yet, check whether ownerless legacy keys were
+    // quarantined at upgrade and prove ownership against GET /keys/me.
+    if (stored == null && _accountStore != null && _legacyMigration != null) {
+      if (await _legacyMigration.hasQuarantinedKeys()) {
+        try {
+          final remote = await _api.keysMe();
+          final adopted = await _legacyMigration.tryAdoptQuarantinedKeys(
+            accountStore: _accountStore,
+            serverIdentityKey: remote.identityKey,
+          );
+          if (adopted) {
+            stored = await _readKeysBlob();
+          }
+        } catch (_) {
+          // Offline or 404: cannot prove ownership now; proceed normally.
+        }
+      }
+    }
+
+    if (_isClosed) return;
+
     if (stored != null) {
       _keys = await _service.importKeyMaterial(stored);
       await _restoreSessions();
-      // The supply may have been consumed while the app was closed.
-      await _maybeReplenishOurPrekeys();
+      await _reconcileWithServer();
     } else {
       _keys = await _service.generateKeyMaterial();
-      await _tokenStore.writeE2eeKeys(await _service.exportKeyMaterial(_keys!));
-      await _publish(_keys!);
+      if (_isClosed) return;
+      await _writeKeysBlob(await _service.exportKeyMaterial(_keys!));
+      await _publish(_keys!, historyWatermark: true);
     }
 
     _bootstrapped = true;
   }
 
-  /// Returns the plaintext for a message body, decrypting an envelope if needed.
+  /// Explicit user action after a key divergence (§3.4): discards local keys
+  /// and sessions, generates fresh identity keys, and publishes them with
+  /// `history_watermark: true` so the server rotates the epoch and clears
+  /// undecryptable direct-chat history.
+  Future<void> resetEncryption() async {
+    if (_isClosed) return;
+    await flush();
+    if (_accountStore != null) {
+      await _accountStore.deleteE2ee();
+    } else {
+      await _tokenStore.clearE2ee();
+    }
+    _plaintext.clear();
+    _loggedFailures.clear();
+    _service.reset();
+    _keys = await _service.generateKeyMaterial();
+    await _writeKeysBlob(await _service.exportKeyMaterial(_keys!));
+    await _publish(_keys!, historyWatermark: true);
+    keyMismatch.value = false;
+    _bootstrapped = true;
+  }
+
+  /// Checks local identity against `GET /api/v1/keys/me`.
   ///
-  /// Plaintext bodies (old clients, media keys) are returned unchanged. A body
-  /// that fails to decrypt renders a placeholder rather than throwing: a single
-  /// unreadable message must not break the whole chat view.
-  ///
-  /// The peer is resolved from [senderId] (the frame's author, authoritative for
-  /// inbound messages) and only falls back to [peerId] or the conversation map
-  /// registered by the UI. Deriving it from the message means history recovered
-  /// over REST decrypts even when the chat was never opened.
+  /// - Exact match: clears any mismatch flag, records server `rotated_at`, and
+  ///   replenishes one-time prekeys if low.
+  /// - 404 (server has no keys for us yet): publishes our local bundle.
+  /// - Mismatch (different identity on server, e.g. second phone): keeps local
+  ///   readable history intact and sets [keyMismatch] so outbound encrypted
+  ///   sends are blocked until the user explicitly resets encryption.
+  Future<void> _reconcileWithServer() async {
+    final keys = _keys;
+    if (keys == null || _isClosed) return;
+
+    try {
+      final remote = await _api.keysMe();
+      _serverRotatedAt = remote.rotatedAt;
+      _serverKeyEpoch = remote.keyEpoch;
+
+      final localPublic = await _service.buildPublicBundle(keys);
+      if (remote.identityKey.isNotEmpty &&
+          remote.identityKey != localPublic.identityKey) {
+        keyMismatch.value = true;
+        _logger?.warn(
+          'e2ee',
+          'local identity key diverges from server /keys/me',
+          meta: {'server_epoch': remote.keyEpoch},
+        );
+        return;
+      }
+
+      keyMismatch.value = false;
+      if (remote.oneTimePrekeys <= replenishThreshold) {
+        await _replenishPrekeys(keys);
+      }
+    } on ApiException catch (error) {
+      if (error.statusCode == 404) {
+        await _publish(keys, historyWatermark: true);
+        return;
+      }
+      debugPrint('E2EE key status check failed: ${error.code}');
+    } catch (error) {
+      // Fallback for older test fakes that only override `myPrekeyCount`.
+      debugPrint('E2EE keysMe check failed: $error');
+      await _maybeReplenishOurPrekeys();
+    }
+  }
+
   Future<String> plaintextFor(
     String clientMsgId,
     String conversationId,
@@ -155,20 +286,17 @@ class E2eeManager {
     String? senderId,
     String? peerId,
   }) async {
+    if (_isClosed) return undecryptableContent;
     if (!isEncryptedContent(content)) return content;
 
     final cached = _plaintext[clientMsgId];
     if (cached != null) return cached;
 
-    // Group chats have no E2EE in this phase; a ciphertext there is unreadable
-    // by design rather than an error to surface.
     if (isGroup) return undecryptableContent;
 
-    // An outgoing message synced back from the server is ciphertext, but its
-    // matching receiving chain lives on the peer, so this device cannot decrypt
-    // it. Leave the body untouched: the local optimistic row already holds the
-    // plaintext the user typed.
-    final selfId = await _tokenStore.readUserId();
+    // Resolve selfId from the bound AccountScope first so a concurrent account
+    // switch can never compare against another user's id.
+    final selfId = _scope?.userId ?? await _tokenStore.readUserId();
     if (senderId != null && senderId == selfId) return content;
 
     Future<String> fail(String reason, {Object? error, Map<String, Object?>? extra}) async {
@@ -192,6 +320,7 @@ class E2eeManager {
         return fail('bootstrap_failed', error: error);
       }
     }
+    if (_isClosed) return undecryptableContent;
     final keys = _keys;
     if (keys == null) return fail('no_local_keys');
 
@@ -207,6 +336,7 @@ class E2eeManager {
         envelope: envelope,
         local: keys,
       );
+      if (_isClosed) return undecryptableContent;
       _plaintext[clientMsgId] = decrypted.plaintext;
       await _persistSessions();
       return decrypted.plaintext;
@@ -225,8 +355,6 @@ class E2eeManager {
     }
   }
 
-  /// Classifies a decryption failure so the log viewer distinguishes a stale
-  /// key from a tampered body.
   String _failureReason(
     Object error, {
     required EncryptedEnvelope envelope,
@@ -258,9 +386,6 @@ class E2eeManager {
     final logger = _logger;
     if (logger == null) return;
 
-    // A conversation whose history cannot be read is retried on every sync and
-    // reopen. Reporting each attempt would flood the timeline with the same
-    // failure, so only the first occurrence per message is forwarded.
     if (!_loggedFailures.add(messageId)) return;
     if (_loggedFailures.length > _maxLoggedFailures) {
       _loggedFailures.remove(_loggedFailures.first);
@@ -290,14 +415,6 @@ class E2eeManager {
     );
   }
 
-  /// Encrypts a text body for `conversationId`. Returns the original text when
-  /// the conversation is a group (not covered in this phase) or keys are not
-  /// ready, so sending still works before bootstrap finishes.
-  ///
-  /// Returns `null` when the body could not be encrypted although the
-  /// conversation *is* a direct chat with a known peer and published keys.
-  /// Sending plaintext there would silently downgrade the conversation, so the
-  /// caller must surface the failure instead of transmitting the text.
   Future<String?> encryptForConversation({
     required String conversationId,
     required String plaintext,
@@ -305,7 +422,13 @@ class E2eeManager {
     String? peerId,
   }) async {
     if (isGroup) return plaintext;
+    if (_isClosed) return null;
     if (!_bootstrapped) await bootstrap();
+    if (_isClosed) return null;
+
+    // Key divergence blocks sending encrypted messages until resolved (§3.4).
+    if (keyMismatch.value) return null;
+
     final keys = _keys;
     if (keys == null) return plaintext;
 
@@ -317,14 +440,9 @@ class E2eeManager {
       try {
         bundle = await _api.prekeyBundle(target);
       } on ApiException catch (error) {
-        // A peer that has not published keys yet cannot receive E2EE. Send the
-        // plaintext rather than blocking the conversation entirely.
         debugPrint('No prekey bundle for $target (${error.code}); sending plaintext');
         return plaintext;
       }
-      // The bundle belongs to the peer, so it cannot tell us how many of *our*
-      // prekeys are left. A peer opening a session consumes ours, which is the
-      // signal to top up; check our own count opportunistically.
       await _maybeReplenishOurPrekeys();
     }
 
@@ -335,6 +453,7 @@ class E2eeManager {
         local: keys,
         bundle: bundle,
       );
+      if (_isClosed) return null;
       await _persistSessions();
       return envelope.toContent();
     } catch (error) {
@@ -353,19 +472,12 @@ class E2eeManager {
     }
   }
 
-  /// Resolves the other member of a direct conversation.
-  ///
-  /// The peer id is registered by the chat screen once the member list is
-  /// loaded (`rememberConversation`), because the local conversation row only
-  /// caches the peer's *name*. Encryption is skipped until it is known.
   Future<String?> _peerIdFor(String conversationId) async {
     return _peerIds[conversationId];
   }
 
-  /// Known peer ids per conversation, populated by [rememberConversation].
   final Map<String, String> _peerIds = {};
 
-  /// Records the peer id for a direct conversation so encryption can target it.
   void rememberConversation(
     String conversationId, {
     required String selfId,
@@ -375,34 +487,27 @@ class E2eeManager {
     _peerIds[conversationId] = peerId;
   }
 
-  Future<void> _publish(LocalKeyMaterial material) async {
+  Future<void> _publish(
+    LocalKeyMaterial material, {
+    bool historyWatermark = true,
+  }) async {
     try {
       final bundle = await _service.buildPublicBundle(material);
-      await _api.publishKeys(bundle);
+      await _api.publishKeys(bundle, historyWatermark: historyWatermark);
+      _serverRotatedAt = DateTime.now().toUtc();
     } catch (error) {
       debugPrint('E2EE key publish failed: $error');
     }
   }
 
-  /// Tops up this device's one-time prekeys when the server reports a low
-  /// supply.
-  ///
-  /// A device publishes a fixed batch and the server consumes one per session
-  /// opened by a peer. Once the batch is spent, new peers fall back to the
-  /// signed prekey, which still works but reuses long-term material; generating
-  /// a fresh batch keeps one-time keys available. Queried from
-  /// `GET /keys/me` because a *peer's* bundle reports that peer's count.
   Future<void> _maybeReplenishOurPrekeys() async {
     final keys = _keys;
-    if (keys == null) return;
+    if (keys == null || _isClosed) return;
 
     try {
       final remaining = await _api.myPrekeyCount();
       if (remaining > replenishThreshold) return;
-      // ...top up below.
     } on ApiException catch (error) {
-      // 404 means this device has not published yet; the publish path handles
-      // the first upload, so there is nothing to top up.
       if (error.statusCode == 404) return;
       debugPrint('E2EE prekey count failed: ${error.code}');
       return;
@@ -411,10 +516,13 @@ class E2eeManager {
       return;
     }
 
+    await _replenishPrekeys(keys);
+  }
+
+  Future<void> _replenishPrekeys(LocalKeyMaterial keys) async {
+    if (_isClosed) return;
     try {
       final bundle = await _service.buildPublicBundle(keys);
-      // Fresh ids avoid colliding with the spent batch; the server ignores a
-      // re-upload of an id it already knows.
       final highest = bundle.prekeys.fold<int>(0, (max, prekey) {
         return prekey.keyId > max ? prekey.keyId : max;
       });
@@ -431,7 +539,7 @@ class E2eeManager {
 
   Future<void> _appendPrekeys(List<GeneratedPrekey> prekeys) async {
     final keys = _keys;
-    if (keys == null) return;
+    if (keys == null || _isClosed) return;
     final combined = [...keys.prekeys, ...prekeys.map((prekey) => prekey.keyPairEntry)];
     _keys = LocalKeyMaterial(
       identityKeyPair: keys.identityKeyPair,
@@ -441,30 +549,32 @@ class E2eeManager {
       signedPrekeySignature: keys.signedPrekeySignature,
       prekeys: combined,
     );
-    await _tokenStore.writeE2eeKeys(await _service.exportKeyMaterial(_keys!));
+    await _writeKeysBlob(await _service.exportKeyMaterial(_keys!));
   }
 
-  /// Persists every known session, primary first, so a restart keeps both the
-  /// active chain and any alternates still needed for messages in flight.
-  Future<void> _persistSessions() async {
-    final sessions = <String, dynamic>{};
-    final peers = _service.sessions.map((session) => session.peerId).toSet();
-    for (final peerId in peers) {
-      sessions[peerId] = [
-        for (final session in _service.sessionsFor(peerId)) session.toJson(),
-      ];
-    }
-    await _tokenStore.writeE2eeSessions(jsonEncode(sessions));
+  Future<void> _persistSessions() {
+    if (_isClosed) return Future<void>.value();
+    final run = _persistQueue.then((_) async {
+      if (_isClosed) return;
+      final sessions = <String, dynamic>{};
+      final peers = _service.sessions.map((session) => session.peerId).toSet();
+      for (final peerId in peers) {
+        sessions[peerId] = [
+          for (final session in _service.sessionsFor(peerId)) session.toJson(),
+        ];
+      }
+      await _writeSessionsBlob(jsonEncode(sessions));
+    });
+    _persistQueue = run.then<void>((_) {}, onError: (_) {});
+    return run;
   }
 
   Future<void> _restoreSessions() async {
-    final raw = await _tokenStore.readE2eeSessions();
+    final raw = await _readSessionsBlob();
     if (raw == null) return;
     try {
       final decoded = jsonDecode(raw) as Map<String, dynamic>;
       for (final entry in decoded.entries) {
-        // Older blobs stored one session object per peer; newer ones store a
-        // list ordered primary-first.
         final value = entry.value;
         final list = value is List<dynamic> ? value : <dynamic>[value];
         for (final item in list) {

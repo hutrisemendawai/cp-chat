@@ -120,6 +120,23 @@ Kafka and Scylla suites skip themselves unless their endpoint is configured:
 KAFKA_BROKERS=localhost:9092 SCYLLA_TEST=1 make backend-test
 ```
 
+## Multi-account isolation & Clear Data
+
+- **Account switching on one device:** Signing out retains your isolated local
+  database (`no_backup/accounts/<accountId>/`) and per-account E2EE keys
+  (`acct.<accountId>.*`) so signing back in restores your encrypted history and
+  silently syncs missed messages. Signing in as a different account opens an
+  isolated partition with zero cross-account visibility.
+- **Clear chat / Clear all chats (Settings → Privacy & Storage):** Clears local
+  messages and cached media and advances your server-side `cleared_seq`
+  watermark so cleared history never re-syncs, while keeping your sign-in and
+  E2EE keys intact.
+- **Sign out & remove my data / Android Clear Storage:** Permanently wipes local
+  history, media cache, and encryption keys. **Encrypted direct-chat history is
+  intentionally not restored on a new or cleared device** — rotating your
+  identity key on re-login automatically advances direct-chat watermarks on the
+  server so old unreadable ciphertexts are never re-synced as stubs.
+
 ## Status
 
 - [x] **Phase 0** — monorepo, Docker stack, core schema, Flutter foundation, API/WS contracts, CI

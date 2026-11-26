@@ -13,6 +13,7 @@ export type PushPayload = {
   messageId: string;
   senderId: string;
   senderName: string;
+  recipientUserId: string;
   conversationName: string;
   type: string;
 };
@@ -99,6 +100,7 @@ export class NotificationService {
           message_id: payload.messageId,
           sender_id: payload.senderId,
           sender_name: payload.senderName,
+          recipient_user_id: payload.recipientUserId,
           conversation_name: payload.conversationName,
         },
         android: {

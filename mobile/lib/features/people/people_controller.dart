@@ -9,6 +9,7 @@ import '../../core/providers.dart';
 /// The caller's friends, sorted so visible presence (online, idle, dnd) floats
 /// above offline friends, then alphabetically within each band.
 final friendsProvider = FutureProvider.autoDispose<List<User>>((ref) async {
+  ref.watch(accountScopeProvider);
   final users = await ref.watch(apiClientProvider).friends();
   return sortByPresence(users);
 });
@@ -16,6 +17,7 @@ final friendsProvider = FutureProvider.autoDispose<List<User>>((ref) async {
 /// Fresh details for a single user, used by the profile screen.
 final userProfileProvider =
     FutureProvider.autoDispose.family<User, String>((ref, userId) async {
+  ref.watch(accountScopeProvider);
   return ref.watch(apiClientProvider).user(userId);
 });
 
@@ -113,6 +115,7 @@ class PeopleController extends Notifier<PeopleState> {
 
   @override
   PeopleState build() {
+    ref.watch(accountScopeProvider);
     ref.onDispose(() => _debounce?.cancel());
     return const PeopleState();
   }

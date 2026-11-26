@@ -640,6 +640,7 @@ export class ChatGateway {
         messageId: message.id,
         senderId: message.sender_id,
         senderName,
+        recipientUserId: userId,
         conversationName,
         type: message.type,
       },

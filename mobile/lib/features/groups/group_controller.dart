@@ -77,4 +77,7 @@ class GroupController {
   }
 }
 
-final groupControllerProvider = Provider<GroupController>(GroupController.new);
+final groupControllerProvider = Provider<GroupController>((ref) {
+  ref.watch(accountScopeProvider);
+  return GroupController(ref);
+});

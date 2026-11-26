@@ -283,6 +283,7 @@ class Conversation {
     required this.members,
     required this.lastSeq,
     required this.lastReadSeq,
+    this.clearedSeq = 0,
     required this.unreadCount,
     required this.createdAt,
     this.name,
@@ -300,6 +301,7 @@ class Conversation {
             .toList(),
         lastSeq: (json['last_seq'] as num?)?.toInt() ?? 0,
         lastReadSeq: (json['last_read_seq'] as num?)?.toInt() ?? 0,
+        clearedSeq: (json['cleared_seq'] as num?)?.toInt() ?? 0,
         unreadCount: (json['unread_count'] as num?)?.toInt() ?? 0,
         createdAt: DateTime.parse(json['created_at'] as String).toUtc(),
         lastMessage: json['last_message'] == null
@@ -314,6 +316,7 @@ class Conversation {
   final List<ConversationMember> members;
   final int lastSeq;
   final int lastReadSeq;
+  final int clearedSeq;
   final int unreadCount;
   final DateTime createdAt;
   final Message? lastMessage;
@@ -345,31 +348,78 @@ class Conversation {
 }
 
 class MessagePage {
-  const MessagePage({required this.messages, required this.hasMore});
+  const MessagePage({
+    required this.messages,
+    required this.hasMore,
+    this.clearedSeq = 0,
+  });
 
   factory MessagePage.fromJson(Map<String, dynamic> json) => MessagePage(
         messages: (json['messages'] as List<dynamic>)
             .map((message) => Message.fromJson(message as Map<String, dynamic>))
             .toList(),
         hasMore: json['has_more'] as bool,
+        clearedSeq: (json['cleared_seq'] as num?)?.toInt() ?? 0,
       );
 
   final List<Message> messages;
   final bool hasMore;
+  final int clearedSeq;
 }
 
 class SyncResult {
-  const SyncResult({required this.messages, required this.latestSeq});
+  const SyncResult({
+    required this.messages,
+    required this.latestSeq,
+    this.clearedSeq = 0,
+  });
 
   factory SyncResult.fromJson(Map<String, dynamic> json) => SyncResult(
         messages: (json['messages'] as List<dynamic>)
             .map((message) => Message.fromJson(message as Map<String, dynamic>))
             .toList(),
         latestSeq: (json['latest_seq'] as num).toInt(),
+        clearedSeq: (json['cleared_seq'] as num?)?.toInt() ?? 0,
       );
 
   final List<Message> messages;
   final int latestSeq;
+  final int clearedSeq;
+}
+
+/// The caller's published identity key status from `GET /api/v1/keys/me`.
+class MyKeyStatus {
+  const MyKeyStatus({
+    required this.userId,
+    required this.identityKey,
+    required this.signingKey,
+    required this.oneTimePrekeys,
+    this.keyEpoch = 1,
+    this.rotatedAt,
+    this.updatedAt,
+  });
+
+  factory MyKeyStatus.fromJson(Map<String, dynamic> json) {
+    final rotated = json['rotated_at'];
+    final updated = json['updated_at'];
+    return MyKeyStatus(
+      userId: json['user_id'] as String? ?? '',
+      identityKey: json['identity_key'] as String? ?? '',
+      signingKey: json['signing_key'] as String? ?? '',
+      oneTimePrekeys: (json['one_time_prekeys'] as num?)?.toInt() ?? 0,
+      keyEpoch: (json['key_epoch'] as num?)?.toInt() ?? 1,
+      rotatedAt: rotated is String ? DateTime.parse(rotated).toUtc() : null,
+      updatedAt: updated is String ? DateTime.parse(updated).toUtc() : null,
+    );
+  }
+
+  final String userId;
+  final String identityKey;
+  final String signingKey;
+  final int oneTimePrekeys;
+  final int keyEpoch;
+  final DateTime? rotatedAt;
+  final DateTime? updatedAt;
 }
 
 /// Result of `POST /api/v1/media/presign`: upload the bytes to [uploadUrl],

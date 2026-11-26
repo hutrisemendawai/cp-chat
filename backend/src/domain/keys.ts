@@ -18,8 +18,16 @@ export type IdentityKeyRow = {
   user_id: string;
   identity_public_key: string;
   signing_public_key: string;
+  key_epoch: number;
+  rotated_at: Date;
   created_at: Date;
   updated_at: Date;
+};
+
+export type UpsertIdentityResult = {
+  identity: IdentityKeyRow;
+  rotated: boolean;
+  clearedDirectConversations: { conversationId: string; clearedSeq: number }[];
 };
 
 export type SignedPrekeyRow = {
@@ -59,10 +67,13 @@ export class KeyRepository {
   private async identityWith(
     client: Queryable,
     userId: string,
+    forUpdate = false,
   ): Promise<IdentityKeyRow | null> {
+    const lock = forUpdate ? ' FOR UPDATE' : '';
     const { rows } = await client.query<IdentityKeyRow>(
-      `SELECT user_id, identity_public_key, signing_public_key, created_at, updated_at
-         FROM user_identity_keys WHERE user_id = $1`,
+      `SELECT user_id, identity_public_key, signing_public_key,
+              key_epoch, rotated_at, created_at, updated_at
+         FROM user_identity_keys WHERE user_id = $1${lock}`,
       [userId],
     );
     return rows[0] ?? null;
@@ -70,46 +81,75 @@ export class KeyRepository {
 
   /**
    * Publishes or rotates the identity keys. Changing the identity key is how a
-   * device re-installs, so it is allowed — peers see the new key on their next
-   * bundle fetch and must re-verify it out of band (the safety number changes).
+   * device re-installs or clears data, so it is allowed — peers see the new key
+   * on their next bundle fetch and must re-verify it out of band.
    *
-   * A rotation also discards every one-time prekey already on file. Their
-   * private halves lived on the device that just went away, so keeping them
-   * would let `takeBundle` hand a peer a key nobody can answer for: the peer
-   * would build a session the recipient cannot derive, and every message
-   * encrypted against it would be undecryptable.
-   *
-   * Both writes share one transaction so a bundle fetch can never observe the
-   * new identity alongside the previous device's prekeys.
+   * A rotation discards every one-time prekey already on file and increments
+   * `key_epoch` / updates `rotated_at`. When the caller advertises
+   * `historyWatermark: true`, the user's direct-chat history watermarks are
+   * advanced to `last_seq` inside the same transaction so cryptographically
+   * unreadable pre-rotation ciphertexts are never re-served as stubs. Groups
+   * are plaintext and untouched.
    */
   async upsertIdentity(input: {
     userId: string;
     identityPublicKey: string;
     signingPublicKey: string;
-  }): Promise<IdentityKeyRow> {
+    historyWatermark?: boolean;
+  }): Promise<UpsertIdentityResult> {
     return withTransaction(this.db, async (client) => {
-      const previous = await this.identityWith(client, input.userId);
+      const previous = await this.identityWith(client, input.userId, true);
+      const rotated =
+        previous !== null && previous.identity_public_key !== input.identityPublicKey;
 
       const { rows } = await client.query<IdentityKeyRow>(
-        `INSERT INTO user_identity_keys (user_id, identity_public_key, signing_public_key)
-         VALUES ($1, $2, $3)
+        `INSERT INTO user_identity_keys (user_id, identity_public_key, signing_public_key, key_epoch, rotated_at)
+         VALUES ($1, $2, $3, 1, NOW())
          ON CONFLICT (user_id) DO UPDATE
            SET identity_public_key = EXCLUDED.identity_public_key,
                signing_public_key = EXCLUDED.signing_public_key,
+               key_epoch = CASE WHEN $4 THEN user_identity_keys.key_epoch + 1 ELSE user_identity_keys.key_epoch END,
+               rotated_at = CASE WHEN $4 THEN NOW() ELSE user_identity_keys.rotated_at END,
                updated_at = NOW()
-         RETURNING user_id, identity_public_key, signing_public_key, created_at, updated_at`,
-        [input.userId, input.identityPublicKey, input.signingPublicKey],
+         RETURNING user_id, identity_public_key, signing_public_key,
+                   key_epoch, rotated_at, created_at, updated_at`,
+        [input.userId, input.identityPublicKey, input.signingPublicKey, rotated],
       );
 
-      // A routine republish (same device, same identity) keeps its supply; only
-      // an actual rotation orphans the stored prekeys.
-      if (previous !== null && previous.identity_public_key !== input.identityPublicKey) {
+      let clearedDirectConversations: { conversationId: string; clearedSeq: number }[] = [];
+
+      // A routine republish (same device, same identity) keeps its supply and
+      // epoch; only an actual rotation orphans the stored prekeys and advances
+      // direct-chat watermarks (when gated by the capability flag).
+      if (rotated) {
         await client.query(`DELETE FROM user_one_time_prekeys WHERE user_id = $1`, [
           input.userId,
         ]);
+
+        if (input.historyWatermark === true) {
+          const cleared = await client.query<{ conversation_id: string; cleared_seq: string }>(
+            `UPDATE conversation_members cm
+                SET cleared_seq = GREATEST(cm.cleared_seq, c.last_seq),
+                    last_read_seq = GREATEST(cm.last_read_seq, c.last_seq)
+               FROM conversations c
+              WHERE cm.conversation_id = c.id
+                AND cm.user_id = $1
+                AND c.type = 'direct'
+             RETURNING cm.conversation_id, cm.cleared_seq`,
+            [input.userId],
+          );
+          clearedDirectConversations = cleared.rows.map((row) => ({
+            conversationId: row.conversation_id,
+            clearedSeq: Number(row.cleared_seq),
+          }));
+        }
       }
 
-      return rows[0]!;
+      return {
+        identity: rows[0]!,
+        rotated,
+        clearedDirectConversations,
+      };
     });
   }
 

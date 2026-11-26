@@ -7,6 +7,7 @@ import '../../core/providers.dart';
 /// name locally, so the chat header and list can render it offline.
 final conversationMetadataProvider =
     FutureProvider.family<Conversation?, String>((ref, conversationId) async {
+  ref.watch(accountScopeProvider);
   final api = ref.watch(apiClientProvider);
   final dao = ref.watch(chatDaoProvider);
   final selfId = ref.watch(currentUserProvider)?.id;

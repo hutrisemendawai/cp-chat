@@ -162,6 +162,46 @@ paths:
         '422':
           $ref: '#/components/responses/ValidationError'
 
+  /api/v1/users/me/history/clear:
+    post:
+      tags: [Users]
+      summary: Clear history across all conversations for the caller
+      description: >
+        Monotonically advances `cleared_seq` and `last_read_seq` in
+        `conversation_members` to each conversation's current maximum `seq` for
+        all conversations the caller belongs to. Other members are unaffected.
+        Emits a `history_cleared` WebSocket frame per conversation to the
+        caller's connected devices.
+      responses:
+        '200':
+          description: History watermarks advanced
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversations, cleared_at, cleared]
+                properties:
+                  conversations:
+                    type: integer
+                    description: Number of conversations updated
+                  cleared_at:
+                    type: string
+                    format: date-time
+                  cleared:
+                    type: array
+                    items:
+                      type: object
+                      required: [conversation_id, cleared_seq]
+                      properties:
+                        conversation_id:
+                          type: string
+                          format: uuid
+                        cleared_seq:
+                          type: integer
+                          format: int64
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/users/{id}:
     parameters:
       - name: id
@@ -523,6 +563,37 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/conversations/{id}/clear:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [Conversations]
+      summary: Clear history in a conversation for the caller (per-member watermark)
+      description: >
+        Monotonically advances the caller's `cleared_seq` and `last_read_seq` in
+        `conversation_members` to at least the conversation's current maximum
+        `seq`. Subsequent `/messages`, `/sync`, and `/search` calls hide rows
+        with `seq <= cleared_seq` for this caller only; other participants are
+        unaffected. Emits a `history_cleared` WebSocket frame to the caller's
+        other connected devices.
+      responses:
+        '200':
+          description: History watermark advanced
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversation_id, cleared_seq]
+                properties:
+                  conversation_id:
+                    type: string
+                    format: uuid
+                  cleared_seq:
+                    type: integer
+                    format: int64
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /api/v1/conversations/{id}/messages:
     parameters:
       - $ref: '#/components/parameters/ConversationId'
@@ -881,13 +952,34 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [one_time_prekeys]
+                required: [one_time_prekeys, key_epoch]
                 properties:
                   one_time_prekeys:
                     type: integer
                     description: Count stored after this upload; replenish when low
                   added:
                     type: integer
+                  key_epoch:
+                    type: integer
+                    description: Monotonic counter incremented on every identity key rotation
+                  rotated_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: Timestamp of the most recent identity key rotation
+                  cleared_conversations:
+                    type: array
+                    description: Direct conversations whose `cleared_seq` was auto-advanced when `history_watermark` is true on rotation
+                    items:
+                      type: object
+                      required: [conversation_id, cleared_seq]
+                      properties:
+                        conversation_id:
+                          type: string
+                          format: uuid
+                        cleared_seq:
+                          type: integer
+                          format: int64
         '422':
           $ref: '#/components/responses/ValidationError'
 
@@ -949,6 +1041,12 @@ paths:
                     type: string
                   one_time_prekeys:
                     type: integer
+                  key_epoch:
+                    type: integer
+                  rotated_at:
+                    type: string
+                    format: date-time
+                    nullable: true
                   updated_at:
                     type: string
                     format: date-time
@@ -1468,6 +1566,10 @@ components:
         last_read_seq:
           type: integer
           format: int64
+        cleared_seq:
+          type: integer
+          format: int64
+          description: Per-member history watermark; messages with `seq <= cleared_seq` are hidden for the caller
         unread_count:
           type: integer
         created_at:
@@ -1536,6 +1638,10 @@ components:
             $ref: '#/components/schemas/Message'
         has_more:
           type: boolean
+        cleared_seq:
+          type: integer
+          format: int64
+          description: Caller's current history watermark for this conversation
 
     SyncResponse:
       type: object
@@ -1550,6 +1656,10 @@ components:
           type: integer
           format: int64
           description: Highest seq in the conversation; repeat sync when it exceeds the last returned message
+        cleared_seq:
+          type: integer
+          format: int64
+          description: Caller's current history watermark for this conversation
 
     Presence:
       type: object
@@ -1636,6 +1746,14 @@ components:
           maxItems: 200
           items:
             $ref: '#/components/schemas/OneTimePrekey'
+        history_watermark:
+          type: boolean
+          default: false
+          description: >
+            When `true` and this upload rotates the caller's identity key, the
+            server atomically advances `cleared_seq` to the current latest `seq`
+            on all of the caller's direct conversations so pre-rotation
+            ciphertexts are never replayed on sync.
 
     PrekeyBundle:
       type: object

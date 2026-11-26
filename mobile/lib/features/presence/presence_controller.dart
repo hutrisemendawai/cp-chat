@@ -16,6 +16,7 @@ class PresenceNotifier extends Notifier<Presence?> {
 
   @override
   Presence? build() {
+    ref.watch(accountScopeProvider);
     final socket = ref.watch(chatSocketProvider);
     _subscription?.cancel();
     _subscription = socket.presenceEvents

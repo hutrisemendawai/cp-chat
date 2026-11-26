@@ -16,6 +16,7 @@ LocalConversation conversation({
   String? name,
   String? preview,
   int lastSeq = 0,
+  int clearedSeq = 0,
 }) => LocalConversation(
   id: id,
   type: type,
@@ -24,6 +25,7 @@ LocalConversation conversation({
   lastMessagePreview: preview,
   lastSeq: lastSeq,
   lastReadSeq: 0,
+  clearedSeq: clearedSeq,
   unreadCount: 0,
   updatedAt: DateTime.utc(2026, 1, 1),
 );

@@ -136,6 +136,34 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
     };
   });
 
+  app.post('/api/v1/users/me/history/clear', async (request) => {
+    requireAuth(request, config);
+    const result = await ctx.conversations.clearAllHistory(request.userId);
+
+    for (const item of result.conversations) {
+      await ctx.broker.publishBroadcast(
+        {
+          user_ids: [request.userId],
+          frame: {
+            type: 'history_cleared',
+            conversation_id: item.conversationId,
+            cleared_seq: item.clearedSeq,
+          },
+        },
+        `u:${request.userId}`,
+      );
+    }
+
+    return {
+      conversations: result.conversations.length,
+      cleared_at: result.clearedAt.toISOString(),
+      cleared: result.conversations.map((item) => ({
+        conversation_id: item.conversationId,
+        cleared_seq: item.clearedSeq,
+      })),
+    };
+  });
+
   app.post('/api/v1/devices/fcm-token', async (request, reply) => {
     requireAuth(request, config);
     const result = deviceSchema.safeParse(request.body);

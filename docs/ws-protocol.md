@@ -290,6 +290,24 @@ as the socket is up. A screen shows a reconnect banner while the socket is down.
   badge, so reading a chat on a phone also clears it on a tablet.
 - It carries no sender identity: it is only delivered to the same user.
 
+### `history_cleared` — per-member history watermark advanced
+
+```json
+{
+  "type": "history_cleared",
+  "conversation_id": "c1",
+  "cleared_seq": 42
+}
+```
+
+- Sent to the caller's live devices when history is cleared via
+  `POST /api/v1/conversations/{id}/clear`, `POST /api/v1/users/me/history/clear`,
+  or automatically on identity key rotation (`POST /api/v1/keys` with
+  `history_watermark: true`).
+- Receiving devices advance their local `cleared_seq` watermark monotonically
+  and prune local messages with `seq <= cleared_seq`. Other conversation members
+  are unaffected.
+
 ### `presence` — presence state change
 
 ```json

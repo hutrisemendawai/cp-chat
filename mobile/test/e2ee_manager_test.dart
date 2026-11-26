@@ -41,7 +41,7 @@ class _FakeApi extends ApiClient {
   final List<PublicKeyBundle> published = [];
 
   @override
-  Future<int> publishKeys(PublicKeyBundle bundle) async {
+  Future<int> publishKeys(PublicKeyBundle bundle, {bool historyWatermark = true}) async {
     published.add(bundle);
     return bundle.prekeys.length;
   }

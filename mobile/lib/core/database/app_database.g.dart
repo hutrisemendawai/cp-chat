@@ -124,6 +124,18 @@ class $LocalConversationsTable extends LocalConversations
     requiredDuringInsert: false,
     defaultValue: const Constant(0),
   );
+  static const VerificationMeta _clearedSeqMeta = const VerificationMeta(
+    'clearedSeq',
+  );
+  @override
+  late final GeneratedColumn<int> clearedSeq = GeneratedColumn<int>(
+    'cleared_seq',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
   static const VerificationMeta _unreadCountMeta = const VerificationMeta(
     'unreadCount',
   );
@@ -160,6 +172,7 @@ class $LocalConversationsTable extends LocalConversations
     lastMessagePreview,
     lastSeq,
     lastReadSeq,
+    clearedSeq,
     unreadCount,
     updatedAt,
   ];
@@ -254,6 +267,12 @@ class $LocalConversationsTable extends LocalConversations
         ),
       );
     }
+    if (data.containsKey('cleared_seq')) {
+      context.handle(
+        _clearedSeqMeta,
+        clearedSeq.isAcceptableOrUnknown(data['cleared_seq']!, _clearedSeqMeta),
+      );
+    }
     if (data.containsKey('unread_count')) {
       context.handle(
         _unreadCountMeta,
@@ -324,6 +343,10 @@ class $LocalConversationsTable extends LocalConversations
         DriftSqlType.int,
         data['${effectivePrefix}last_read_seq'],
       )!,
+      clearedSeq: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}cleared_seq'],
+      )!,
       unreadCount: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}unread_count'],
@@ -364,6 +387,10 @@ class LocalConversation extends DataClass
   final String? lastMessagePreview;
   final int lastSeq;
   final int lastReadSeq;
+
+  /// Per-member history watermark (`conversation_members.cleared_seq`).
+  /// Messages with `seq <= clearedSeq` are cleared for this account.
+  final int clearedSeq;
   final int unreadCount;
   final DateTime updatedAt;
   const LocalConversation({
@@ -378,6 +405,7 @@ class LocalConversation extends DataClass
     this.lastMessagePreview,
     required this.lastSeq,
     required this.lastReadSeq,
+    required this.clearedSeq,
     required this.unreadCount,
     required this.updatedAt,
   });
@@ -409,6 +437,7 @@ class LocalConversation extends DataClass
     }
     map['last_seq'] = Variable<int>(lastSeq);
     map['last_read_seq'] = Variable<int>(lastReadSeq);
+    map['cleared_seq'] = Variable<int>(clearedSeq);
     map['unread_count'] = Variable<int>(unreadCount);
     map['updated_at'] = Variable<DateTime>(updatedAt);
     return map;
@@ -439,6 +468,7 @@ class LocalConversation extends DataClass
           : Value(lastMessagePreview),
       lastSeq: Value(lastSeq),
       lastReadSeq: Value(lastReadSeq),
+      clearedSeq: Value(clearedSeq),
       unreadCount: Value(unreadCount),
       updatedAt: Value(updatedAt),
     );
@@ -463,6 +493,7 @@ class LocalConversation extends DataClass
       ),
       lastSeq: serializer.fromJson<int>(json['lastSeq']),
       lastReadSeq: serializer.fromJson<int>(json['lastReadSeq']),
+      clearedSeq: serializer.fromJson<int>(json['clearedSeq']),
       unreadCount: serializer.fromJson<int>(json['unreadCount']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
     );
@@ -482,6 +513,7 @@ class LocalConversation extends DataClass
       'lastMessagePreview': serializer.toJson<String?>(lastMessagePreview),
       'lastSeq': serializer.toJson<int>(lastSeq),
       'lastReadSeq': serializer.toJson<int>(lastReadSeq),
+      'clearedSeq': serializer.toJson<int>(clearedSeq),
       'unreadCount': serializer.toJson<int>(unreadCount),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
     };
@@ -499,6 +531,7 @@ class LocalConversation extends DataClass
     Value<String?> lastMessagePreview = const Value.absent(),
     int? lastSeq,
     int? lastReadSeq,
+    int? clearedSeq,
     int? unreadCount,
     DateTime? updatedAt,
   }) => LocalConversation(
@@ -517,6 +550,7 @@ class LocalConversation extends DataClass
         : this.lastMessagePreview,
     lastSeq: lastSeq ?? this.lastSeq,
     lastReadSeq: lastReadSeq ?? this.lastReadSeq,
+    clearedSeq: clearedSeq ?? this.clearedSeq,
     unreadCount: unreadCount ?? this.unreadCount,
     updatedAt: updatedAt ?? this.updatedAt,
   );
@@ -541,6 +575,9 @@ class LocalConversation extends DataClass
       lastReadSeq: data.lastReadSeq.present
           ? data.lastReadSeq.value
           : this.lastReadSeq,
+      clearedSeq: data.clearedSeq.present
+          ? data.clearedSeq.value
+          : this.clearedSeq,
       unreadCount: data.unreadCount.present
           ? data.unreadCount.value
           : this.unreadCount,
@@ -562,6 +599,7 @@ class LocalConversation extends DataClass
           ..write('lastMessagePreview: $lastMessagePreview, ')
           ..write('lastSeq: $lastSeq, ')
           ..write('lastReadSeq: $lastReadSeq, ')
+          ..write('clearedSeq: $clearedSeq, ')
           ..write('unreadCount: $unreadCount, ')
           ..write('updatedAt: $updatedAt')
           ..write(')'))
@@ -581,6 +619,7 @@ class LocalConversation extends DataClass
     lastMessagePreview,
     lastSeq,
     lastReadSeq,
+    clearedSeq,
     unreadCount,
     updatedAt,
   );
@@ -599,6 +638,7 @@ class LocalConversation extends DataClass
           other.lastMessagePreview == this.lastMessagePreview &&
           other.lastSeq == this.lastSeq &&
           other.lastReadSeq == this.lastReadSeq &&
+          other.clearedSeq == this.clearedSeq &&
           other.unreadCount == this.unreadCount &&
           other.updatedAt == this.updatedAt);
 }
@@ -615,6 +655,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
   final Value<String?> lastMessagePreview;
   final Value<int> lastSeq;
   final Value<int> lastReadSeq;
+  final Value<int> clearedSeq;
   final Value<int> unreadCount;
   final Value<DateTime> updatedAt;
   final Value<int> rowid;
@@ -630,6 +671,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     this.lastMessagePreview = const Value.absent(),
     this.lastSeq = const Value.absent(),
     this.lastReadSeq = const Value.absent(),
+    this.clearedSeq = const Value.absent(),
     this.unreadCount = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -646,6 +688,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     this.lastMessagePreview = const Value.absent(),
     this.lastSeq = const Value.absent(),
     this.lastReadSeq = const Value.absent(),
+    this.clearedSeq = const Value.absent(),
     this.unreadCount = const Value.absent(),
     required DateTime updatedAt,
     this.rowid = const Value.absent(),
@@ -664,6 +707,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     Expression<String>? lastMessagePreview,
     Expression<int>? lastSeq,
     Expression<int>? lastReadSeq,
+    Expression<int>? clearedSeq,
     Expression<int>? unreadCount,
     Expression<DateTime>? updatedAt,
     Expression<int>? rowid,
@@ -681,6 +725,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
         'last_message_preview': lastMessagePreview,
       if (lastSeq != null) 'last_seq': lastSeq,
       if (lastReadSeq != null) 'last_read_seq': lastReadSeq,
+      if (clearedSeq != null) 'cleared_seq': clearedSeq,
       if (unreadCount != null) 'unread_count': unreadCount,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (rowid != null) 'rowid': rowid,
@@ -699,6 +744,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     Value<String?>? lastMessagePreview,
     Value<int>? lastSeq,
     Value<int>? lastReadSeq,
+    Value<int>? clearedSeq,
     Value<int>? unreadCount,
     Value<DateTime>? updatedAt,
     Value<int>? rowid,
@@ -715,6 +761,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
       lastMessagePreview: lastMessagePreview ?? this.lastMessagePreview,
       lastSeq: lastSeq ?? this.lastSeq,
       lastReadSeq: lastReadSeq ?? this.lastReadSeq,
+      clearedSeq: clearedSeq ?? this.clearedSeq,
       unreadCount: unreadCount ?? this.unreadCount,
       updatedAt: updatedAt ?? this.updatedAt,
       rowid: rowid ?? this.rowid,
@@ -757,6 +804,9 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
     if (lastReadSeq.present) {
       map['last_read_seq'] = Variable<int>(lastReadSeq.value);
     }
+    if (clearedSeq.present) {
+      map['cleared_seq'] = Variable<int>(clearedSeq.value);
+    }
     if (unreadCount.present) {
       map['unread_count'] = Variable<int>(unreadCount.value);
     }
@@ -783,6 +833,7 @@ class LocalConversationsCompanion extends UpdateCompanion<LocalConversation> {
           ..write('lastMessagePreview: $lastMessagePreview, ')
           ..write('lastSeq: $lastSeq, ')
           ..write('lastReadSeq: $lastReadSeq, ')
+          ..write('clearedSeq: $clearedSeq, ')
           ..write('unreadCount: $unreadCount, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('rowid: $rowid')
@@ -2001,6 +2052,482 @@ class OutboxEntriesCompanion extends UpdateCompanion<OutboxEntry> {
   }
 }
 
+class $AccountMetaTable extends AccountMeta
+    with TableInfo<$AccountMetaTable, AccountMetaData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $AccountMetaTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _keyMeta = const VerificationMeta('key');
+  @override
+  late final GeneratedColumn<String> key = GeneratedColumn<String>(
+    'key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _valueMeta = const VerificationMeta('value');
+  @override
+  late final GeneratedColumn<String> value = GeneratedColumn<String>(
+    'value',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [key, value];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'account_meta';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<AccountMetaData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('key')) {
+      context.handle(
+        _keyMeta,
+        key.isAcceptableOrUnknown(data['key']!, _keyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_keyMeta);
+    }
+    if (data.containsKey('value')) {
+      context.handle(
+        _valueMeta,
+        value.isAcceptableOrUnknown(data['value']!, _valueMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_valueMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {key};
+  @override
+  AccountMetaData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return AccountMetaData(
+      key: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}key'],
+      )!,
+      value: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}value'],
+      )!,
+    );
+  }
+
+  @override
+  $AccountMetaTable createAlias(String alias) {
+    return $AccountMetaTable(attachedDatabase, alias);
+  }
+}
+
+class AccountMetaData extends DataClass implements Insertable<AccountMetaData> {
+  final String key;
+  final String value;
+  const AccountMetaData({required this.key, required this.value});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['key'] = Variable<String>(key);
+    map['value'] = Variable<String>(value);
+    return map;
+  }
+
+  AccountMetaCompanion toCompanion(bool nullToAbsent) {
+    return AccountMetaCompanion(key: Value(key), value: Value(value));
+  }
+
+  factory AccountMetaData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return AccountMetaData(
+      key: serializer.fromJson<String>(json['key']),
+      value: serializer.fromJson<String>(json['value']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'key': serializer.toJson<String>(key),
+      'value': serializer.toJson<String>(value),
+    };
+  }
+
+  AccountMetaData copyWith({String? key, String? value}) =>
+      AccountMetaData(key: key ?? this.key, value: value ?? this.value);
+  AccountMetaData copyWithCompanion(AccountMetaCompanion data) {
+    return AccountMetaData(
+      key: data.key.present ? data.key.value : this.key,
+      value: data.value.present ? data.value.value : this.value,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AccountMetaData(')
+          ..write('key: $key, ')
+          ..write('value: $value')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(key, value);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is AccountMetaData &&
+          other.key == this.key &&
+          other.value == this.value);
+}
+
+class AccountMetaCompanion extends UpdateCompanion<AccountMetaData> {
+  final Value<String> key;
+  final Value<String> value;
+  final Value<int> rowid;
+  const AccountMetaCompanion({
+    this.key = const Value.absent(),
+    this.value = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  AccountMetaCompanion.insert({
+    required String key,
+    required String value,
+    this.rowid = const Value.absent(),
+  }) : key = Value(key),
+       value = Value(value);
+  static Insertable<AccountMetaData> custom({
+    Expression<String>? key,
+    Expression<String>? value,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (key != null) 'key': key,
+      if (value != null) 'value': value,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  AccountMetaCompanion copyWith({
+    Value<String>? key,
+    Value<String>? value,
+    Value<int>? rowid,
+  }) {
+    return AccountMetaCompanion(
+      key: key ?? this.key,
+      value: value ?? this.value,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (key.present) {
+      map['key'] = Variable<String>(key.value);
+    }
+    if (value.present) {
+      map['value'] = Variable<String>(value.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AccountMetaCompanion(')
+          ..write('key: $key, ')
+          ..write('value: $value, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $DraftsTable extends Drafts with TableInfo<$DraftsTable, Draft> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $DraftsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _conversationIdMeta = const VerificationMeta(
+    'conversationId',
+  );
+  @override
+  late final GeneratedColumn<String> conversationId = GeneratedColumn<String>(
+    'conversation_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _bodyMeta = const VerificationMeta('body');
+  @override
+  late final GeneratedColumn<String> body = GeneratedColumn<String>(
+    'body',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [conversationId, body, updatedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'drafts';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<Draft> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('conversation_id')) {
+      context.handle(
+        _conversationIdMeta,
+        conversationId.isAcceptableOrUnknown(
+          data['conversation_id']!,
+          _conversationIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_conversationIdMeta);
+    }
+    if (data.containsKey('body')) {
+      context.handle(
+        _bodyMeta,
+        body.isAcceptableOrUnknown(data['body']!, _bodyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_bodyMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {conversationId};
+  @override
+  Draft map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Draft(
+      conversationId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}conversation_id'],
+      )!,
+      body: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}body'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  $DraftsTable createAlias(String alias) {
+    return $DraftsTable(attachedDatabase, alias);
+  }
+}
+
+class Draft extends DataClass implements Insertable<Draft> {
+  final String conversationId;
+  final String body;
+  final DateTime updatedAt;
+  const Draft({
+    required this.conversationId,
+    required this.body,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['conversation_id'] = Variable<String>(conversationId);
+    map['body'] = Variable<String>(body);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  DraftsCompanion toCompanion(bool nullToAbsent) {
+    return DraftsCompanion(
+      conversationId: Value(conversationId),
+      body: Value(body),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory Draft.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Draft(
+      conversationId: serializer.fromJson<String>(json['conversationId']),
+      body: serializer.fromJson<String>(json['body']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'conversationId': serializer.toJson<String>(conversationId),
+      'body': serializer.toJson<String>(body),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  Draft copyWith({String? conversationId, String? body, DateTime? updatedAt}) =>
+      Draft(
+        conversationId: conversationId ?? this.conversationId,
+        body: body ?? this.body,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+  Draft copyWithCompanion(DraftsCompanion data) {
+    return Draft(
+      conversationId: data.conversationId.present
+          ? data.conversationId.value
+          : this.conversationId,
+      body: data.body.present ? data.body.value : this.body,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Draft(')
+          ..write('conversationId: $conversationId, ')
+          ..write('body: $body, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(conversationId, body, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Draft &&
+          other.conversationId == this.conversationId &&
+          other.body == this.body &&
+          other.updatedAt == this.updatedAt);
+}
+
+class DraftsCompanion extends UpdateCompanion<Draft> {
+  final Value<String> conversationId;
+  final Value<String> body;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const DraftsCompanion({
+    this.conversationId = const Value.absent(),
+    this.body = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  DraftsCompanion.insert({
+    required String conversationId,
+    required String body,
+    required DateTime updatedAt,
+    this.rowid = const Value.absent(),
+  }) : conversationId = Value(conversationId),
+       body = Value(body),
+       updatedAt = Value(updatedAt);
+  static Insertable<Draft> custom({
+    Expression<String>? conversationId,
+    Expression<String>? body,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (conversationId != null) 'conversation_id': conversationId,
+      if (body != null) 'body': body,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  DraftsCompanion copyWith({
+    Value<String>? conversationId,
+    Value<String>? body,
+    Value<DateTime>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return DraftsCompanion(
+      conversationId: conversationId ?? this.conversationId,
+      body: body ?? this.body,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (conversationId.present) {
+      map['conversation_id'] = Variable<String>(conversationId.value);
+    }
+    if (body.present) {
+      map['body'] = Variable<String>(body.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('DraftsCompanion(')
+          ..write('conversationId: $conversationId, ')
+          ..write('body: $body, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -2008,6 +2535,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       $LocalConversationsTable(this);
   late final $LocalMessagesTable localMessages = $LocalMessagesTable(this);
   late final $OutboxEntriesTable outboxEntries = $OutboxEntriesTable(this);
+  late final $AccountMetaTable accountMeta = $AccountMetaTable(this);
+  late final $DraftsTable drafts = $DraftsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2016,6 +2545,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     localConversations,
     localMessages,
     outboxEntries,
+    accountMeta,
+    drafts,
   ];
 }
 
@@ -2032,6 +2563,7 @@ typedef $$LocalConversationsTableCreateCompanionBuilder =
       Value<String?> lastMessagePreview,
       Value<int> lastSeq,
       Value<int> lastReadSeq,
+      Value<int> clearedSeq,
       Value<int> unreadCount,
       required DateTime updatedAt,
       Value<int> rowid,
@@ -2049,6 +2581,7 @@ typedef $$LocalConversationsTableUpdateCompanionBuilder =
       Value<String?> lastMessagePreview,
       Value<int> lastSeq,
       Value<int> lastReadSeq,
+      Value<int> clearedSeq,
       Value<int> unreadCount,
       Value<DateTime> updatedAt,
       Value<int> rowid,
@@ -2115,6 +2648,11 @@ class $$LocalConversationsTableFilterComposer
 
   ColumnFilters<int> get lastReadSeq => $composableBuilder(
     column: $table.lastReadSeq,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get clearedSeq => $composableBuilder(
+    column: $table.clearedSeq,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2193,6 +2731,11 @@ class $$LocalConversationsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get clearedSeq => $composableBuilder(
+    column: $table.clearedSeq,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get unreadCount => $composableBuilder(
     column: $table.unreadCount,
     builder: (column) => ColumnOrderings(column),
@@ -2251,6 +2794,11 @@ class $$LocalConversationsTableAnnotationComposer
 
   GeneratedColumn<int> get lastReadSeq => $composableBuilder(
     column: $table.lastReadSeq,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get clearedSeq => $composableBuilder(
+    column: $table.clearedSeq,
     builder: (column) => column,
   );
 
@@ -2314,6 +2862,7 @@ class $$LocalConversationsTableTableManager
                 Value<String?> lastMessagePreview = const Value.absent(),
                 Value<int> lastSeq = const Value.absent(),
                 Value<int> lastReadSeq = const Value.absent(),
+                Value<int> clearedSeq = const Value.absent(),
                 Value<int> unreadCount = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -2329,6 +2878,7 @@ class $$LocalConversationsTableTableManager
                 lastMessagePreview: lastMessagePreview,
                 lastSeq: lastSeq,
                 lastReadSeq: lastReadSeq,
+                clearedSeq: clearedSeq,
                 unreadCount: unreadCount,
                 updatedAt: updatedAt,
                 rowid: rowid,
@@ -2346,6 +2896,7 @@ class $$LocalConversationsTableTableManager
                 Value<String?> lastMessagePreview = const Value.absent(),
                 Value<int> lastSeq = const Value.absent(),
                 Value<int> lastReadSeq = const Value.absent(),
+                Value<int> clearedSeq = const Value.absent(),
                 Value<int> unreadCount = const Value.absent(),
                 required DateTime updatedAt,
                 Value<int> rowid = const Value.absent(),
@@ -2361,6 +2912,7 @@ class $$LocalConversationsTableTableManager
                 lastMessagePreview: lastMessagePreview,
                 lastSeq: lastSeq,
                 lastReadSeq: lastReadSeq,
+                clearedSeq: clearedSeq,
                 unreadCount: unreadCount,
                 updatedAt: updatedAt,
                 rowid: rowid,
@@ -3008,6 +3560,318 @@ typedef $$OutboxEntriesTableProcessedTableManager =
       OutboxEntry,
       PrefetchHooks Function()
     >;
+typedef $$AccountMetaTableCreateCompanionBuilder =
+    AccountMetaCompanion Function({
+      required String key,
+      required String value,
+      Value<int> rowid,
+    });
+typedef $$AccountMetaTableUpdateCompanionBuilder =
+    AccountMetaCompanion Function({
+      Value<String> key,
+      Value<String> value,
+      Value<int> rowid,
+    });
+
+class $$AccountMetaTableFilterComposer
+    extends Composer<_$AppDatabase, $AccountMetaTable> {
+  $$AccountMetaTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get value => $composableBuilder(
+    column: $table.value,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$AccountMetaTableOrderingComposer
+    extends Composer<_$AppDatabase, $AccountMetaTable> {
+  $$AccountMetaTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get value => $composableBuilder(
+    column: $table.value,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$AccountMetaTableAnnotationComposer
+    extends Composer<_$AppDatabase, $AccountMetaTable> {
+  $$AccountMetaTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get key =>
+      $composableBuilder(column: $table.key, builder: (column) => column);
+
+  GeneratedColumn<String> get value =>
+      $composableBuilder(column: $table.value, builder: (column) => column);
+}
+
+class $$AccountMetaTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $AccountMetaTable,
+          AccountMetaData,
+          $$AccountMetaTableFilterComposer,
+          $$AccountMetaTableOrderingComposer,
+          $$AccountMetaTableAnnotationComposer,
+          $$AccountMetaTableCreateCompanionBuilder,
+          $$AccountMetaTableUpdateCompanionBuilder,
+          (
+            AccountMetaData,
+            BaseReferences<_$AppDatabase, $AccountMetaTable, AccountMetaData>,
+          ),
+          AccountMetaData,
+          PrefetchHooks Function()
+        > {
+  $$AccountMetaTableTableManager(_$AppDatabase db, $AccountMetaTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$AccountMetaTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$AccountMetaTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$AccountMetaTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> key = const Value.absent(),
+            Value<String> value = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) => AccountMetaCompanion(key: key, value: value, rowid: rowid),
+          createCompanionCallback:
+              ({
+                required String key,
+                required String value,
+                Value<int> rowid = const Value.absent(),
+              }) => AccountMetaCompanion.insert(
+                key: key,
+                value: value,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$AccountMetaTable, AccountMetaData>(table),
+                  BaseReferences<
+                    _$AppDatabase,
+                    $AccountMetaTable,
+                    AccountMetaData
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$AccountMetaTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $AccountMetaTable,
+      AccountMetaData,
+      $$AccountMetaTableFilterComposer,
+      $$AccountMetaTableOrderingComposer,
+      $$AccountMetaTableAnnotationComposer,
+      $$AccountMetaTableCreateCompanionBuilder,
+      $$AccountMetaTableUpdateCompanionBuilder,
+      (
+        AccountMetaData,
+        BaseReferences<_$AppDatabase, $AccountMetaTable, AccountMetaData>,
+      ),
+      AccountMetaData,
+      PrefetchHooks Function()
+    >;
+typedef $$DraftsTableCreateCompanionBuilder = DraftsCompanion Function({
+  required String conversationId,
+  required String body,
+  required DateTime updatedAt,
+  Value<int> rowid,
+});
+typedef $$DraftsTableUpdateCompanionBuilder = DraftsCompanion Function({
+  Value<String> conversationId,
+  Value<String> body,
+  Value<DateTime> updatedAt,
+  Value<int> rowid,
+});
+
+class $$DraftsTableFilterComposer
+    extends Composer<_$AppDatabase, $DraftsTable> {
+  $$DraftsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get conversationId => $composableBuilder(
+    column: $table.conversationId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get body => $composableBuilder(
+    column: $table.body,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$DraftsTableOrderingComposer
+    extends Composer<_$AppDatabase, $DraftsTable> {
+  $$DraftsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get conversationId => $composableBuilder(
+    column: $table.conversationId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get body => $composableBuilder(
+    column: $table.body,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$DraftsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $DraftsTable> {
+  $$DraftsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get conversationId => $composableBuilder(
+    column: $table.conversationId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get body =>
+      $composableBuilder(column: $table.body, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$DraftsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $DraftsTable,
+          Draft,
+          $$DraftsTableFilterComposer,
+          $$DraftsTableOrderingComposer,
+          $$DraftsTableAnnotationComposer,
+          $$DraftsTableCreateCompanionBuilder,
+          $$DraftsTableUpdateCompanionBuilder,
+          (Draft, BaseReferences<_$AppDatabase, $DraftsTable, Draft>),
+          Draft,
+          PrefetchHooks Function()
+        > {
+  $$DraftsTableTableManager(_$AppDatabase db, $DraftsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$DraftsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$DraftsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$DraftsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> conversationId = const Value.absent(),
+                Value<String> body = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => DraftsCompanion(
+                conversationId: conversationId,
+                body: body,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String conversationId,
+                required String body,
+                required DateTime updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => DraftsCompanion.insert(
+                conversationId: conversationId,
+                body: body,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$DraftsTable, Draft>(table),
+                  BaseReferences<_$AppDatabase, $DraftsTable, Draft>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$DraftsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $DraftsTable,
+      Draft,
+      $$DraftsTableFilterComposer,
+      $$DraftsTableOrderingComposer,
+      $$DraftsTableAnnotationComposer,
+      $$DraftsTableCreateCompanionBuilder,
+      $$DraftsTableUpdateCompanionBuilder,
+      (Draft, BaseReferences<_$AppDatabase, $DraftsTable, Draft>),
+      Draft,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -3018,4 +3882,8 @@ class $AppDatabaseManager {
       $$LocalMessagesTableTableManager(_db, _db.localMessages);
   $$OutboxEntriesTableTableManager get outboxEntries =>
       $$OutboxEntriesTableTableManager(_db, _db.outboxEntries);
+  $$AccountMetaTableTableManager get accountMeta =>
+      $$AccountMetaTableTableManager(_db, _db.accountMeta);
+  $$DraftsTableTableManager get drafts =>
+      $$DraftsTableTableManager(_db, _db.drafts);
 }
