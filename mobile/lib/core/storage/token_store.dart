@@ -23,12 +23,28 @@ class TokenStore {
               aOptions: AndroidOptions(resetOnError: true),
             );
 
+  /// Safe constructor for headless background isolates (FCM handlers).
+  ///
+  /// Uses `resetOnError: false` so a transient Android Keystore lock or Direct
+  /// Boot (Before First Unlock) error simply returns `null` rather than wiping
+  /// the user's session tokens and E2EE private keys.
+  factory TokenStore.forBackground({
+    void Function(String op, String key, Object error)? onStorageError,
+  }) =>
+      TokenStore(
+        const FlutterSecureStorage(
+          aOptions: AndroidOptions(resetOnError: false),
+        ),
+        onStorageError,
+      );
+
   static const _accessTokenKey = 'access_token';
   static const _refreshTokenKey = 'refresh_token';
   static const _userIdKey = 'user_id';
   static const _userKey = 'user_profile';
   static const _deviceIdKey = 'device_id';
   static const _activeAccountIdKey = 'active_account_id';
+  static const _resolvedNoBackupRootKey = 'resolved_no_backup_root';
 
   /// Legacy global E2EE keys (pre-partition layout). Read/deleted during
   /// migration or by callers that have not yet switched to `AccountStore`.
@@ -102,6 +118,14 @@ class TokenStore {
       await writeValue(_activeAccountIdKey, accountId);
     }
   }
+
+  /// Canonical Android `noBackupFilesDir` path cached during foreground startup
+  /// for cross-checking in headless background isolates.
+  Future<String?> readResolvedNoBackupRoot() =>
+      readValue(_resolvedNoBackupRootKey);
+
+  Future<void> writeResolvedNoBackupRoot(String path) =>
+      writeValue(_resolvedNoBackupRootKey, path);
 
   /// The cached profile of the signed-in user, or `null` when none was stored
   /// (e.g. an install upgraded from a build that only persisted the user id).

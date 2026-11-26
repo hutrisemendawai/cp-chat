@@ -97,8 +97,17 @@ state, not the destination.
    `conn:{user_id}:{device_id}`) pushes a `message` event to the recipient's
    socket.
 5. The sender receives a `status: sent` event with the assigned `seq`. If the
-   recipient has no live connection, the Notification Service sends an FCM push
-   and delivery resumes via sync on next connect.
+   recipient has no live connection (and is not on Do Not Disturb), the
+   Notification Service dispatches FCM pushes partitioned by
+   `device_tokens.push_version`: upgraded clients (`push_version >= 2`) receive
+   high-priority `data`-only payloads (`push_schema: "2"`, budgeted `<= 3,500`
+   UTF-8 bytes with `content_omitted: "true"` overflow fallback) so the Flutter
+   background isolate decrypts E2EE messages locally under `.partition.lock`
+   (or delegates to the live main isolate via `IsolateNameServer`), persists
+   plaintext to the canonical `noBackupFilesDir` SQLite partition via
+   `CpchatStorageDirsPlugin`, and renders the decrypted tray notification. Legacy
+   (`push_version == 1`) clients continue to receive `notification + data`
+   payloads.
 
 ## Redis keys
 

@@ -111,7 +111,7 @@ class _FakePush extends PushRegistration {
 /// No-op notification tray so the plugin is never touched in a widget test.
 class _FakeNotifications extends LocalNotificationService {
   @override
-  Future<void> initialize() async {}
+  Future<void> initialize({bool checkLaunchDetails = true}) async {}
 
   @override
   Future<void> requestPermission() async {}

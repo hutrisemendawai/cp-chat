@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'token_store.dart';
+
 /// Resolves app-owned storage roots with OS backup hygiene.
 ///
 /// On Android, [noBackup] queries `Context.getNoBackupFilesDir()` via the
@@ -103,6 +105,53 @@ class AppDirs {
       _resolvedNoBackup = dir;
       return dir;
     }
+  }
+
+  /// Resolves the canonical `noBackupFilesDir` without falling back to
+  /// `getApplicationSupportDirectory()/no_backup` on Android.
+  ///
+  /// Used by headless background isolates (FCM) so a missing platform channel
+  /// can never silently open a second SQLite database in a different directory
+  /// while advancing the real E2EE ratchet. Returns `null` if the canonical
+  /// Android directory cannot be verified.
+  Future<Directory?> noBackupDirStrict({TokenStore? tokenStore}) async {
+    final override = _noBackupOverride;
+    if (override != null) {
+      await override.create(recursive: true);
+      _resolvedNoBackup = override;
+      return override;
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        final path = await _channel.invokeMethod<String>('getNoBackupFilesDir');
+        if (path != null && path.isNotEmpty) {
+          final dir = Directory(path);
+          if (await dir.exists()) {
+            _resolvedNoBackup = dir;
+            return dir;
+          }
+        }
+      } on MissingPluginException {
+        // Fall through to cached canonical root check below.
+      } on PlatformException catch (error) {
+        debugPrint('AppDirs.noBackupDirStrict channel failed: $error');
+      }
+
+      if (tokenStore != null) {
+        final cached = await tokenStore.readResolvedNoBackupRoot();
+        if (cached != null && cached.isNotEmpty) {
+          final dir = Directory(cached);
+          if (await dir.exists()) {
+            _resolvedNoBackup = dir;
+            return dir;
+          }
+        }
+      }
+      return null;
+    }
+
+    return noBackupDir();
   }
 
   /// OS-evictable cache directory for per-account media and upload temps.

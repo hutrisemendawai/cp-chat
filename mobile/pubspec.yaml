@@ -58,6 +58,8 @@ dependencies:
   flutter_cache_manager: ^3.5.0
   path: ^1.9.1
   firebase_crashlytics: ^6.1.0
+  cpchat_storage_dirs:
+    path: packages/cpchat_storage_dirs
 
 # Host-side tests (CI and local `flutter test`) run against the Linux desktop
 # target, where the prebuilt SQLite from package:sqlite3 needs a newer glibc than

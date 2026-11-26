@@ -6,11 +6,18 @@ import { WebSocket } from 'ws';
 
 import { ChatGateway } from '../src/gateway/chat-gateway.js';
 import { createContext } from '../src/http/context.js';
-import type { NotificationService, PushPayload } from '../src/lib/fcm.js';
+import {
+  MAX_FCM_DATA_BYTES,
+  NotificationService,
+  buildDataOnlyMap,
+  type PushPayload,
+} from '../src/lib/fcm.js';
 import { createLogger } from '../src/lib/logger.js';
 import {
   TEST_CONFIG,
+  auth,
   createDirect,
+  createGroup,
   createHarness,
   registerUser,
   truncateAll,
@@ -24,14 +31,18 @@ let server: Server;
 let port: number;
 
 /** Records pushes and lets each test decide which installations FCM reports dead. */
-const pushes: { fids: string[]; payload: PushPayload }[] = [];
+const pushes: { mode: 'legacy' | 'data_only'; fids: string[]; payload: PushPayload }[] = [];
 let staleToReturn: string[] = [];
 const fakeNotifications = {
   enabled: true,
   initialize: async () => undefined,
   notify: async (fids: string[], payload: PushPayload) => {
-    pushes.push({ fids, payload });
-    return staleToReturn;
+    pushes.push({ mode: 'legacy', fids, payload });
+    return staleToReturn.filter((fid) => fids.includes(fid));
+  },
+  notifyDataOnly: async (fids: string[], payload: PushPayload) => {
+    pushes.push({ mode: 'data_only', fids, payload });
+    return staleToReturn.filter((fid) => fids.includes(fid));
   },
 } as unknown as NotificationService;
 
@@ -136,10 +147,15 @@ function connect(user: TestUser): Promise<TestSocket> {
   });
 }
 
-async function seedDevice(user: TestUser, deviceId: string, fcmToken: string): Promise<void> {
+async function seedDevice(
+  user: TestUser,
+  deviceId: string,
+  fcmToken: string,
+  pushVersion = 1,
+): Promise<void> {
   await harness.db.query(
-    `INSERT INTO device_tokens (user_id, device_id, fcm_token) VALUES ($1, $2, $3)`,
-    [user.id, deviceId, fcmToken],
+    `INSERT INTO device_tokens (user_id, device_id, fcm_token, push_version) VALUES ($1, $2, $3, $4)`,
+    [user.id, deviceId, fcmToken, pushVersion],
   );
 }
 
@@ -252,5 +268,197 @@ describe('fcm dispatch', () => {
     });
 
     aliceSocket.close();
+  });
+
+  it('sends high-priority data-only v2 payload with E2EE ciphertext to push_version=2 devices', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    const conversationId = await createDirect(harness, alice, bob);
+    await seedDevice(bob, 'bob-v2', 'bob-v2-fid', 2);
+
+    const envelope = `e2ee:v1:${JSON.stringify({
+      v: 1,
+      ik: 'aWstYWxpY2U=',
+      ek: 'ZWstYWxpY2U=',
+      spk: 1,
+      i: 0,
+      ct: 'Y2lwaGVydGV4dA==',
+      n: 'bm9uY2UxMjM0NTY=',
+      m: 'bWFjMTIzNDU2Nzg5MDEyMzQ1Ng==',
+    })}`;
+    const clientMsgId = randomUUID();
+
+    const aliceSocket = await connect(alice);
+    aliceSocket.send({
+      type: 'send',
+      conversation_id: conversationId,
+      client_msg_id: clientMsgId,
+      msg_type: 'text',
+      content: envelope,
+    });
+    await aliceSocket.wait((item) => item.type === 'status' && item.status === 'sent');
+
+    const push = await eventually(() => pushes[0]);
+    expect(push.mode).toBe('data_only');
+    expect(push.fids).toEqual(['bob-v2-fid']);
+    expect(push.payload).toMatchObject({
+      conversationId,
+      conversationType: 'direct',
+      clientMsgId,
+      seq: 1,
+      senderId: alice.id,
+      senderName: 'Alice',
+      recipientUserId: bob.id,
+      type: 'text',
+      body: 'Encrypted message',
+      content: envelope,
+    });
+
+    const dataMap = buildDataOnlyMap(push.payload);
+    expect(dataMap).toMatchObject({
+      push_schema: '2',
+      conversation_id: conversationId,
+      conversation_type: 'direct',
+      client_msg_id: clientMsgId,
+      seq: '1',
+      msg_type: 'text',
+      type: 'text',
+      content: envelope,
+    });
+    expect(dataMap.content_omitted).toBeUndefined();
+
+    aliceSocket.close();
+  });
+
+  it('splits mixed v1 and v2 devices for the same user and prunes stale FIDs from both', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    const groupId = await createGroup(harness, alice, [bob], 'Team Alpha');
+    await seedDevice(bob, 'bob-old', 'bob-v1-fid', 1);
+    await seedDevice(bob, 'bob-new', 'bob-v2-fid', 2);
+    staleToReturn = ['bob-v1-fid', 'bob-v2-fid'];
+
+    const aliceSocket = await connect(alice);
+    aliceSocket.send({
+      type: 'send',
+      conversation_id: groupId,
+      client_msg_id: randomUUID(),
+      msg_type: 'text',
+      content: 'hello group',
+    });
+    await aliceSocket.wait((item) => item.type === 'status' && item.status === 'sent');
+
+    await eventually(() => pushes.length === 2);
+    const v2Push = pushes.find((p) => p.mode === 'data_only');
+    const v1Push = pushes.find((p) => p.mode === 'legacy');
+    expect(v2Push?.fids).toEqual(['bob-v2-fid']);
+    expect(v2Push?.payload.conversationType).toBe('group');
+    expect(v2Push?.payload.conversationName).toBe('Team Alpha');
+    expect(v2Push?.payload.content).toBe('hello group');
+    expect(v1Push?.fids).toEqual(['bob-v1-fid']);
+
+    await eventually(async () => {
+      const { rows } = await harness.db.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM device_tokens WHERE user_id = $1`,
+        [bob.id],
+      );
+      return rows[0]!.count === '0';
+    });
+
+    aliceSocket.close();
+  });
+
+  it('persists push_version via POST /api/v1/devices/fcm-token (default 1, explicit 2)', async () => {
+    const bob = await registerUser(harness, 'Bob');
+
+    const r1 = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/devices/fcm-token',
+      headers: auth(bob),
+      payload: { fcm_token: 'fid-legacy', device_id: 'dev-1' },
+    });
+    expect(r1.statusCode).toBe(204);
+
+    const r2 = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/devices/fcm-token',
+      headers: auth(bob),
+      payload: { fcm_token: 'fid-modern', device_id: 'dev-2', push_version: 2 },
+    });
+    expect(r2.statusCode).toBe(204);
+
+    const { rows } = await harness.db.query<{ device_id: string; push_version: number }>(
+      `SELECT device_id, push_version FROM device_tokens WHERE user_id = $1 ORDER BY device_id`,
+      [bob.id],
+    );
+    expect(rows).toEqual([
+      { device_id: 'dev-1', push_version: 1 },
+      { device_id: 'dev-2', push_version: 2 },
+    ]);
+  });
+
+  it('omits oversized content (>3500 UTF-8 bytes) and sets content_omitted=true under 4KB', () => {
+    const hugeContent = `e2ee:v1:${'x'.repeat(3800)}`;
+    const data = buildDataOnlyMap({
+      title: 'Alice',
+      body: 'Encrypted message',
+      conversationId: '11111111-1111-4111-8111-111111111111',
+      conversationType: 'direct',
+      messageId: '22222222-2222-4222-8222-222222222222',
+      clientMsgId: '33333333-3333-4333-8333-333333333333',
+      seq: 42,
+      senderId: '44444444-4444-4444-8444-444444444444',
+      senderName: 'Alice',
+      recipientUserId: '55555555-5555-4555-8555-555555555555',
+      conversationName: '',
+      type: 'text',
+      createdAt: '2026-11-26T12:00:00.000Z',
+      content: hugeContent,
+    });
+
+    expect(data.content).toBeUndefined();
+    expect(data.content_omitted).toBe('true');
+    expect(data.push_schema).toBe('2');
+    expect(Buffer.byteLength(JSON.stringify(data), 'utf8')).toBeLessThanOrEqual(
+      MAX_FCM_DATA_BYTES,
+    );
+    expect(Buffer.byteLength(JSON.stringify(data), 'utf8')).toBeLessThan(4096);
+  });
+
+  it('notifyDataOnly sends high-priority data-only multicast with no notification block', async () => {
+    const sentMessages: Record<string, unknown>[] = [];
+    const service = new NotificationService(TEST_CONFIG, createLogger(TEST_CONFIG, 'test'));
+    (service as unknown as { messaging: unknown }).messaging = {
+      sendEachForMulticast: async (message: Record<string, unknown>) => {
+        sentMessages.push(message);
+        return { successCount: 1, failureCount: 0, responses: [{ success: true }] };
+      },
+    };
+
+    const stale = await service.notifyDataOnly(['bob-v2-fid'], {
+      title: 'Alice',
+      body: 'Encrypted message',
+      conversationId: 'c1',
+      conversationType: 'direct',
+      messageId: 'm1',
+      clientMsgId: 'cm1',
+      seq: 7,
+      senderId: 'alice',
+      senderName: 'Alice',
+      recipientUserId: 'bob',
+      conversationName: '',
+      type: 'text',
+      createdAt: '2026-11-26T12:00:00.000Z',
+      content: 'e2ee:v1:{"v":1}',
+    });
+
+    expect(stale).toEqual([]);
+    expect(sentMessages).toHaveLength(1);
+    const msg = sentMessages[0]!;
+    expect(msg.notification).toBeUndefined();
+    expect((msg.android as Record<string, unknown>).priority).toBe('high');
+    expect((msg.android as Record<string, unknown>).notification).toBeUndefined();
+    expect((msg.data as Record<string, string>).push_schema).toBe('2');
+    expect((msg.data as Record<string, string>).content).toBe('e2ee:v1:{"v":1}');
   });
 });

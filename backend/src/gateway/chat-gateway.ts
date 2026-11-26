@@ -584,13 +584,20 @@ export class ChatGateway {
   }
 
   /**
-   * The push body for a message. A direct-chat body is an E2EE envelope the
-   * server cannot read, so it is reported as `Encrypted message` rather than
-   * leaking the ciphertext into the notification tray.
+   * The push body for a message on legacy (`push_version == 1`) clients. A
+   * direct-chat body is an E2EE envelope the server cannot read, so it is
+   * reported as `Encrypted message` rather than leaking the ciphertext into the
+   * notification tray. Media captions follow the client's `key|caption` format.
    */
   private notificationPreview(message: MessageRow): string {
-    if (message.type === 'image') return 'Sent an image';
-    if (message.type === 'file') return 'Sent a file';
+    if (message.type === 'image' || message.type === 'file') {
+      const sep = message.content.indexOf('|');
+      const caption = sep >= 0 ? message.content.slice(sep + 1).trim() : '';
+      if (message.type === 'image') {
+        return caption.length > 0 ? `Photo: ${caption}` : 'Sent an image';
+      }
+      return caption.length > 0 ? `File: ${caption}` : 'Sent a file';
+    }
     if (isEncryptedContent(message.content)) return 'Encrypted message';
     return message.content;
   }
@@ -631,22 +638,39 @@ export class ChatGateway {
     const title = isGroup ? conversationName || senderName : senderName;
     const body = isGroup ? `${senderName}: ${preview}` : preview;
 
-    const stale = await this.notifications.notify(
-      tokens.map((token) => token.fcm_token),
-      {
-        title,
-        body,
-        conversationId: message.conversation_id,
-        messageId: message.id,
-        senderId: message.sender_id,
-        senderName,
-        recipientUserId: userId,
-        conversationName,
-        type: message.type,
-      },
-    );
+    const payload = {
+      title,
+      body,
+      conversationId: message.conversation_id,
+      conversationType: (isGroup ? 'group' : 'direct') as 'direct' | 'group',
+      messageId: message.id,
+      clientMsgId: message.client_msg_id,
+      seq: message.seq,
+      senderId: message.sender_id,
+      senderName,
+      recipientUserId: userId,
+      conversationName,
+      type: message.type,
+      createdAt: message.created_at.toISOString(),
+      content: message.content,
+    };
 
-    await this.ctx.devices.removeStale(stale);
+    const v2Fids: string[] = [];
+    const v1Fids: string[] = [];
+    for (const token of tokens) {
+      if ((token.push_version ?? 1) >= 2) {
+        v2Fids.push(token.fcm_token);
+      } else {
+        v1Fids.push(token.fcm_token);
+      }
+    }
+
+    const [staleV2, staleV1] = await Promise.all([
+      v2Fids.length > 0 ? this.notifications.notifyDataOnly(v2Fids, payload) : Promise.resolve([]),
+      v1Fids.length > 0 ? this.notifications.notify(v1Fids, payload) : Promise.resolve([]),
+    ]);
+
+    await this.ctx.devices.removeStale([...staleV2, ...staleV1]);
   }
 
   /**

@@ -16,6 +16,7 @@ import 'account/account_store.dart';
 import 'account/account_wiper.dart';
 import 'account/legacy_migration.dart';
 import 'account/partition_guard.dart';
+import 'account/partition_lock.dart';
 import 'crypto/e2ee_manager.dart';
 import 'database/app_database.dart';
 import 'database/chat_dao.dart';
@@ -28,6 +29,7 @@ import 'network/ws_client.dart';
 import 'notifications/fcm_service.dart';
 import 'notifications/local_notification_service.dart';
 import 'notifications/message_notifier.dart';
+import 'notifications/notification_policy.dart';
 import 'notifications/push_registration.dart';
 import 'storage/app_dirs.dart';
 import 'storage/token_store.dart';
@@ -413,13 +415,8 @@ final messageNotifierProvider = Provider<MessageNotifier>((ref) {
   );
 });
 
-String? _directPeerLabel(LocalConversation conversation) {
-  final name = conversation.peerName;
-  if (name == null || name.isEmpty) return null;
-  final nickname = conversation.peerNickname?.trim();
-  if (nickname == null || nickname.isEmpty) return name;
-  return '$name ($nickname)';
-}
+String? _directPeerLabel(LocalConversation conversation) =>
+    formatDirectPeerLabel(conversation.peerName, conversation.peerNickname);
 
 /// Owns the realtime session lifecycle: verifies partition integrity, boots
 /// E2EE keys, connects the chat socket, starts push registration, and tears
@@ -507,37 +504,62 @@ class SessionLifecycle {
 
     var freshPartition = false;
 
-    // 1. Verify partition integrity for file-backed account databases (§2.9).
-    if (scope != null && db.filePath != null) {
-      final accountStore = _ref.read(accountStoreProvider);
-      if (accountStore != null) {
-        try {
-          final paths = await AccountPaths.resolve(
-            scope.accountId,
-            _ref.read(appDirsProvider),
-          );
-          final guard = PartitionGuard(
-            store: accountStore,
-            userId: scope.userId,
-            paths: paths,
-            gate: _ref.read(dbGateProvider),
-            logger: logger,
-          );
-          final check = await guard.verify(db);
-          freshPartition = check.isFreshStart;
-        } catch (error) {
-          debugPrint('PartitionGuard check failed: $error');
+    // 1 & 2. Verify partition integrity and bootstrap E2EE under the exclusive
+    //        per-account `.partition.lock` so if a headless FCM background
+    //        isolate was mid-decrypt as the user opened the app, we wait for
+    //        it to finish committing SQLite + `e2ee_sessions` before loading.
+    Future<void> verifyAndBootstrap(AccountPaths? paths) async {
+      if (scope != null && db.filePath != null && paths != null) {
+        final accountStore = _ref.read(accountStoreProvider);
+        if (accountStore != null) {
+          try {
+            final guard = PartitionGuard(
+              store: accountStore,
+              userId: scope.userId,
+              paths: paths,
+              gate: _ref.read(dbGateProvider),
+              logger: logger,
+            );
+            final check = await guard.verify(db);
+            freshPartition = check.isFreshStart;
+          } catch (error) {
+            debugPrint('PartitionGuard check failed: $error');
+          }
         }
       }
-    }
-    if (!_running || (scope != null && !scope.isOpen)) return;
+      if (!_running || (scope != null && !scope.isOpen)) return;
 
-    // 2. Encryption keys must be ready before the first inbound frame is
-    //    decrypted and before the outbox is flushed.
-    try {
-      await e2ee.bootstrap();
-    } catch (error) {
-      debugPrint('E2EE bootstrap failed: $error');
+      try {
+        await e2ee.bootstrap();
+      } catch (error) {
+        debugPrint('E2EE bootstrap failed: $error');
+      }
+    }
+
+    AccountPaths? resolvedPaths;
+    if (scope != null && db.filePath != null) {
+      try {
+        resolvedPaths = await AccountPaths.resolve(
+          scope.accountId,
+          _ref.read(appDirsProvider),
+        );
+      } catch (error) {
+        debugPrint('AccountPaths.resolve failed: $error');
+      }
+    }
+
+    if (resolvedPaths != null) {
+      try {
+        await PartitionLock.withLock(
+          resolvedPaths.partitionDir,
+          () => verifyAndBootstrap(resolvedPaths),
+        );
+      } catch (error) {
+        debugPrint('PartitionLock acquire during startup failed: $error');
+        await verifyAndBootstrap(resolvedPaths);
+      }
+    } else {
+      await verifyAndBootstrap(null);
     }
     if (!_running || (scope != null && !scope.isOpen)) return;
 
@@ -668,6 +690,12 @@ final bootstrapProvider = FutureProvider<void>((ref) async {
   final dirs = ref.watch(appDirsProvider);
   await dirs.initialize();
 
+  final tokenStore = ref.watch(tokenStoreProvider);
+  final resolvedNoBackup = dirs.cachedNoBackupDir?.path;
+  if (resolvedNoBackup != null && resolvedNoBackup.isNotEmpty) {
+    await tokenStore.writeResolvedNoBackupRoot(resolvedNoBackup);
+  }
+
   // Finish any crash-interrupted L2 partition deletions before opening DBs.
   try {
     await ref.read(accountWiperProvider).resumePendingWipes();
@@ -682,7 +710,6 @@ final bootstrapProvider = FutureProvider<void>((ref) async {
     debugPrint('Legacy migration failed: $error');
   }
 
-  final tokenStore = ref.watch(tokenStoreProvider);
   var deviceId = await tokenStore.readDeviceId();
   if (deviceId == null) {
     deviceId = const Uuid().v4();

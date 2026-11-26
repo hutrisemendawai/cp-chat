@@ -383,6 +383,16 @@ paths:
                 device_id:
                   type: string
                   description: Stable per-install identifier
+                push_version:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 1
+                  description: >
+                    Client push schema capability. Version 1 receives legacy
+                    notification+data payloads; version 2 receives high-priority
+                    data-only payloads (`push_schema: "2"`) for client-side E2EE
+                    decryption in the background isolate.
       responses:
         '204':
           description: Token stored

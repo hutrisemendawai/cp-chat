@@ -18,7 +18,7 @@ class _SignedOutAuth extends AuthController {
 /// No-op notification tray so the platform plugin is never touched.
 class _FakeNotifications extends LocalNotificationService {
   @override
-  Future<void> initialize() async {}
+  Future<void> initialize({bool checkLaunchDetails = true}) async {}
 
   @override
   Future<void> requestPermission() async {}

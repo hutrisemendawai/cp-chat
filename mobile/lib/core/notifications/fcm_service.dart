@@ -1,11 +1,11 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 
 import '../account/account_id.dart';
 import '../logging/app_logger.dart';
 import '../storage/token_store.dart';
-import 'local_notification_service.dart';
+import 'background_push_handler.dart';
 
 /// The tray content derived from an FCM payload.
 typedef FcmNotificationContent = ({
@@ -87,26 +87,24 @@ Future<({FcmNotificationContent content, String accountId})?>
   return (content: content, accountId: activeAccountId!);
 }
 
-/// Runs in a headless isolate when a push arrives with no UI.
+/// Runs in a headless isolate when a high-priority data-only push arrives while
+/// the app is backgrounded or terminated.
 ///
-/// Never opens SQLite (single-isolate DB invariant, §3.2). Reads only
-/// `active_account_id` + session presence from [TokenStore] and drops any push
-/// targeting a different or signed-out account (§3.3).
+/// Delegates to [BackgroundPushHandler.shared], which forwards to the live main
+/// isolate via `IsolateNameServer` if the app is still in memory, or otherwise
+/// acquires the per-account `.partition.lock`, decrypts the E2EE payload using
+/// `TokenStore.forBackground()` (`resetOnError: false`), persists plaintext to
+/// the canonical account SQLite DB before advancing persisted ratchet sessions,
+/// and raises a local notification with the real message preview.
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  await Firebase.initializeApp();
-  final resolved = await resolveHeadlessFcmDisplay(message);
-  if (resolved == null) return;
-
-  final notifications = LocalNotificationService();
-  await notifications.initialize();
-  await notifications.showMessageNotification(
-    conversationId: resolved.content.conversationId,
-    title: resolved.content.title,
-    body: resolved.content.body,
-    messageId: resolved.content.messageId,
-    accountId: resolved.accountId,
-  );
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Firebase.initializeApp();
+  } catch (error) {
+    debugPrint('Background Firebase.initializeApp skipped: $error');
+  }
+  await BackgroundPushHandler.shared.handle(message);
 }
 
 /// Firebase Cloud Messaging bootstrap.

@@ -725,6 +725,130 @@ class ChatSocket {
     }
   }
 
+  /// Ingests a `push_schema: "2"` data-only FCM push on the live main isolate
+  /// (either arriving in foreground or delegated from the background isolate via
+  /// `IsolateNameServer`).
+  ///
+  /// Uses the exact same per-conversation serializer, E2EE decryptor, Drift
+  /// persistence, and [onIncomingMessage] notification pipeline as live
+  /// WebSocket frames so there is never dual-isolate contention or duplicate
+  /// notification banners.
+  Future<void> ingestFcmPush(Map<String, dynamic> data) async {
+    if (_scopeClosed) return;
+    final conversationId = data['conversation_id']?.toString().trim() ?? '';
+    if (conversationId.isEmpty) return;
+
+    final messageId = data['message_id']?.toString().trim();
+    final clientMsgId = data['client_msg_id']?.toString().trim();
+    final seqRaw = data['seq']?.toString().trim();
+    final seq = seqRaw == null ? null : int.tryParse(seqRaw);
+    final senderId = data['sender_id']?.toString().trim();
+    final senderName = data['sender_name']?.toString().trim();
+    final msgType =
+        (data['msg_type'] ?? data['type'])?.toString().trim() ?? 'text';
+    final contentOmitted =
+        data['content_omitted']?.toString().trim().toLowerCase() == 'true';
+    final content = data['content']?.toString();
+    final createdAtRaw = data['created_at']?.toString().trim();
+    final createdAt = createdAtRaw == null
+        ? DateTime.now().toUtc()
+        : (DateTime.tryParse(createdAtRaw)?.toUtc() ?? DateTime.now().toUtc());
+
+    final barrier = _syncBarrier;
+    if (barrier != null) await barrier.future;
+    if (_scopeClosed) return;
+
+    Message? toEmit;
+    await _serializeMessages(conversationId, () async {
+      if (_scopeClosed) return;
+
+      final clearedSeq = await _dao.clearedSeqFor(conversationId);
+      if (seq != null && seq <= clearedSeq) return;
+
+      if (clientMsgId != null && clientMsgId.isNotEmpty) {
+        final existing = await _dao.message(clientMsgId);
+        if (existing != null &&
+            !isEncryptedContent(existing.content) &&
+            existing.content != undecryptableContent) {
+          return;
+        }
+      }
+
+      final cursor = await _dao.effectiveCursor(conversationId);
+      final canInline = seq != null &&
+          seq == cursor + 1 &&
+          !contentOmitted &&
+          content != null &&
+          clientMsgId != null &&
+          clientMsgId.isNotEmpty &&
+          senderId != null &&
+          senderId.isNotEmpty;
+
+      if (canInline) {
+        final msg = Message(
+          id: (messageId != null && messageId.isNotEmpty) ? messageId : clientMsgId,
+          conversationId: conversationId,
+          seq: seq,
+          senderId: senderId,
+          clientMsgId: clientMsgId,
+          type: msgType,
+          content: content,
+          createdAt: createdAt,
+        );
+        await _persistServerMessage(msg, isHistoricBackfill: false);
+        if (_scopeClosed) return;
+        toEmit = msg;
+        return;
+      }
+
+      // Gap or oversized (>4 KB) payload: catch up contiguously via REST sync.
+      await _syncConversation(conversationId, cursor);
+      if (_scopeClosed) return;
+
+      if (clientMsgId != null && clientMsgId.isNotEmpty) {
+        final stored = await _dao.message(clientMsgId);
+        if (stored != null) {
+          toEmit = Message(
+            id: stored.id ?? messageId ?? clientMsgId,
+            conversationId: stored.conversationId,
+            seq: stored.seq ?? seq ?? 0,
+            senderId: stored.senderId,
+            clientMsgId: stored.clientMsgId,
+            type: stored.type,
+            content: stored.content,
+            createdAt: stored.createdAt,
+          );
+          return;
+        }
+      }
+
+      // Sync failed (e.g. transient API outage): emit safe fallback so the
+      // recipient is still alerted when minimized.
+      if (messageId != null &&
+          messageId.isNotEmpty &&
+          senderId != null &&
+          senderId.isNotEmpty) {
+        toEmit = Message(
+          id: messageId,
+          conversationId: conversationId,
+          seq: seq ?? 0,
+          senderId: senderId,
+          clientMsgId:
+              (clientMsgId != null && clientMsgId.isNotEmpty) ? clientMsgId : messageId,
+          type: msgType,
+          content: (msgType == 'image' || msgType == 'file')
+              ? (content ?? '')
+              : undecryptableContent,
+          createdAt: createdAt,
+        );
+      }
+    });
+
+    if (toEmit != null && !_scopeClosed) {
+      await _emitIncoming(toEmit!, senderName);
+    }
+  }
+
   Future<void> _emitIncoming(Message message, String? senderName) async {
     if (_scopeClosed) return;
     final listener = onIncomingMessage;

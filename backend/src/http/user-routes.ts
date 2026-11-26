@@ -10,6 +10,7 @@ import { USER_STATUSES, toOwnUser, toPublicUser } from '../domain/users.js';
 const deviceSchema = z.object({
   fcm_token: z.string().trim().min(1).max(4096),
   device_id: z.string().trim().min(1).max(200).optional(),
+  push_version: z.number().int().min(1).max(10).optional().default(1),
 });
 
 const profileSchema = z
@@ -177,7 +178,12 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
     }
 
     const deviceId = result.data.device_id ?? request.deviceId;
-    await devices.register(request.userId, deviceId, result.data.fcm_token);
+    await devices.register(
+      request.userId,
+      deviceId,
+      result.data.fcm_token,
+      result.data.push_version,
+    );
     reply.status(204).send();
   });
 

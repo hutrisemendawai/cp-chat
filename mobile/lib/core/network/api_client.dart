@@ -22,6 +22,9 @@ class ApiClient {
     Dio? dio,
     this.deviceId,
     AppLogger? logger,
+    Duration connectTimeout = const Duration(seconds: 10),
+    Duration receiveTimeout = const Duration(seconds: 20),
+    Duration sendTimeout = const Duration(seconds: 20),
   })  :
         // ignore: prefer_initializing_formals
         _logger = logger,
@@ -29,9 +32,9 @@ class ApiClient {
             Dio(
               BaseOptions(
                 baseUrl: baseUrl,
-                connectTimeout: const Duration(seconds: 10),
-                receiveTimeout: const Duration(seconds: 20),
-                sendTimeout: const Duration(seconds: 20),
+                connectTimeout: connectTimeout,
+                receiveTimeout: receiveTimeout,
+                sendTimeout: sendTimeout,
                 contentType: Headers.jsonContentType,
                 // Handle every status in code so the refresh interceptor can
                 // see 401s instead of Dio throwing before it runs.
@@ -649,10 +652,14 @@ class ApiClient {
   }
 
   /// Registers the Firebase Installation ID for push delivery.
-  Future<void> registerFcmToken(String fid) async {
+  Future<void> registerFcmToken(String fid, {int pushVersion = 2}) async {
     final response = await dio.post<dynamic>(
       '/api/v1/devices/fcm-token',
-      data: {'fcm_token': fid, if (deviceId != null) 'device_id': deviceId},
+      data: {
+        'fcm_token': fid,
+        'push_version': pushVersion,
+        if (deviceId != null) 'device_id': deviceId,
+      },
       options: Options(validateStatus: (status) => status != null && status < 500),
     );
     if (response.statusCode != 204 && response.statusCode != 200) {

@@ -190,6 +190,48 @@ class E2eeManager {
     _bootstrapped = true;
   }
 
+  /// Loads existing per-account identity keys and ratchet sessions from secure
+  /// storage **without** generating new keys, migrating legacy data, or
+  /// contacting `/keys/me`.
+  ///
+  /// Designed for headless background isolates (FCM handlers) that must never
+  /// mutate server key state or create fresh identity keys. Returns `true` if
+  /// existing key material was loaded and is ready for decryption.
+  Future<bool> loadExistingWithoutBootstrap() async {
+    if (_isClosed) return false;
+    if (_keys != null) return true;
+
+    final stored = await _readKeysBlob();
+    if (stored == null || stored.isEmpty) return false;
+
+    try {
+      _keys = await _service.importKeyMaterial(stored);
+      await _restoreSessions();
+      return !_isClosed && _keys != null;
+    } catch (error) {
+      debugPrint('E2EE background key load failed: $error');
+      _keys = null;
+      return false;
+    }
+  }
+
+  /// Persists the current in-memory ratchet sessions to secure storage.
+  ///
+  /// Paired with `plaintextFor(..., deferSessionPersist: true)` so callers can
+  /// commit decrypted plaintext to SQLite **before** persisting the advanced
+  /// symmetric ratchet state (crash-safe write ordering).
+  Future<void> commitSessions() => _persistSessions();
+
+  /// Reloads persisted ratchet sessions from secure storage into memory.
+  Future<void> reloadSessionsFromDisk() async {
+    if (_isClosed) return;
+    await _serializeDecrypts(() async {
+      if (_isClosed) return;
+      _service.reset();
+      await _restoreSessions();
+    });
+  }
+
   /// Explicit user action after a key divergence (§3.4): discards local keys
   /// and sessions, generates fresh identity keys, and publishes them with
   /// `history_watermark: true` so the server rotates the epoch and clears
@@ -265,6 +307,8 @@ class E2eeManager {
     required bool isGroup,
     String? senderId,
     String? peerId,
+    bool deferSessionPersist = false,
+    bool allowBootstrap = true,
   }) {
     return _serializeDecrypts(
       () => _plaintextFor(
@@ -274,6 +318,8 @@ class E2eeManager {
         isGroup: isGroup,
         senderId: senderId,
         peerId: peerId,
+        deferSessionPersist: deferSessionPersist,
+        allowBootstrap: allowBootstrap,
       ),
     );
   }
@@ -285,6 +331,8 @@ class E2eeManager {
     required bool isGroup,
     String? senderId,
     String? peerId,
+    bool deferSessionPersist = false,
+    bool allowBootstrap = true,
   }) async {
     if (_isClosed) return undecryptableContent;
     if (!isEncryptedContent(content)) return content;
@@ -313,6 +361,7 @@ class E2eeManager {
     }
 
     if (_keys == null) {
+      if (!allowBootstrap) return fail('no_local_keys');
       try {
         await bootstrap();
       } catch (error) {
@@ -338,7 +387,9 @@ class E2eeManager {
       );
       if (_isClosed) return undecryptableContent;
       _plaintext[clientMsgId] = decrypted.plaintext;
-      await _persistSessions();
+      if (!deferSessionPersist) {
+        await _persistSessions();
+      }
       return decrypted.plaintext;
     } catch (error) {
       debugPrint('E2EE decrypt failed: $error');

@@ -16,7 +16,55 @@ export type PushPayload = {
   recipientUserId: string;
   conversationName: string;
   type: string;
+  conversationType?: 'direct' | 'group';
+  clientMsgId?: string;
+  seq?: number;
+  createdAt?: string;
+  content?: string;
 };
+
+/**
+ * Maximum UTF-8 JSON size for the FCM `data` map. FCM enforces a hard 4,096 B
+ * limit; budgeting at 3,500 B leaves comfortable headroom for wire framing and
+ * guarantees `invalid-argument` is never triggered (which would otherwise be
+ * treated as a stale installation ID).
+ */
+export const MAX_FCM_DATA_BYTES = 3500;
+
+/**
+ * Builds the `push_schema: "2"` string-only FCM `data` map for clients capable
+ * of decrypting E2EE payloads in their background isolate.
+ *
+ * When including `payload.content` would exceed {@link MAX_FCM_DATA_BYTES},
+ * `content` is omitted and `content_omitted: "true"` is set so the client
+ * fetches the ciphertext via `/conversations/:id/sync` instead.
+ */
+export function buildDataOnlyMap(payload: PushPayload): Record<string, string> {
+  const base: Record<string, string> = {
+    push_schema: '2',
+    type: payload.type,
+    msg_type: payload.type,
+    conversation_id: payload.conversationId,
+    conversation_type: payload.conversationType ?? 'direct',
+    conversation_name: payload.conversationName,
+    message_id: payload.messageId,
+    client_msg_id: payload.clientMsgId ?? '',
+    seq: payload.seq !== undefined ? String(payload.seq) : '',
+    sender_id: payload.senderId,
+    sender_name: payload.senderName,
+    recipient_user_id: payload.recipientUserId,
+    created_at: payload.createdAt ?? '',
+  };
+
+  if (payload.content !== undefined) {
+    const withContent: Record<string, string> = { ...base, content: payload.content };
+    if (Buffer.byteLength(JSON.stringify(withContent), 'utf8') <= MAX_FCM_DATA_BYTES) {
+      return withContent;
+    }
+  }
+
+  return { ...base, content_omitted: 'true' };
+}
 
 /**
  * Error codes that mean the target install no longer exists. Returning them
@@ -77,8 +125,9 @@ export class NotificationService {
   }
 
   /**
-   * Sends one data+notification message per Firebase Installation ID (FID).
-   * Stale installation ids are returned so the caller can prune them.
+   * Sends one legacy data+notification message per Firebase Installation ID
+   * (FID) for older installs (`push_version == 1`). Stale installation ids are
+   * returned so the caller can prune them.
    *
    * The Flutter plugin's `register()`/`onRegistered` stream yields the FID, and
    * firebase-admin 14 addresses installs by FID, so `getToken()`'s registration
@@ -87,29 +136,57 @@ export class NotificationService {
   async notify(fids: string[], payload: PushPayload): Promise<string[]> {
     if (!this.messaging || fids.length === 0) return [];
 
+    return this.sendMulticast(fids, 'legacy', {
+      fids,
+      // Legacy fallback for push_version == 1 clients: the OS renders the
+      // notification block directly when the app is terminated.
+      notification: { title: payload.title, body: payload.body },
+      data: {
+        type: payload.type,
+        conversation_id: payload.conversationId,
+        message_id: payload.messageId,
+        sender_id: payload.senderId,
+        sender_name: payload.senderName,
+        recipient_user_id: payload.recipientUserId,
+        conversation_name: payload.conversationName,
+      },
+      android: {
+        // `high` is required for Doze-delivered alerts: a normal-priority
+        // push can be deferred or dropped when the app is terminated.
+        priority: 'high',
+        notification: { channelId: 'cpchat_messages', sound: 'default' },
+      },
+    });
+  }
+
+  /**
+   * Sends a high-priority data-only FCM message (`push_schema: "2"`) per FID
+   * for upgraded clients (`push_version >= 2`). Omitting both top-level
+   * `notification` and `android.notification` ensures Android wakes the
+   * background isolate even when the app is terminated so the client can
+   * decrypt the E2EE envelope locally and render the real message preview.
+   */
+  async notifyDataOnly(fids: string[], payload: PushPayload): Promise<string[]> {
+    if (!this.messaging || fids.length === 0) return [];
+
+    return this.sendMulticast(fids, 'data_only', {
+      fids,
+      data: buildDataOnlyMap(payload),
+      android: {
+        priority: 'high',
+      },
+    });
+  }
+
+  private async sendMulticast(
+    fids: string[],
+    mode: 'legacy' | 'data_only',
+    message: Parameters<Messaging['sendEachForMulticast']>[0],
+  ): Promise<string[]> {
+    if (!this.messaging || fids.length === 0) return [];
+
     try {
-      const response = await this.messaging.sendEachForMulticast({
-        fids,
-        // The notification block is the fallback the OS renders on its own when
-        // the app is backgrounded or swiped away, so the alert always surfaces
-        // even though the app cannot decrypt an E2EE body off the main isolate.
-        notification: { title: payload.title, body: payload.body },
-        data: {
-          type: payload.type,
-          conversation_id: payload.conversationId,
-          message_id: payload.messageId,
-          sender_id: payload.senderId,
-          sender_name: payload.senderName,
-          recipient_user_id: payload.recipientUserId,
-          conversation_name: payload.conversationName,
-        },
-        android: {
-          // `high` is required for Doze-delivered alerts: a normal-priority
-          // push can be deferred or dropped when the app is terminated.
-          priority: 'high',
-          notification: { channelId: 'cpchat_messages', sound: 'default' },
-        },
-      });
+      const response = await this.messaging.sendEachForMulticast(message);
 
       const stale: string[] = [];
       response.responses.forEach((result, index) => {
@@ -119,14 +196,12 @@ export class NotificationService {
         if (fid && STALE_TOKEN_CODES.has(code)) stale.push(fid);
         // Anything the OS rejects is logged (never the message body) so a
         // silently-undelivered push is diagnosable from the server logs.
-        this.logger.warn({ code, fid }, 'FCM rejected a send');
+        this.logger.warn({ code, fid, mode }, 'FCM rejected a send');
       });
 
-      // Handoff outcome. A rejected send logs per-install above, but a
-      // successful one logged nothing at all, which made "push silently never
-      // fired" indistinguishable from "FCM accepted it" in the gateway logs.
       this.logger.info(
         {
+          mode,
           sent: response.successCount,
           failed: response.failureCount,
           total: fids.length,
@@ -137,13 +212,13 @@ export class NotificationService {
 
       if (stale.length > 0) {
         this.logger.info(
-          { stale: stale.length, total: fids.length },
+          { mode, stale: stale.length, total: fids.length },
           'pruning unregistered FCM installations',
         );
       }
       return stale;
     } catch (error) {
-      this.logger.warn({ err: error, total: fids.length }, 'FCM send failed');
+      this.logger.warn({ err: error, mode, total: fids.length }, 'FCM send failed');
       return [];
     }
   }

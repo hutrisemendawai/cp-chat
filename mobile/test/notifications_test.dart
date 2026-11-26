@@ -44,18 +44,20 @@ class _RecordingApi extends ApiClient {
   _RecordingApi() : super(TokenStore());
 
   final List<String> tokens = [];
+  final List<int> pushVersions = [];
   int attempts = 0;
   int failuresRemaining = 0;
   int unregisters = 0;
 
   @override
-  Future<void> registerFcmToken(String fid) async {
+  Future<void> registerFcmToken(String fid, {int pushVersion = 2}) async {
     attempts += 1;
     if (failuresRemaining > 0) {
       failuresRemaining -= 1;
       throw StateError('offline');
     }
     tokens.add(fid);
+    pushVersions.add(pushVersion);
   }
 
   @override
@@ -149,9 +151,29 @@ void main() {
       );
     });
 
-    test('describes media attachments', () {
+    test('describes media attachments with and without captions', () {
       expect(NotificationPolicy.preview(type: 'image', content: 'key'), 'Sent an image');
       expect(NotificationPolicy.preview(type: 'file', content: 'key'), 'Sent a file');
+      expect(
+        NotificationPolicy.preview(type: 'image', content: 'uploads/1.jpg|Sunset at the beach'),
+        'Photo: Sunset at the beach',
+      );
+      expect(
+        NotificationPolicy.preview(type: 'file', content: 'uploads/1.pdf|Q4 report'),
+        'File: Q4 report',
+      );
+      expect(
+        NotificationPolicy.preview(type: 'image', content: 'uploads/1.jpg|   '),
+        'Sent an image',
+      );
+    });
+
+    test('formatDirectPeerLabel formats optional nickname consistently', () {
+      expect(formatDirectPeerLabel(null, 'nick'), isNull);
+      expect(formatDirectPeerLabel('', 'nick'), isNull);
+      expect(formatDirectPeerLabel('Alice', null), 'Alice');
+      expect(formatDirectPeerLabel('Alice', '   '), 'Alice');
+      expect(formatDirectPeerLabel('Alice', 'Al'), 'Alice (Al)');
     });
   });
 
@@ -411,10 +433,12 @@ void main() {
 
       await push.start();
       expect(api.tokens, ['fid-1']);
+      expect(api.pushVersions, [2]);
 
       refresh.add('fid-2');
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(api.tokens, ['fid-1', 'fid-2']);
+      expect(api.pushVersions, [2, 2]);
 
       await push.stop();
       await refresh.close();

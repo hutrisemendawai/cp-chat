@@ -1,0 +1,19 @@
+name: cpchat_storage_dirs
+description: Local Android plugin exposing Context.noBackupFilesDir and cacheDir to all FlutterEngines, including headless FCM background engines.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.14.0
+  flutter: '>=3.24.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.cpchat.storage_dirs
+        pluginClass: CpchatStorageDirsPlugin

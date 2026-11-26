@@ -1,4 +1,14 @@
 import '../crypto/e2ee_service.dart' show isEncryptedContent, undecryptableContent;
+import '../media/media_service.dart' show splitMediaContent;
+
+/// Formats a direct-chat peer display name consistently across foreground and
+/// background notifications (`Name (nickname)` when a nickname is set).
+String? formatDirectPeerLabel(String? name, String? nickname) {
+  if (name == null || name.isEmpty) return null;
+  final trimmedNick = nickname?.trim();
+  if (trimmedNick == null || trimmedNick.isEmpty) return name;
+  return '$name ($trimmedNick)';
+}
 
 /// Pure decision and formatting rules for incoming-message notifications.
 ///
@@ -30,8 +40,18 @@ abstract final class NotificationPolicy {
   /// A body the client could not decrypt is reported as `Encrypted message`,
   /// never as its raw `e2ee:v1:` envelope.
   static String preview({required String type, required String content}) {
-    if (type == 'image') return 'Sent an image';
-    if (type == 'file') return 'Sent a file';
+    if (type == 'image') {
+      final caption = splitMediaContent(content).caption?.trim();
+      return (caption != null && caption.isNotEmpty)
+          ? 'Photo: $caption'
+          : 'Sent an image';
+    }
+    if (type == 'file') {
+      final caption = splitMediaContent(content).caption?.trim();
+      return (caption != null && caption.isNotEmpty)
+          ? 'File: $caption'
+          : 'Sent a file';
+    }
     if (isEncryptedContent(content) || content == undecryptableContent) {
       return 'Encrypted message';
     }

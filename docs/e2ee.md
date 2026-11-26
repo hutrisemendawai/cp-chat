@@ -150,6 +150,33 @@ sync cannot advance the chain a second time. A body that cannot be decrypted is
 stored as-is and rendered as a placeholder, so one unreadable message never
 breaks a conversation.
 
+### Background push notification decryption
+
+When the Android app is terminated, upgraded clients (`push_version: 2`) receive
+high-priority `data`-only FCM pushes carrying the `e2ee:v1:` ciphertext envelope
+(or `content_omitted: "true"` when the envelope exceeds the 3,500-byte data
+budget). `BackgroundPushHandler` decrypts the envelope on-device without ever
+sending plaintext through FCM:
+
+- **Main-isolate handoff:** If the app process is alive, the background isolate
+  delegates via `IsolateNameServer` (`cpchat_main_fcm_port`) to the main isolate
+  so only one isolate touches SQLite, in-memory `E2eeManager`, and rotating
+  refresh tokens.
+- **Cross-isolate lock & canonical path:** When terminated, `CpchatStorageDirsPlugin`
+  resolves the canonical `noBackupFilesDir`, `TokenStore.forBackground()` reads
+  Keystore with `resetOnError: false` (preventing wipes on Direct Boot / Keystore
+  errors), and `<partitionDir>/.partition.lock` serializes against app startup.
+- **Contiguous `seq` invariant:** Only `seq == effectiveCursor + 1` decrypts
+  inline. Sequence gaps or `content_omitted: "true"` payloads run an
+  authenticated `GET /api/v1/conversations/:id/sync?after_seq={cursor}` and
+  decrypt strictly in ascending `seq` order; if offline, the ratchet is not
+  advanced and the banner falls back to `"Encrypted message"`.
+- **Crash-safe write order:** Decrypted plaintext is committed to Drift SQLite
+  **before** persisting updated `acct.<id>.e2ee_sessions` (`deferSessionPersist:
+  true` + `commitSessions()`). A kill between the two writes loses zero messages
+  because `_alreadyReadable()` skips re-decryption on resume and the symmetric
+  ratchet skips forward cleanly on message `i + 1`.
+
 A failed decryption is reported once per message to the client log timeline
 (tag `e2ee`) with `reason`, `message_id`, `conversation_id`, `sender_id`, the
 exception type, and the non-secret session state (`present`, `initiator`,
@@ -198,3 +225,6 @@ sender keys and the safety-number UI.
   sessions, stale-session recovery, and failure logging.
 - `mobile/test/e2ee_delivery_test.dart` — a live `message` frame followed by a
   REST sync decrypts the body exactly once.
+- `mobile/test/background_push_decrypt_test.dart` — terminated data-only FCM
+  E2EE decryption, crash-safe DB-before-sessions commit order, gap-fill and
+  >4 KB sync, multi-account isolation, and `.partition.lock` serialization.

@@ -101,12 +101,16 @@ class PushRegistration {
     });
   }
 
+  /// Push capability version advertised to the backend (`2` = high-priority
+  /// data-only FCM decrypted locally in the background isolate).
+  static const int currentPushVersion = 2;
+
   Future<void> _register(String? fid) async {
     if (fid == null || fid.isEmpty) return;
     for (var attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (!_started) return;
       try {
-        await _api.registerFcmToken(fid);
+        await _api.registerFcmToken(fid, pushVersion: currentPushVersion);
         _registered = true;
         logger?.info('fcm', 'push token registered');
         return;

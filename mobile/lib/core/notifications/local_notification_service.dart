@@ -115,7 +115,7 @@ class LocalNotificationService implements MessageNotificationSink {
     _coldStartTarget = null;
   }
 
-  Future<void> initialize() async {
+  Future<void> initialize({bool checkLaunchDetails = true}) async {
     if (_initialized) return;
     if (defaultTargetPlatform != TargetPlatform.android) return;
 
@@ -138,11 +138,13 @@ class LocalNotificationService implements MessageNotificationSink {
           ),
         );
 
-    final launch = await _plugin.getNotificationAppLaunchDetails();
-    if (launch?.didNotificationLaunchApp ?? false) {
-      final parsed = NotificationTapTarget.parse(launch?.notificationResponse?.payload);
-      if (parsed != null) {
-        _coldStartTarget = parsed;
+    if (checkLaunchDetails) {
+      final launch = await _plugin.getNotificationAppLaunchDetails();
+      if (launch?.didNotificationLaunchApp ?? false) {
+        final parsed = NotificationTapTarget.parse(launch?.notificationResponse?.payload);
+        if (parsed != null) {
+          _coldStartTarget = parsed;
+        }
       }
     }
     _initialized = true;

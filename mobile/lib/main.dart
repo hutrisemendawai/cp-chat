@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:isolate';
+import 'dart:ui' show IsolateNameServer;
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'core/models/models.dart';
+import 'core/notifications/background_push_handler.dart';
 import 'core/notifications/crash_reporter.dart';
 import 'core/notifications/fcm_service.dart';
 import 'core/notifications/local_notification_service.dart';
@@ -206,21 +209,72 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
   StreamSubscription<dynamic>? _fcmTapSubscription;
   StreamSubscription<NotificationTapTarget>? _localTapSubscription;
   StreamSubscription<RemoteMessage>? _foregroundSubscription;
+  ReceivePort? _bgFcmPort;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _registerBackgroundFcmBridge();
     WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
   }
 
   @override
   void dispose() {
+    _unregisterBackgroundFcmBridge();
     WidgetsBinding.instance.removeObserver(this);
     _fcmTapSubscription?.cancel();
     _localTapSubscription?.cancel();
     _foregroundSubscription?.cancel();
     super.dispose();
+  }
+
+  void _registerBackgroundFcmBridge() {
+    IsolateNameServer.removePortNameMapping(kMainIsolateFcmPortName);
+    final port = ReceivePort();
+    _bgFcmPort = port;
+    IsolateNameServer.registerPortWithName(
+      port.sendPort,
+      kMainIsolateFcmPortName,
+    );
+    port.listen((dynamic message) {
+      if (message is! Map) return;
+      final rawData = message['data'];
+      final replyPort = message['replyPort'];
+      final data = rawData is Map
+          ? rawData.map((k, v) => MapEntry(k.toString(), v))
+          : <String, dynamic>{};
+      unawaited(
+        _handleMainIsolateFcmData(data).then(
+          (_) {
+            if (replyPort is SendPort) replyPort.send(true);
+          },
+          onError: (_) {
+            if (replyPort is SendPort) replyPort.send(false);
+          },
+        ),
+      );
+    });
+  }
+
+  void _unregisterBackgroundFcmBridge() {
+    IsolateNameServer.removePortNameMapping(kMainIsolateFcmPortName);
+    _bgFcmPort?.close();
+    _bgFcmPort = null;
+  }
+
+  Future<void> _handleMainIsolateFcmData(Map<String, dynamic> data) async {
+    final parsed = ParsedFcmMessage.tryParse(data);
+    if (parsed == null) return;
+    final scope = ref.read(accountScopeProvider);
+    if (!shouldHandleFcmForAccount(
+      recipientUserId: parsed.recipientUserId,
+      activeAccountId: scope?.accountId,
+      hasSession: ref.read(authControllerProvider).isAuthenticated,
+    )) {
+      return;
+    }
+    await ref.read(chatSocketProvider).ingestFcmPush(data);
   }
 
   @override
@@ -270,8 +324,15 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
     if (initial != null) _openFromMessage(initial);
   }
 
-  /// Drops foreground FCM pushes targeting a different or signed-out account (§3.3).
+  /// Routes foreground FCM pushes: `push_schema == "2"` data-only messages
+  /// decrypt and persist through the live `ChatSocket` pipeline, while legacy
+  /// notification-block messages continue through `onForegroundFcm`. Drops
+  /// pushes targeting a different or signed-out account (§3.3).
   void _onForegroundMessage(RemoteMessage message) {
+    if (message.data['push_schema']?.toString() == '2') {
+      unawaited(_handleMainIsolateFcmData(message.data));
+      return;
+    }
     final content = notificationContentFromFcm(message);
     if (content == null) return;
     final scope = ref.read(accountScopeProvider);
@@ -304,6 +365,7 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
   void _openConversation(String conversationId) {
     if (conversationId.isEmpty) return;
     if (!ref.read(authControllerProvider).isAuthenticated) return;
+    if (ref.read(activeConversationIdProvider) == conversationId) return;
     ref.read(routerProvider).push('/conversations/$conversationId');
   }
 
