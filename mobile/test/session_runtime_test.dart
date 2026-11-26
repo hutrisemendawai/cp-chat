@@ -124,15 +124,29 @@ class _FakePush extends PushRegistration {
 
   int starts = 0;
   int stops = 0;
+  int ensureCalls = 0;
+  int unregisters = 0;
+  bool throwOnStart = false;
 
   @override
   Future<void> start() async {
     starts += 1;
+    if (throwOnStart) throw StateError('firebase unavailable');
+  }
+
+  @override
+  Future<void> ensureRegistered() async {
+    ensureCalls += 1;
   }
 
   @override
   Future<void> stop() async {
     stops += 1;
+  }
+
+  @override
+  Future<void> unregister() async {
+    unregisters += 1;
   }
 }
 
@@ -222,6 +236,32 @@ void main() {
     expect(socket.connects, 0);
   });
 
+  test('a failing push start is logged and does not abort session startup', () async {
+    push.throwOnStart = true;
+    container.read(sessionRuntimeProvider);
+
+    (container.read(authControllerProvider.notifier) as _FakeAuth).emit(_session());
+    await settle();
+
+    expect(socket.connects, 1);
+    expect(push.starts, 1);
+    expect(
+      container.read(appLoggerProvider).entries.any((entry) => entry.tag == 'fcm'),
+      isTrue,
+    );
+  });
+
+  test('reconnecting the socket retries push registration when running', () async {
+    container.read(sessionRuntimeProvider);
+    (container.read(authControllerProvider.notifier) as _FakeAuth).emit(_session());
+    await settle();
+
+    socket.connection.value = const SocketStatus(SocketState.connected);
+    await settle();
+
+    expect(push.ensureCalls, 1);
+  });
+
   group('logout resilience', () {
     Future<_FakeAuth> signIn() async {
       container.read(sessionRuntimeProvider);
@@ -240,6 +280,7 @@ void main() {
 
       await auth.logout();
 
+      expect(push.unregisters, 1);
       expect(container.read(authControllerProvider).isUnauthenticated, isTrue);
       expect(await container.read(chatDaoProvider).conversations(), isEmpty);
     });

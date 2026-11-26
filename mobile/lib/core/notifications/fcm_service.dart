@@ -2,6 +2,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
+import '../logging/app_logger.dart';
 import 'local_notification_service.dart';
 
 /// The tray content derived from an FCM payload.
@@ -57,8 +58,10 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 /// widget tests), which keeps CI and emulator runs free of Firebase setup.
 abstract final class FcmService {
   static bool _initialized = false;
+  static AppLogger? _logger;
 
-  static Future<void> initialize() async {
+  static Future<void> initialize({AppLogger? logger}) async {
+    if (logger != null) _logger = logger;
     try {
       await Firebase.initializeApp();
       await FirebaseMessaging.instance.requestPermission();
@@ -70,11 +73,16 @@ abstract final class FcmService {
         sound: true,
       );
       _initialized = true;
+      _logger?.info('fcm', 'FCM initialized');
     } catch (error) {
-      debugPrint(
-        'FCM unavailable: Firebase is not configured '
-        '(missing google-services.json or invalid options): $error',
-      );
+      final message =
+          'FCM unavailable: Firebase is not configured '
+          '(missing google-services.json or invalid options): $error';
+      if (_logger != null) {
+        _logger!.warn('fcm', message, meta: {'error': error.toString()});
+      } else {
+        debugPrint(message);
+      }
       _initialized = false;
     }
   }
@@ -94,12 +102,21 @@ abstract final class FcmService {
       await FirebaseMessaging.instance.register();
       return await registered.timeout(const Duration(seconds: 10));
     } catch (error) {
-      debugPrint('FCM registration unavailable: $error');
+      if (_logger != null) {
+        _logger!.warn(
+          'fcm',
+          'FCM registration unavailable',
+          meta: {'error': error.toString()},
+        );
+      } else {
+        debugPrint('FCM registration unavailable: $error');
+      }
       return null;
     }
   }
 
-  static Stream<String> get onTokenRefresh => FirebaseMessaging.instance.onRegistered;
+  static Stream<String> get onTokenRefresh =>
+      _initialized ? FirebaseMessaging.instance.onRegistered : const Stream<String>.empty();
 
   /// Fires when the user taps a notification while the app is backgrounded.
   static Stream<RemoteMessage> get onNotificationTap =>

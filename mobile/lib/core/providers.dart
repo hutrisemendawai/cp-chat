@@ -116,7 +116,10 @@ final chatSocketProvider = Provider<ChatSocket>((ref) {
 
 /// Registers this install for push delivery while a session is active.
 final pushRegistrationProvider = Provider<PushRegistration>((ref) {
-  final registration = PushRegistration(ref.watch(apiClientProvider));
+  final registration = PushRegistration(
+    ref.watch(apiClientProvider),
+    logger: ref.watch(appLoggerProvider),
+  );
   ref.onDispose(() => unawaited(registration.stop()));
   return registration;
 });
@@ -208,6 +211,35 @@ class SessionLifecycle {
   Future<void>? _starting;
   Future<void>? _stopping;
   bool _running = false;
+  ChatSocket? _watchedSocket;
+  VoidCallback? _socketConnectionListener;
+
+  void _attachSocketReconnectListener(ChatSocket socket) {
+    if (identical(_watchedSocket, socket) && _socketConnectionListener != null) {
+      return;
+    }
+    _detachSocketReconnectListener();
+    void listener() {
+      if (!_running) return;
+      if (socket.connection.value.isConnected) {
+        unawaited(_ref.read(pushRegistrationProvider).ensureRegistered());
+      }
+    }
+
+    socket.connection.addListener(listener);
+    _watchedSocket = socket;
+    _socketConnectionListener = listener;
+  }
+
+  void _detachSocketReconnectListener() {
+    final socket = _watchedSocket;
+    final listener = _socketConnectionListener;
+    if (socket != null && listener != null) {
+      socket.connection.removeListener(listener);
+    }
+    _watchedSocket = null;
+    _socketConnectionListener = null;
+  }
 
   /// Starts the socket and push registration for the active session. Safe to
   /// call repeatedly: a run already in flight is awaited rather than duplicated,
@@ -235,9 +267,19 @@ class SessionLifecycle {
       debugPrint('E2EE bootstrap failed: $error');
     }
 
-    await _ref.read(chatSocketProvider).connect();
+    final socket = _ref.read(chatSocketProvider);
+    _attachSocketReconnectListener(socket);
+    await socket.connect();
 
-    await _ref.read(pushRegistrationProvider).start();
+    try {
+      await _ref.read(pushRegistrationProvider).start();
+    } catch (error) {
+      _ref.read(appLoggerProvider).warn(
+            'fcm',
+            'Push registration start failed',
+            meta: {'error': error.toString()},
+          );
+    }
 
     // Ask Android 13+ for the notification permission once a session exists.
     try {
@@ -263,6 +305,7 @@ class SessionLifecycle {
   }
 
   Future<void> _stop() async {
+    _detachSocketReconnectListener();
     final starting = _starting;
     if (starting != null) {
       try {
@@ -323,7 +366,7 @@ final bootstrapProvider = FutureProvider<void>((ref) async {
   }
   ref.read(deviceIdProvider.notifier).set(deviceId);
 
-  await FcmService.initialize();
+  await FcmService.initialize(logger: ref.read(appLoggerProvider));
   await ref.read(localNotificationServiceProvider).initialize();
 });
 
@@ -457,6 +500,11 @@ class AuthController extends Notifier<AuthState> {
         await ref.read(sessionLifecycleProvider).stop().timeout(logoutStepTimeout);
       } catch (error) {
         debugPrint('Logout teardown failed: $error');
+      }
+      try {
+        await ref.read(pushRegistrationProvider).unregister().timeout(logoutStepTimeout);
+      } catch (error) {
+        debugPrint('Logout push unregister failed: $error');
       }
       try {
         await api.logout().timeout(logoutStepTimeout);

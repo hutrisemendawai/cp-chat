@@ -621,7 +621,7 @@ export class ChatGateway {
 
     const tokens = await this.ctx.devices.tokensForUser(userId);
     if (tokens.length === 0) {
-      this.logger.debug({ user_id: userId }, 'push skipped: no registered device token');
+      this.logger.info({ user_id: userId }, 'push skipped: no registered device token');
       return;
     }
 

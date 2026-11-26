@@ -50,6 +50,13 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="cpchat_messages" />
+
+        <!-- Enable Firebase Messaging Android SDK 26+ FID v1 registration API
+             (`FirebaseMessaging.register()` / `onRegistered`). Without this entry,
+             `register()` throws `IllegalStateException: API disabled`. -->
+        <meta-data
+            android:name="firebase_messaging_installation_id_enabled"
+            android:value="true" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

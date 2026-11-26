@@ -13,19 +13,19 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * The gateway addresses pushes with `channelId = "messages"`. FCM does not
-     * create channels itself, and a missing channel downgrades the notification
-     * to default importance, so create it eagerly at startup.
+     * The gateway addresses pushes with `channelId = "cpchat_messages"`. FCM does
+     * not create channels itself, and a missing channel downgrades the
+     * notification to default importance, so create it eagerly at startup.
      */
     private fun createMessageChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
 
         val channel = NotificationChannel(
-            "messages",
+            "cpchat_messages",
             "Messages",
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
-            description = "New chat messages"
+            description = "Incoming chat messages"
             enableLights(true)
             enableVibration(true)
         }

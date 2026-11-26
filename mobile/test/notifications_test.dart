@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:cp_chat/core/logging/app_logger.dart';
 import 'package:cp_chat/core/network/api_client.dart';
 import 'package:cp_chat/core/notifications/fcm_service.dart';
 import 'package:cp_chat/core/notifications/local_notification_service.dart';
@@ -41,6 +42,7 @@ class _RecordingApi extends ApiClient {
   final List<String> tokens = [];
   int attempts = 0;
   int failuresRemaining = 0;
+  int unregisters = 0;
 
   @override
   Future<void> registerFcmToken(String fid) async {
@@ -50,6 +52,11 @@ class _RecordingApi extends ApiClient {
       throw StateError('offline');
     }
     tokens.add(fid);
+  }
+
+  @override
+  Future<void> unregisterFcmToken() async {
+    unregisters += 1;
   }
 }
 
@@ -434,6 +441,74 @@ void main() {
       await push.start();
       expect(api.attempts, 0);
       expect(api.tokens, isEmpty);
+    });
+
+    test('default Firebase wiring does not throw when Firebase is uninitialized', () async {
+      final api = _RecordingApi();
+      final push = PushRegistration(api);
+
+      await push.start();
+      await push.ensureRegistered();
+      await push.unregister();
+
+      expect(api.attempts, 0);
+      expect(api.unregisters, 0);
+      expect(push.isRegistered, isFalse);
+    });
+
+    test('retries registration on ensureRegistered after an offline cold start', () async {
+      final api = _RecordingApi();
+      String? token;
+      final push = PushRegistration(
+        api,
+        currentToken: () async => token,
+        onTokenRefresh: const Stream<String>.empty(),
+        retryDelay: (_) => Duration.zero,
+      );
+
+      await push.start();
+      expect(push.isRegistered, isFalse);
+      expect(api.tokens, isEmpty);
+
+      // Connectivity returns and Firebase emits an installation ID.
+      token = 'fid-after-reconnect';
+      await push.ensureRegistered();
+      expect(push.isRegistered, isTrue);
+      expect(api.tokens, ['fid-after-reconnect']);
+
+      // Subsequent reconnects do not re-register redundantly.
+      await push.ensureRegistered();
+      expect(api.attempts, 1);
+    });
+
+    test('unregisters the device token on logout and logs registration failures', () async {
+      final api = _RecordingApi()..failuresRemaining = 2;
+      final logger = AppLogger();
+      final push = PushRegistration(
+        api,
+        maxAttempts: 2,
+        currentToken: () async => 'fid-1',
+        onTokenRefresh: const Stream<String>.empty(),
+        retryDelay: (_) => Duration.zero,
+        logger: logger,
+      );
+
+      await push.start();
+      expect(push.isRegistered, isFalse);
+      expect(
+        logger.entries.any(
+          (entry) => entry.tag == 'fcm' && entry.level == AppLogLevel.warn,
+        ),
+        isTrue,
+      );
+
+      // Once connectivity is restored, registration succeeds and unregister removes it.
+      await push.ensureRegistered();
+      expect(push.isRegistered, isTrue);
+
+      await push.unregister();
+      expect(api.unregisters, 1);
+      expect(push.isRegistered, isFalse);
     });
   });
 }
