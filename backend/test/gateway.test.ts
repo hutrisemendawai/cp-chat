@@ -275,6 +275,103 @@ describe('chat gateway', () => {
     recipient.close();
   });
 
+  it('announces a brand-new direct conversation to both members only', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    const eve = await registerUser(harness, 'Eve');
+
+    // Alice adds Bob unilaterally: Bob must still learn of the new chat live.
+    await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/friends',
+      headers: { authorization: `Bearer ${alice.accessToken}` },
+      payload: { user_id: bob.id },
+    });
+
+    const bobSocket = await connect(bob);
+    const eveSocket = await connect(eve);
+
+    const created = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/conversations',
+      headers: { authorization: `Bearer ${alice.accessToken}` },
+      payload: { type: 'direct', member_ids: [bob.id] },
+    });
+    expect(created.statusCode).toBe(201);
+    const conversationId = created.json().id as string;
+
+    const notice = await bobSocket.wait((frame) => frame.type === 'conversation_updated');
+    expect(notice.conversation_id).toBe(conversationId);
+
+    // An unrelated connected outsider never sees the announcement.
+    await expect(eveSocket.wait((frame) => frame.type === 'conversation_updated', 500)).rejects.toThrow(
+      'timed out',
+    );
+
+    bobSocket.close();
+    eveSocket.close();
+  });
+
+  it('does not re-announce an existing direct conversation', async () => {
+    const { alice, bob, conversationId } = await pair();
+    const bobSocket = await connect(bob);
+
+    const reopened = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/conversations',
+      headers: { authorization: `Bearer ${alice.accessToken}` },
+      payload: { type: 'direct', member_ids: [bob.id] },
+    });
+    expect(reopened.statusCode).toBe(201);
+    expect(reopened.json().id).toBe(conversationId);
+
+    await expect(
+      bobSocket.wait((frame) => frame.type === 'conversation_updated', 500),
+    ).rejects.toThrow('timed out');
+
+    bobSocket.close();
+  });
+
+  it('enriches the live message frame with conversation and sender hints', async () => {
+    const { alice, bob, conversationId } = await pair();
+    const sender = await connect(alice);
+    const recipient = await connect(bob);
+
+    sender.send({
+      type: 'send',
+      conversation_id: conversationId,
+      client_msg_id: randomUUID(),
+      msg_type: 'text',
+      content: 'with hints',
+    });
+    const direct = await recipient.wait((frame) => frame.type === 'message');
+    expect(direct).toMatchObject({
+      conversation_type: 'direct',
+      conversation_name: null,
+      sender_name: 'Alice',
+      sender_avatar_url: null,
+    });
+
+    const groupId = await createGroup(harness, alice, [bob], 'Weekend Squad');
+    sender.send({
+      type: 'send',
+      conversation_id: groupId,
+      client_msg_id: randomUUID(),
+      msg_type: 'text',
+      content: 'group hello',
+    });
+    const group = await recipient.wait(
+      (frame) => frame.type === 'message' && frame.conversation_id === groupId,
+    );
+    expect(group).toMatchObject({
+      conversation_type: 'group',
+      conversation_name: 'Weekend Squad',
+    });
+
+    sender.close();
+    recipient.close();
+  });
+
   it('rejects a non-UUIDv4 client_msg_id and empty text', async () => {
     const { alice, bob, conversationId } = await pair();
     const socket = await connect(alice);

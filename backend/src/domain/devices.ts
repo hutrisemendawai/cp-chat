@@ -43,6 +43,36 @@ export class DeviceRepository {
     ]);
   }
 
+  async unregisterMatching(
+    userId: string,
+    options: { deviceIds?: string[]; fcmToken?: string },
+  ): Promise<void> {
+    const deviceIds = [...new Set((options.deviceIds ?? []).filter((id) => id.length > 0))];
+    const fcmToken = options.fcmToken?.trim() || undefined;
+    if (deviceIds.length === 0 && !fcmToken) return;
+
+    if (deviceIds.length > 0 && fcmToken) {
+      await this.db.query(
+        `DELETE FROM device_tokens
+          WHERE user_id = $1
+            AND (device_id = ANY($2::text[]) OR fcm_token = $3)`,
+        [userId, deviceIds, fcmToken],
+      );
+      return;
+    }
+    if (deviceIds.length > 0) {
+      await this.db.query(
+        `DELETE FROM device_tokens WHERE user_id = $1 AND device_id = ANY($2::text[])`,
+        [userId, deviceIds],
+      );
+      return;
+    }
+    await this.db.query(
+      `DELETE FROM device_tokens WHERE user_id = $1 AND fcm_token = $2`,
+      [userId, fcmToken],
+    );
+  }
+
   /**
    * Drops installations FCM reported as unregistered so a dead token is never
    * retried. Tokens are global identifiers, so this is not scoped to one user.

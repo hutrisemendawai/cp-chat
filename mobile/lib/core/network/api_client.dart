@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 
+import '../account/partition_lock.dart';
 import '../crypto/e2ee_service.dart' show PublicKeyBundle, PublicPrekey, RemotePrekeyBundle;
 import '../config/app_config.dart';
 import '../logging/app_logger.dart';
@@ -22,6 +24,8 @@ class ApiClient {
     Dio? dio,
     this.deviceId,
     AppLogger? logger,
+    this.clearTokensOnRefreshFailure = true,
+    this.refreshLockDir,
     Duration connectTimeout = const Duration(seconds: 10),
     Duration receiveTimeout = const Duration(seconds: 20),
     Duration sendTimeout = const Duration(seconds: 20),
@@ -64,7 +68,13 @@ class ApiClient {
                 return;
               }
 
-              final refreshed = await _refreshOnce();
+              final authHeader = response.requestOptions.headers['Authorization']?.toString();
+              final failedAccessToken =
+                  authHeader != null && authHeader.startsWith('Bearer ')
+                      ? authHeader.substring('Bearer '.length)
+                      : null;
+
+              final refreshed = await _refreshOnce(failedAccessToken: failedAccessToken);
               if (!refreshed) {
                 handler.next(response);
                 return;
@@ -117,6 +127,8 @@ class ApiClient {
   final Dio dio;
   final String? deviceId;
   final AppLogger? _logger;
+  final bool clearTokensOnRefreshFailure;
+  final Directory? refreshLockDir;
 
   Future<bool>? _inFlightRefresh;
 
@@ -741,47 +753,112 @@ class ApiClient {
     }
   }
 
+  static const String _refreshLockFileName = '.refresh.lock';
+
   /// Single-flight refresh: the first caller rotates, everyone else awaits the
   /// same rotation. The server revokes the whole token family on reuse, so two
   /// concurrent rotations would sign the user out.
-  Future<bool> _refreshOnce() {
+  Future<bool> _refreshOnce({String? failedAccessToken}) {
     final inFlight = _inFlightRefresh;
     if (inFlight != null) {
       return inFlight.then((ok) => ok);
     }
 
-    final future = _performRefresh();
+    final future = _performRefresh(failedAccessToken: failedAccessToken);
     _inFlightRefresh = future;
     return future.whenComplete(() {
       _inFlightRefresh = null;
     });
   }
 
-  Future<bool> _performRefresh() async {
-    final refreshToken = await _tokenStore.readRefreshToken();
-    if (refreshToken == null) return false;
+  Future<bool> _performRefresh({String? failedAccessToken}) async {
+    Future<bool> runRefresh() async {
+      final currentAccess = await _tokenStore.readAccessToken();
+      if (failedAccessToken != null &&
+          currentAccess != null &&
+          currentAccess.isNotEmpty &&
+          currentAccess != failedAccessToken) {
+        return true;
+      }
 
-    try {
-      final response = await dio.post<dynamic>(
-        '/api/v1/auth/refresh',
-        data: {'refresh_token': refreshToken, if (deviceId != null) 'device_id': deviceId},
-        options: Options(
-          extra: {kSkipAuth: true},
-          validateStatus: (status) => status != null && status < 500,
-        ),
-      );
-      if (response.statusCode != 200) {
-        await _tokenStore.clear();
+      final refreshToken = await _tokenStore.readRefreshToken();
+      if (refreshToken == null) return false;
+
+      try {
+        final response = await dio.post<dynamic>(
+          '/api/v1/auth/refresh',
+          data: {
+            'refresh_token': refreshToken,
+            if (deviceId != null) 'device_id': deviceId,
+          },
+          options: Options(
+            extra: {kSkipAuth: true},
+            validateStatus: (status) => status != null && status < 500,
+          ),
+        );
+        if (response.statusCode != 200) {
+          final errorCode = _extractErrorCode(response.data);
+          if (clearTokensOnRefreshFailure &&
+              response.statusCode == 401 &&
+              errorCode == 'invalid_token') {
+            await _tokenStore.clear();
+          }
+          return false;
+        }
+        final pair = TokenPair.fromJson(response.data as Map<String, dynamic>);
+        await _tokenStore.saveTokens(
+          accessToken: pair.accessToken,
+          refreshToken: pair.refreshToken,
+        );
+        return true;
+      } catch (_) {
         return false;
       }
-      final pair = TokenPair.fromJson(response.data as Map<String, dynamic>);
-      await _tokenStore.saveTokens(
-        accessToken: pair.accessToken,
-        refreshToken: pair.refreshToken,
+    }
+
+    Directory? lockDir = refreshLockDir;
+    if (lockDir == null) {
+      final cachedRoot = await _tokenStore.readResolvedNoBackupRoot();
+      if (cachedRoot != null && cachedRoot.isNotEmpty) {
+        final candidate = Directory(cachedRoot);
+        if (await candidate.exists()) {
+          lockDir = candidate;
+        }
+      }
+    }
+
+    if (lockDir == null) {
+      return runRefresh();
+    }
+
+    try {
+      return await PartitionLock.withLock<bool>(
+        lockDir,
+        runRefresh,
+        fileName: _refreshLockFileName,
+        timeout: const Duration(seconds: 6),
+        staleAfter: const Duration(seconds: 15),
       );
-      return true;
     } catch (_) {
       return false;
     }
+  }
+
+  static String? _extractErrorCode(dynamic data) {
+    Map<String, dynamic>? map;
+    if (data is Map<String, dynamic>) {
+      map = data;
+    } else if (data is String && data.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(data);
+        if (decoded is Map<String, dynamic>) map = decoded;
+      } catch (_) {}
+    }
+    if (map == null) return null;
+    final nested = map['error'];
+    if (nested is Map<String, dynamic>) {
+      return nested['code']?.toString();
+    }
+    return map['code']?.toString();
   }
 }

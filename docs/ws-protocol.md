@@ -187,6 +187,9 @@ The server replies with `{ "type": "pong" }`.
   "seq": 42,
   "sender_id": "u1",
   "sender_name": "Alice",
+  "sender_avatar_url": "u1/avatar.jpg",
+  "conversation_type": "direct",
+  "conversation_name": null,
   "client_msg_id": "550e8400-e29b-41d4-a716-446655440000",
   "msg_type": "text",
   "content": "Hello!",
@@ -197,6 +200,11 @@ The server replies with `{ "type": "pong" }`.
 - `sender_name` is the sender's display name (`Name (nickname)` when set) and
   lets the client title a local notification without a REST round trip. It is an
   additive field: a client that ignores it still renders the message correctly.
+- `sender_avatar_url`, `conversation_type` (`"direct" | "group"`) and
+  `conversation_name` (group name, `null` for direct chats) are additive display
+  hints. They let a client that receives a message for a conversation it has
+  never seen persist a provisional conversation row immediately, then hydrate the
+  authoritative summary from `GET /api/v1/conversations/:id`.
 - Ordering is guaranteed by `seq`, never by `created_at`. If a gap is detected
   (`seq > local_latest_seq + 1`) the client calls the REST sync endpoint before
   appending further messages.
@@ -252,10 +260,16 @@ The server replies with `{ "type": "pong" }`.
 ```
 
 - Emitted when a group is created, renamed, its avatar changes, or members are
-  added/removed. It carries no payload; the client refetches the conversation.
+  added/removed, **and** when a brand-new direct conversation is created. It
+  carries no payload; the client refetches the conversation.
 - A removed member receives it too, so their client can drop the conversation
   locally. A refetch returns `403`/`404`, which the client treats as "delete".
-- Clients must ignore it for conversations they do not have locally.
+- For a direct conversation it is only sent to its two members, and only on
+  creation — re-opening an existing 1:1 chat does not re-announce it.
+- A client that lacks the conversation locally (e.g. it connected after the
+  announcement, or missed it during a reconnect) should fetch
+  `GET /api/v1/conversations/:id` and upsert it, deleting locally only on
+  `403`/`404`.
 
 ### Media
 

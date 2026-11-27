@@ -7,6 +7,28 @@ import '../crypto/e2ee_service.dart' show isEncryptedContent, undecryptableConte
 import '../models/models.dart';
 import 'app_database.dart';
 
+/// Display hints for a conversation the client has never seen, carried by a live
+/// `message` frame or a data-only push.
+///
+/// Used to insert a provisional `local_conversations` row in the same
+/// transaction as the message, so the chat list updates immediately instead of
+/// waiting for the authoritative `GET /api/v1/conversations/:id` hydration.
+class ProvisionalConversationHint {
+  const ProvisionalConversationHint({
+    this.type = 'direct',
+    this.conversationName,
+    this.peerId,
+    this.peerName,
+    this.peerAvatarUrl,
+  });
+
+  final String type;
+  final String? conversationName;
+  final String? peerId;
+  final String? peerName;
+  final String? peerAvatarUrl;
+}
+
 /// Local mirror of server state plus the outbox for unsent messages.
 ///
 /// Every write is idempotent: the server is authoritative, and the same row can
@@ -85,6 +107,17 @@ class ChatDao {
     return _guard<LocalMessage?>(
       () => (db.select(db.localMessages)
             ..where((table) => table.clientMsgId.equals(clientMsgId)))
+          .getSingleOrNull(),
+    );
+  }
+
+  /// Looks up a persisted message by `(conversationId, seq)`.
+  Future<LocalMessage?> messageBySeq(String conversationId, int seq) async {
+    return _guard<LocalMessage?>(
+      () => (db.select(db.localMessages)
+            ..where((table) =>
+                table.conversationId.equals(conversationId) &
+                table.seq.equals(seq)))
           .getSingleOrNull(),
     );
   }
@@ -193,11 +226,13 @@ class ChatDao {
     String? preview;
     if (pending != null) {
       preview = _contentPreview(pending.type, pending.content);
+    } else if (stale) {
+      // A summary captured before live WS messages landed must not regress the
+      // already-decrypted preview back to empty.
+      preview = _safePreview(existing.lastMessagePreview);
     } else if (summary == null && effectiveClearedSeq >= item.lastSeq) {
       // Cleared conversation with no newer messages: empty preview.
       preview = null;
-    } else if (stale) {
-      preview = _safePreview(existing.lastMessagePreview);
     } else if (summary == null) {
       preview = null;
     } else if (summary.seq <= effectiveClearedSeq) {
@@ -227,8 +262,21 @@ class ChatDao {
     final lastSeq = preserveLocalCursor && existing != null && existing.lastSeq > item.lastSeq
         ? existing.lastSeq
         : item.lastSeq;
-    final lastReadSeq = math.max(item.lastReadSeq, effectiveClearedSeq);
-    final unreadCount = effectiveClearedSeq >= lastSeq ? 0 : item.unreadCount;
+    // Preserve a newer local read cursor: a stale REST summary must never move
+    // it backwards, otherwise an already-read chat regains an unread badge.
+    final lastReadSeq = math.max(
+      preserveLocalCursor && existing != null ? existing.lastReadSeq : 0,
+      math.max(item.lastReadSeq, effectiveClearedSeq),
+    );
+    final int unreadCount;
+    if (effectiveClearedSeq >= lastSeq || lastReadSeq >= lastSeq) {
+      unreadCount = 0;
+    } else if (stale) {
+      // The summary predates live WS messages already persisted locally.
+      unreadCount = math.max(existing.unreadCount, item.unreadCount);
+    } else {
+      unreadCount = item.unreadCount;
+    }
     await db.into(db.localConversations).insertOnConflictUpdate(
           LocalConversationsCompanion.insert(
             id: item.id,
@@ -397,7 +445,18 @@ class ChatDao {
   }
 
   /// Stores a server message, reconciling the optimistic row by client id.
-  Future<void> upsertServerMessage(Message message, {String status = 'sent'}) async {
+  ///
+  /// [ensureConversation] inserts a provisional conversation row atomically with
+  /// the message when the client has never seen this conversation, so an inbound
+  /// message from a new peer is never an orphaned row (`watchConversations()`
+  /// emits immediately). [incrementUnread] book-keeps the unread badge for a
+  /// message from someone else while this chat is not the one on screen.
+  Future<void> upsertServerMessage(
+    Message message, {
+    String status = 'sent',
+    ProvisionalConversationHint? ensureConversation,
+    bool incrementUnread = false,
+  }) async {
     await _guard(() async {
       await db.transaction(() async {
         final conv = await (db.select(db.localConversations)
@@ -412,6 +471,9 @@ class ChatDao {
         if (existing != null && existing.conversationId != message.conversationId) {
           throw StateError('Message id belongs to another conversation');
         }
+        // Only a genuinely new inbound row counts as unread; a sync replay of an
+        // already-stored row must never double-increment the badge.
+        final isNewIncomingRow = existing == null || existing.seq == null;
         final pendingBefore = await _latestPending(message.conversationId);
         final content = _storedContent(message.content, existing?.content);
         await db.into(db.localMessages).insertOnConflictUpdate(
@@ -432,7 +494,12 @@ class ChatDao {
         await (db.delete(db.outboxEntries)
               ..where((table) => table.clientMsgId.equals(message.clientMsgId)))
             .go();
-        await _bumpConversationCursor(message, content);
+        await _bumpConversationCursor(
+          message,
+          content,
+          ensureConversation: ensureConversation,
+          incrementUnread: incrementUnread && isNewIncomingRow,
+        );
         final current = await (db.select(db.localConversations)
               ..where((table) => table.id.equals(message.conversationId)))
             .getSingleOrNull();
@@ -861,16 +928,49 @@ class ChatDao {
     });
   }
 
-  Future<void> _bumpConversationCursor(Message message, String content) async {
+  Future<void> _bumpConversationCursor(
+    Message message,
+    String content, {
+    ProvisionalConversationHint? ensureConversation,
+    bool incrementUnread = false,
+  }) async {
     final existing = await (db.select(db.localConversations)
           ..where((table) => table.id.equals(message.conversationId)))
         .getSingleOrNull();
-    if (existing == null) return;
+    if (existing == null) {
+      if (ensureConversation == null) return;
+      // No local conversation yet (first contact from a non-friend): insert a
+      // provisional row in the same transaction as the message so the chat list
+      // is never left with an orphaned message row.
+      final isGroup = ensureConversation.type == 'group';
+      await db.into(db.localConversations).insertOnConflictUpdate(
+            LocalConversationsCompanion.insert(
+              id: message.conversationId,
+              type: ensureConversation.type,
+              name: Value(isGroup ? ensureConversation.conversationName : null),
+              peerId: Value(isGroup ? null : ensureConversation.peerId),
+              peerName: Value(isGroup ? null : ensureConversation.peerName),
+              peerAvatarUrl: Value(isGroup ? null : ensureConversation.peerAvatarUrl),
+              lastMessagePreview: Value(_contentPreview(message.type, content)),
+              lastSeq: Value(message.seq),
+              lastReadSeq: const Value(0),
+              clearedSeq: const Value(0),
+              unreadCount: Value(incrementUnread ? 1 : 0),
+              updatedAt: message.createdAt,
+            ),
+          );
+      return;
+    }
     final pending = await _latestPending(message.conversationId);
     final newest = message.createdAt.isAfter(existing.updatedAt)
         ? message.createdAt
         : existing.updatedAt;
     final lastSeq = message.seq > existing.lastSeq ? message.seq : existing.lastSeq;
+    // A message at or below the read/cleared watermark is already read; a newer
+    // message from the peer bumps the badge.
+    final bumpedUnread =
+        incrementUnread && message.seq > math.max(existing.lastReadSeq, existing.clearedSeq);
+    final nextUnread = bumpedUnread ? existing.unreadCount + 1 : existing.unreadCount;
     var preview = _safePreview(existing.lastMessagePreview);
     if (pending != null) {
       preview = _contentPreview(pending.type, pending.content);
@@ -889,6 +989,7 @@ class ChatDao {
       lastSeq: Value(lastSeq),
       updatedAt: Value(newest),
       lastMessagePreview: Value(preview),
+      unreadCount: Value(nextUnread),
     ));
   }
 }

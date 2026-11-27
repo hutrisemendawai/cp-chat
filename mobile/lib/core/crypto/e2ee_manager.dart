@@ -483,8 +483,10 @@ class E2eeManager {
     final keys = _keys;
     if (keys == null) return plaintext;
 
+    // Fail closed: a direct chat whose peer is unknown must never be sent as
+    // plaintext. Callers resolve the peer (and throw) before reaching here.
     final target = peerId ?? await _peerIdFor(conversationId);
-    if (target == null) return plaintext;
+    if (target == null) return null;
 
     RemotePrekeyBundle? bundle;
     if (!_service.hasSession(target)) {

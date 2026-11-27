@@ -189,7 +189,23 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
 
   app.delete('/api/v1/devices/fcm-token', async (request, reply) => {
     requireAuth(request, config);
-    await devices.unregister(request.userId, request.deviceId);
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const body =
+      request.body && typeof request.body === 'object'
+        ? (request.body as Record<string, unknown>)
+        : {};
+    const headerDevice = request.headers['x-device-id'];
+    const deviceIds = [
+      typeof query.device_id === 'string' ? query.device_id.trim() : '',
+      typeof body.device_id === 'string' ? body.device_id.trim() : '',
+      typeof headerDevice === 'string' ? headerDevice.trim() : '',
+      request.deviceId,
+    ].filter((value) => value.length > 0);
+    const fcmToken =
+      (typeof body.fcm_token === 'string' ? body.fcm_token.trim() : '') ||
+      (typeof query.fcm_token === 'string' ? query.fcm_token.trim() : '') ||
+      undefined;
+    await devices.unregisterMatching(request.userId, { deviceIds, fcmToken });
     reply.status(204).send();
   });
 

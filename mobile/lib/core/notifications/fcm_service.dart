@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/widgets.dart';
@@ -110,19 +112,30 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 /// Firebase Cloud Messaging bootstrap.
 abstract final class FcmService {
   static bool _initialized = false;
+  static String? _cachedFid;
+  static StreamSubscription<String>? _registeredSub;
+  static final StreamController<String> _fidController =
+      StreamController<String>.broadcast();
   static AppLogger? _logger;
 
   static Future<void> initialize({AppLogger? logger}) async {
     if (logger != null) _logger = logger;
+    if (_initialized) return;
     try {
       await Firebase.initializeApp();
-      await FirebaseMessaging.instance.requestPermission();
-      await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
-        alert: true,
-        badge: true,
-        sound: true,
-      );
       _initialized = true;
+      _registeredSub ??= FirebaseMessaging.instance.onRegistered.listen((fid) {
+        if (fid.isEmpty) return;
+        _cachedFid = fid;
+        _fidController.add(fid);
+      });
+      try {
+        await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
+          alert: true,
+          badge: true,
+          sound: true,
+        );
+      } catch (_) {}
       _logger?.info('fcm', 'FCM initialized');
     } catch (error) {
       final message =
@@ -141,10 +154,16 @@ abstract final class FcmService {
 
   static Future<String?> currentToken() async {
     if (!_initialized) return null;
+    if (_cachedFid != null && _cachedFid!.isNotEmpty) {
+      unawaited(FirebaseMessaging.instance.register().catchError((_) {}));
+      return _cachedFid;
+    }
     try {
-      final registered = FirebaseMessaging.instance.onRegistered.first;
+      final registered = _fidController.stream.first;
       await FirebaseMessaging.instance.register();
-      return await registered.timeout(const Duration(seconds: 10));
+      final fid = await registered.timeout(const Duration(seconds: 10));
+      _cachedFid = fid;
+      return fid;
     } catch (error) {
       if (_logger != null) {
         _logger!.warn(
@@ -160,7 +179,7 @@ abstract final class FcmService {
   }
 
   static Stream<String> get onTokenRefresh =>
-      _initialized ? FirebaseMessaging.instance.onRegistered : const Stream<String>.empty();
+      _initialized ? _fidController.stream : const Stream<String>.empty();
 
   static Stream<RemoteMessage> get onNotificationTap =>
       FirebaseMessaging.onMessageOpenedApp;

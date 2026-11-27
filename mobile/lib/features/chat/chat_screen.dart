@@ -318,22 +318,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
             cached?.name ??
             'Chat');
 
-    // Register the peer id so outgoing text can be encrypted for this chat.
-    // The local row only caches the peer's name, so the member list is the
-    // authoritative source for the id.
-    if (!isGroup && selfId != null && peer != null) {
+    // The direct peer's id: the authoritative member list wins, but a chat that
+    // was opened from a fresh inbound message may only have the cached row
+    // before `conversationMetadataProvider` resolves (or while offline).
+    final peerUserId = !isGroup ? (peer?.user.id ?? cached?.peerId) : null;
+
+    // Register the peer id so outgoing text can be encrypted for this chat even
+    // before the member list loads — never fall back to plaintext.
+    if (!isGroup && selfId != null && peerUserId != null) {
       ref
           .read(e2eeManagerProvider)
           .rememberConversation(
             widget.conversationId,
             selfId: selfId,
-            peerId: peer.user.id,
+            peerId: peerUserId,
           );
     }
 
     // For a 1:1 chat the other participant's live presence is the subtitle.
-    final presence = !isGroup && peer != null
-        ? ref.watch(presenceProvider(peer.user.id))
+    final presence = !isGroup && peerUserId != null
+        ? ref.watch(presenceProvider(peerUserId))
         : null;
     final presenceLabel = !isGroup ? formatPresence(presence) : null;
 
@@ -343,7 +347,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
         : null;
 
     // Tapping the header opens a group's info, or a direct chat's peer profile.
-    final peerUserId = !isGroup ? (peer?.user.id ?? cached?.peerId) : null;
 
     // Sender names make a group thread readable; direct chats already imply it.
     final senderNames = <String, String>{

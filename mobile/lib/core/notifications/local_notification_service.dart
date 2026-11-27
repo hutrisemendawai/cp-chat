@@ -132,9 +132,10 @@ class LocalNotificationService implements MessageNotificationSink {
             channelId,
             channelName,
             description: 'Incoming chat messages',
-            importance: Importance.max,
+            importance: Importance.high,
             playSound: true,
             enableVibration: true,
+            enableLights: true,
           ),
         );
 

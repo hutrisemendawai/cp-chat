@@ -20,7 +20,7 @@ class TokenStore {
     this.onStorageError,
   ]) : _storage = storage ??
             const FlutterSecureStorage(
-              aOptions: AndroidOptions(resetOnError: true),
+              aOptions: AndroidOptions(resetOnError: false),
             );
 
   /// Safe constructor for headless background isolates (FCM handlers).

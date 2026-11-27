@@ -26,6 +26,8 @@ import 'media/media_service.dart';
 import 'models/models.dart';
 import 'network/api_client.dart';
 import 'network/ws_client.dart';
+import 'notifications/background_push_handler.dart';
+import 'notifications/crash_reporter.dart';
 import 'notifications/fcm_service.dart';
 import 'notifications/local_notification_service.dart';
 import 'notifications/message_notifier.dart';
@@ -33,6 +35,7 @@ import 'notifications/notification_policy.dart';
 import 'notifications/push_registration.dart';
 import 'storage/app_dirs.dart';
 import 'storage/token_store.dart';
+import '../features/chat/conversation_metadata.dart';
 
 int _nextScopeEpoch = 0;
 
@@ -45,6 +48,12 @@ final tokenStoreProvider = Provider<TokenStore>((ref) => TokenStore());
 final appDirsProvider = Provider<AppDirs>((ref) => AppDirs());
 
 final dbGateProvider = Provider<DbGate>((ref) => DbGate());
+
+class BootstrapTracker {
+  Future<void>? inFlight;
+}
+
+final bootstrapTrackerProvider = Provider<BootstrapTracker>((ref) => BootstrapTracker());
 
 final accountRegistryProvider = Provider<AccountRegistry>((ref) {
   return AccountRegistry(ref.watch(tokenStoreProvider));
@@ -80,8 +89,13 @@ final appLoggerProvider = Provider<AppLogger>((ref) {
 /// Stable per-install id, resolved during bootstrap. Immutable thereafter, so
 /// the client that depends on it is rebuilt exactly once.
 class DeviceIdNotifier extends Notifier<String?> {
+  // ignore: prefer_initializing_formals
+  DeviceIdNotifier({String? initial}) : _initial = initial;
+
+  final String? _initial;
+
   @override
-  String? build() => null;
+  String? build() => _initial;
 
   void set(String deviceId) => state = deviceId;
 }
@@ -334,6 +348,7 @@ final chatSocketProvider = Provider<ChatSocket>((ref) {
               api: api,
               dao: dao,
             ),
+    activeConversationId: () => ref.read(activeConversationIdProvider),
     decrypt: (conversationId, clientMsgId, senderId, content, {required isGroup}) {
       return ref.read(e2eeManagerProvider).plaintextFor(
             clientMsgId,
@@ -344,6 +359,13 @@ final chatSocketProvider = Provider<ChatSocket>((ref) {
           );
     },
   );
+  // A hydrated / server-updated conversation refreshes any open ChatScreen's
+  // cached metadata (members, header name, presence) without a manual refresh.
+  final updateSubscription = socket.conversationUpdatedEvents.listen((id) {
+    if (scope != null && !scope.isOpen) return;
+    ref.invalidate(conversationMetadataProvider(id));
+  });
+  ref.onDispose(updateSubscription.cancel);
   // Live inbound messages raise a local notification; the sync/pagination paths
   // never call this, so catch-up never floods the tray.
   socket.onIncomingMessage = (message, {String? senderName}) {
@@ -433,6 +455,68 @@ class SessionLifecycle {
   ChatSocket? _activeSocket;
   E2eeManager? _activeE2ee;
   PushRegistration? _activePush;
+  AccountPaths? _activePaths;
+  String? _lastBgE2eeMarker;
+  Timer? _bgDisconnectTimer;
+  bool _disconnectedForBackground = false;
+
+  void onAppLifecycleChanged(AppLifecycleState state) {
+    if (!_running) return;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      _bgDisconnectTimer?.cancel();
+      _bgDisconnectTimer = Timer(const Duration(seconds: 4), () {
+        if (!_running) return;
+        final current = _ref.read(appLifecycleProvider);
+        if (current != AppLifecycleState.paused &&
+            current != AppLifecycleState.detached) {
+          return;
+        }
+        _disconnectedForBackground = true;
+        unawaited(_activeSocket?.disconnect());
+      });
+      return;
+    }
+    if (state == AppLifecycleState.resumed) {
+      _bgDisconnectTimer?.cancel();
+      _bgDisconnectTimer = null;
+      unawaited(_handleResume());
+    }
+  }
+
+  Future<void> _handleResume() async {
+    if (!_running) return;
+    final paths = _activePaths;
+    final e2ee = _activeE2ee;
+    if (paths != null && e2ee != null) {
+      final currentMarker = await BackgroundPushHandler.readBackgroundE2eeMarker(
+        paths.partitionDir,
+      );
+      if (currentMarker != null && currentMarker != _lastBgE2eeMarker) {
+        _lastBgE2eeMarker = currentMarker;
+        try {
+          await PartitionLock.withLock(
+            paths.partitionDir,
+            () => e2ee.reloadSessionsFromDisk(),
+            timeout: const Duration(seconds: 10),
+          );
+        } catch (error) {
+          debugPrint('Reloading E2EE sessions on resume failed: $error');
+        }
+      }
+      if (_ref.mounted) {
+        unawaited(
+          BackgroundPushHandler.drainDiagnostics(
+            paths.partitionDir,
+            _ref.read(appLoggerProvider),
+          ),
+        );
+      }
+    }
+    if (_running && _disconnectedForBackground) {
+      _disconnectedForBackground = false;
+      unawaited(_activeSocket?.connect());
+    }
+  }
 
   void _attachSocketReconnectListener(ChatSocket socket) {
     if (identical(_watchedSocket, socket) && _socketConnectionListener != null) {
@@ -509,7 +593,7 @@ class SessionLifecycle {
     //        isolate was mid-decrypt as the user opened the app, we wait for
     //        it to finish committing SQLite + `e2ee_sessions` before loading.
     Future<void> verifyAndBootstrap(AccountPaths? paths) async {
-      if (scope != null && db.filePath != null && paths != null) {
+      if (scope != null && db.isFileBacked && paths != null) {
         final accountStore = _ref.read(accountStoreProvider);
         if (accountStore != null) {
           try {
@@ -537,7 +621,7 @@ class SessionLifecycle {
     }
 
     AccountPaths? resolvedPaths;
-    if (scope != null && db.filePath != null) {
+    if (scope != null && db.isFileBacked) {
       try {
         resolvedPaths = await AccountPaths.resolve(
           scope.accountId,
@@ -547,17 +631,29 @@ class SessionLifecycle {
         debugPrint('AccountPaths.resolve failed: $error');
       }
     }
+    _activePaths = resolvedPaths;
 
     if (resolvedPaths != null) {
+      _lastBgE2eeMarker = await BackgroundPushHandler.readBackgroundE2eeMarker(
+        resolvedPaths.partitionDir,
+      );
       try {
         await PartitionLock.withLock(
           resolvedPaths.partitionDir,
           () => verifyAndBootstrap(resolvedPaths),
+          timeout: const Duration(seconds: 10),
         );
       } catch (error) {
-        debugPrint('PartitionLock acquire during startup failed: $error');
-        await verifyAndBootstrap(resolvedPaths);
+        logger.warn(
+          'partition',
+          'PartitionLock acquire during startup failed; skipping unlocked bootstrap',
+          meta: {'error': error.toString()},
+        );
+        return;
       }
+      unawaited(
+        BackgroundPushHandler.drainDiagnostics(resolvedPaths.partitionDir, logger),
+      );
     } else {
       await verifyAndBootstrap(null);
     }
@@ -573,7 +669,16 @@ class SessionLifecycle {
       await _maybeShowFreshGroupPrompt();
     }
 
-    // 5. Start push registration & ask notification permission.
+    // 5. If bootstrap (FcmService.initialize) is in flight, wait for it before
+    //    starting push registration so FcmService.isAvailable is already true.
+    final pendingBootstrap = _ref.read(bootstrapTrackerProvider).inFlight;
+    if (pendingBootstrap != null) {
+      try {
+        await pendingBootstrap.timeout(const Duration(seconds: 10));
+      } catch (_) {}
+      if (!_running || (scope != null && !scope.isOpen)) return;
+    }
+
     try {
       await push.start();
     } catch (error) {
@@ -619,6 +724,11 @@ class SessionLifecycle {
   }
 
   Future<void> _stop() async {
+    _bgDisconnectTimer?.cancel();
+    _bgDisconnectTimer = null;
+    _disconnectedForBackground = false;
+    _activePaths = null;
+    _lastBgE2eeMarker = null;
     _detachSocketReconnectListener();
     final starting = _starting;
     if (starting != null) {
@@ -687,38 +797,46 @@ final sessionRuntimeProvider =
 /// Resolves storage roots, resumes interrupted L2 wipes, migrates legacy
 /// single-DB installs, resolves the device id, and initializes notifications.
 final bootstrapProvider = FutureProvider<void>((ref) async {
-  final dirs = ref.watch(appDirsProvider);
-  await dirs.initialize();
-
-  final tokenStore = ref.watch(tokenStoreProvider);
-  final resolvedNoBackup = dirs.cachedNoBackupDir?.path;
-  if (resolvedNoBackup != null && resolvedNoBackup.isNotEmpty) {
-    await tokenStore.writeResolvedNoBackupRoot(resolvedNoBackup);
-  }
-
-  // Finish any crash-interrupted L2 partition deletions before opening DBs.
+  final tracker = ref.read(bootstrapTrackerProvider);
+  final completer = Completer<void>();
+  tracker.inFlight = completer.future;
   try {
-    await ref.read(accountWiperProvider).resumePendingWipes();
-  } catch (error) {
-    debugPrint('Pending wipe janitor failed: $error');
-  }
+    final dirs = ref.watch(appDirsProvider);
+    await dirs.initialize();
 
-  // Upgrade pre-partition installs safely and idempotently (§3.1).
-  try {
-    await ref.read(legacyMigrationProvider).runIfNeeded();
-  } catch (error) {
-    debugPrint('Legacy migration failed: $error');
-  }
+    final tokenStore = ref.watch(tokenStoreProvider);
+    final resolvedNoBackup = dirs.cachedNoBackupDir?.path;
+    if (resolvedNoBackup != null && resolvedNoBackup.isNotEmpty) {
+      await tokenStore.writeResolvedNoBackupRoot(resolvedNoBackup);
+    }
 
-  var deviceId = await tokenStore.readDeviceId();
-  if (deviceId == null) {
-    deviceId = const Uuid().v4();
-    await tokenStore.writeDeviceId(deviceId);
-  }
-  ref.read(deviceIdProvider.notifier).set(deviceId);
+    // Finish any crash-interrupted L2 partition deletions before opening DBs.
+    try {
+      await ref.read(accountWiperProvider).resumePendingWipes();
+    } catch (error) {
+      debugPrint('Pending wipe janitor failed: $error');
+    }
 
-  await FcmService.initialize(logger: ref.read(appLoggerProvider));
-  await ref.read(localNotificationServiceProvider).initialize();
+    // Upgrade pre-partition installs safely and idempotently (§3.1).
+    try {
+      await ref.read(legacyMigrationProvider).runIfNeeded();
+    } catch (error) {
+      debugPrint('Legacy migration failed: $error');
+    }
+
+    var deviceId = ref.read(deviceIdProvider) ?? await tokenStore.readDeviceId();
+    if (deviceId == null) {
+      deviceId = const Uuid().v4();
+      await tokenStore.writeDeviceId(deviceId);
+    }
+    ref.read(deviceIdProvider.notifier).set(deviceId);
+
+    await FcmService.initialize(logger: ref.read(appLoggerProvider));
+    await CrashReporter.initialize();
+    await ref.read(localNotificationServiceProvider).initialize();
+  } finally {
+    if (!completer.isCompleted) completer.complete();
+  }
 });
 
 /// Reads the persisted session from local storage without any network access.

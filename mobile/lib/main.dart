@@ -6,13 +6,14 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:uuid/uuid.dart';
 
 import 'core/models/models.dart';
 import 'core/notifications/background_push_handler.dart';
-import 'core/notifications/crash_reporter.dart';
 import 'core/notifications/fcm_service.dart';
 import 'core/notifications/local_notification_service.dart';
 import 'core/providers.dart';
+import 'core/storage/app_dirs.dart';
 import 'core/storage/token_store.dart';
 import 'core/theme/app_theme.dart';
 import 'features/auth/auth_screen.dart';
@@ -34,12 +35,32 @@ Future<void> main() async {
   // Registered before runApp so a push that arrives while the app is backgrounded
   // or swiped away is handled by the headless isolate, not silently dropped.
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-  // Install the crash handlers before the first frame so an early error is not
-  // lost. This is a no-op in debug builds.
-  await CrashReporter.initialize();
 
-  // Hydrate the persisted session from local storage before the first frame.
+  // Hydrate storage roots, device id, and persisted session before the first frame
+  // so AppDatabase.forAccountLazy resolves its canonical filePath immediately.
   final tokenStore = TokenStore();
+  final appDirs = AppDirs();
+  try {
+    await appDirs.initialize();
+    final resolvedNoBackup = appDirs.cachedNoBackupDir?.path;
+    if (resolvedNoBackup != null && resolvedNoBackup.isNotEmpty) {
+      await tokenStore.writeResolvedNoBackupRoot(resolvedNoBackup);
+    }
+  } catch (error) {
+    debugPrint('Initial AppDirs initialization failed: $error');
+  }
+
+  String? deviceId;
+  try {
+    deviceId = await tokenStore.readDeviceId();
+    if (deviceId == null) {
+      deviceId = const Uuid().v4();
+      await tokenStore.writeDeviceId(deviceId);
+    }
+  } catch (error) {
+    debugPrint('Initial deviceId resolution failed: $error');
+  }
+
   AuthState initialAuth;
   try {
     initialAuth = await hydrateAuthState(tokenStore);
@@ -52,6 +73,8 @@ Future<void> main() async {
     ProviderScope(
       overrides: [
         tokenStoreProvider.overrideWithValue(tokenStore),
+        appDirsProvider.overrideWithValue(appDirs),
+        deviceIdProvider.overrideWith(() => DeviceIdNotifier(initial: deviceId)),
         activeAccountUserIdProvider.overrideWith(
           () => ActiveAccountUserIdNotifier(initial: initialAuth.session?.user.id),
         ),
@@ -210,6 +233,8 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
   StreamSubscription<NotificationTapTarget>? _localTapSubscription;
   StreamSubscription<RemoteMessage>? _foregroundSubscription;
   ReceivePort? _bgFcmPort;
+  bool _bootstrapComplete = false;
+  final List<Map<String, dynamic>> _pendingBgFcm = [];
 
   @override
   void initState() {
@@ -244,16 +269,14 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
       final data = rawData is Map
           ? rawData.map((k, v) => MapEntry(k.toString(), v))
           : <String, dynamic>{};
-      unawaited(
-        _handleMainIsolateFcmData(data).then(
-          (_) {
-            if (replyPort is SendPort) replyPort.send(true);
-          },
-          onError: (_) {
-            if (replyPort is SendPort) replyPort.send(false);
-          },
-        ),
-      );
+      if (replyPort is SendPort) {
+        replyPort.send(true);
+      }
+      if (!_bootstrapComplete) {
+        _pendingBgFcm.add(data);
+        return;
+      }
+      unawaited(_handleMainIsolateFcmData(data));
     });
   }
 
@@ -261,6 +284,17 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
     IsolateNameServer.removePortNameMapping(kMainIsolateFcmPortName);
     _bgFcmPort?.close();
     _bgFcmPort = null;
+  }
+
+  Future<void> _drainPendingBgFcm() async {
+    while (_pendingBgFcm.isNotEmpty) {
+      final next = _pendingBgFcm.removeAt(0);
+      try {
+        await _handleMainIsolateFcmData(next);
+      } catch (error) {
+        debugPrint('Queued main-isolate FCM handling failed: $error');
+      }
+    }
   }
 
   Future<void> _handleMainIsolateFcmData(Map<String, dynamic> data) async {
@@ -280,6 +314,7 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     ref.read(appLifecycleProvider.notifier).set(state);
+    ref.read(sessionLifecycleProvider).onAppLifecycleChanged(state);
   }
 
   Future<void> _bootstrap() async {
@@ -295,8 +330,14 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
       debugPrint('Bootstrap failed: $error');
     }
 
+    _bootstrapComplete = true;
+    if (_pendingBgFcm.isNotEmpty) {
+      unawaited(_drainPendingBgFcm());
+    }
+
     if (ref.read(authControllerProvider).isAuthenticated) {
       unawaited(ref.read(sessionRuntimeProvider.notifier).start());
+      unawaited(ref.read(pushRegistrationProvider).ensureRegistered());
       unawaited(ref.read(authControllerProvider.notifier).validateSession());
     }
 

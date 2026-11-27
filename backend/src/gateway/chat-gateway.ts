@@ -38,7 +38,7 @@ const MAX_BUFFERED_BYTES = 1024 * 1024;
 // Kept short so a killed app's half-open socket is reaped (and its routing map
 // cleared) within one interval, which is what lets the next message fall
 // through to FCM instead of being swallowed by a stale connection.
-const HEARTBEAT_INTERVAL_MS = 20_000;
+const HEARTBEAT_INTERVAL_MS = 12_000;
 // A drained gateway reconnects clients with this code; the Flutter client
 // treats any close as a reconnect and backs off, so drains are seamless.
 const DRAIN_CLOSE_CODE = 1001;
@@ -231,7 +231,9 @@ export class ChatGateway {
     // Redis registry is being written.
     ws.on('pong', () => {
       const context = this.context.get(ws);
-      if (context) context.alive = true;
+      if (!context) return;
+      context.alive = true;
+      this.track(this.refreshAlive(context.userId, context.deviceId));
     });
     ws.on('message', (data) => {
       this.track(this.onFrame(ws, data.toString()));
@@ -299,8 +301,13 @@ export class ChatGateway {
     );
   }
 
+  private async refreshAlive(userId: string, deviceId: string): Promise<void> {
+    await this.registry.refresh(userId, deviceId);
+    await this.ctx.presence.touch(userId);
+  }
+
   private async sweep(): Promise<void> {
-    for (const [key, set] of this.sockets) {
+    for (const set of this.sockets.values()) {
       for (const ws of set) {
         const context = this.context.get(ws);
         if (!context) continue;
@@ -310,9 +317,6 @@ export class ChatGateway {
         }
         context.alive = false;
         ws.ping();
-        const [userId, deviceId] = key.split(':') as [string, string];
-        await this.registry.refresh(userId, deviceId);
-        await this.ctx.presence.touch(userId);
       }
     }
   }
@@ -470,6 +474,7 @@ export class ChatGateway {
     const sender = await this.ctx.users.findById(message.sender_id);
     const senderName = this.senderLabel(sender);
 
+    const isGroup = conversation?.type === 'group';
     const messageEvent = {
       type: 'message',
       conversation_id: message.conversation_id,
@@ -477,6 +482,11 @@ export class ChatGateway {
       seq: message.seq,
       sender_id: message.sender_id,
       sender_name: senderName,
+      // Additive display hints so a recipient that has never seen this
+      // conversation can render a provisional row without a REST round trip.
+      sender_avatar_url: sender?.avatar_url ?? null,
+      conversation_type: conversation?.type ?? 'direct',
+      conversation_name: isGroup ? (conversation?.name ?? null) : null,
       client_msg_id: message.client_msg_id,
       msg_type: message.type,
       content: message.content,
@@ -528,7 +538,19 @@ export class ChatGateway {
         .filter((memberId) => memberId !== send.sender_id)
         .map(async (memberId) => {
           await this.route(memberId, messageEvent);
-          await this.maybeNotify(memberId, message, conversation, senderName);
+          try {
+            await this.maybeNotify(memberId, message, conversation, senderName);
+          } catch (error) {
+            this.logger.warn(
+              {
+                err: error,
+                user_id: memberId,
+                conversation_id: message.conversation_id,
+                seq: message.seq,
+              },
+              'push dispatch failed; continuing fan-out',
+            );
+          }
         }),
     );
   }
@@ -609,11 +631,20 @@ export class ChatGateway {
     senderName: string,
   ): Promise<void> {
     if (!this.notifications.enabled) return;
-    // A recipient with any live socket receives the message in real time, so a
-    // push would only duplicate it. The check reads actual open sockets first
-    // and falls back to the registry for devices owned by other nodes.
-    if (await this.hasConnectedDevice(userId)) {
-      this.logger.debug({ user_id: userId }, 'push skipped: recipient has a live socket');
+
+    const tokens = await this.ctx.devices.tokensForUser(userId);
+    if (tokens.length === 0) {
+      this.logger.info({ user_id: userId }, 'push skipped: no registered device token');
+      return;
+    }
+
+    const connectedDeviceIds = await this.connectedDeviceIds(userId);
+    const offlineTokens = tokens.filter((token) => !connectedDeviceIds.has(token.device_id));
+    if (offlineTokens.length === 0) {
+      this.logger.debug(
+        { user_id: userId },
+        'push skipped: all registered devices have live sockets',
+      );
       return;
     }
 
@@ -623,12 +654,6 @@ export class ChatGateway {
     const recipient = await this.ctx.users.findById(userId);
     if (recipient?.status === 'dnd') {
       this.logger.debug({ user_id: userId }, 'push skipped: recipient is dnd');
-      return;
-    }
-
-    const tokens = await this.ctx.devices.tokensForUser(userId);
-    if (tokens.length === 0) {
-      this.logger.info({ user_id: userId }, 'push skipped: no registered device token');
       return;
     }
 
@@ -657,13 +682,24 @@ export class ChatGateway {
 
     const v2Fids: string[] = [];
     const v1Fids: string[] = [];
-    for (const token of tokens) {
+    for (const token of offlineTokens) {
       if ((token.push_version ?? 1) >= 2) {
         v2Fids.push(token.fcm_token);
       } else {
         v1Fids.push(token.fcm_token);
       }
     }
+
+    this.logger.info(
+      {
+        user_id: userId,
+        v2: v2Fids.length,
+        v1: v1Fids.length,
+        conversation_type: payload.conversationType,
+        seq: message.seq,
+      },
+      'dispatching FCM push',
+    );
 
     const [staleV2, staleV1] = await Promise.all([
       v2Fids.length > 0 ? this.notifications.notifyDataOnly(v2Fids, payload) : Promise.resolve([]),
@@ -674,18 +710,27 @@ export class ChatGateway {
   }
 
   /**
-   * Whether the user can receive a frame right now: a locally tracked open
-   * socket is authoritative, and anything connected to another replica is
-   * resolved through the registry. The registry keys carry a short TTL that the
-   * heartbeat keeps refreshed, so a socket whose app was closed without a clean
-   * close frame stops counting as connected within one interval and the next
-   * message falls through to FCM.
+   * Collects the device ids of `userId` that currently have a live socket,
+   * combining locally tracked open sockets with the Redis routing registry for
+   * devices connected to other replicas.
    */
-  private async hasConnectedDevice(userId: string): Promise<boolean> {
-    for (const ws of this.socketsFor(userId)) {
-      if (ws.readyState === WebSocket.OPEN) return true;
+  private async connectedDeviceIds(userId: string): Promise<Set<string>> {
+    const connected = new Set<string>();
+    const prefix = `${userId}:`;
+    for (const [key, set] of this.sockets) {
+      if (!key.startsWith(prefix)) continue;
+      for (const ws of set) {
+        if (ws.readyState === WebSocket.OPEN) {
+          connected.add(key.slice(prefix.length));
+          break;
+        }
+      }
     }
-    return (await this.registry.liveDevices(userId)).length > 0;
+    const remote = await this.registry.liveDevices(userId);
+    for (const deviceId of remote) {
+      connected.add(deviceId);
+    }
+    return connected;
   }
 
   private async handleAck(

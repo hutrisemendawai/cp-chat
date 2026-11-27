@@ -27,10 +27,30 @@ class _Api extends ApiClient {
   int pageSize = 2;
   Completer<void>? conversationsGate;
 
+  /// Conversation summaries served by the single conversation endpoint.
+  final Map<String, Conversation> fetched = {};
+  final List<String> conversationRequests = [];
+  Completer<void>? conversationGate;
+  Object? conversationError;
+
   @override
   Future<List<Conversation>> conversations({int limit = 50}) async {
     await conversationsGate?.future;
     return summaries;
+  }
+
+  @override
+  Future<Conversation> conversation(String id) async {
+    conversationRequests.add(id);
+    final gate = conversationGate;
+    if (gate != null) await gate.future;
+    final error = conversationError;
+    if (error != null) throw error;
+    final summary = fetched[id];
+    if (summary == null) {
+      throw ApiException('conversation_not_found', 'not found', statusCode: 404);
+    }
+    return summary;
   }
 
   @override
@@ -336,4 +356,146 @@ void main() {
       );
     },
   );
+
+  group('unknown-conversation hydration', () {
+    Map<String, dynamic> messageFrame(int seq, {String sender = 'alice'}) => {
+      'type': 'message',
+      'message_id': 'srv-$seq',
+      'conversation_id': 'new-chat',
+      'seq': seq,
+      'sender_id': sender,
+      'sender_name': 'Alice',
+      'sender_avatar_url': 'alice/avatar.jpg',
+      'conversation_type': 'direct',
+      'conversation_name': null,
+      'client_msg_id': 'm$seq',
+      'msg_type': 'text',
+      'content': 'e2ee:v1:$seq',
+      'created_at': DateTime.utc(2026, 1, 1, 0, 0, seq).toIso8601String(),
+    };
+
+    test('a burst of live frames costs exactly one hydration request', () async {
+      api.conversationGate = Completer<void>();
+      api.fetched['new-chat'] = conversation(
+        'new-chat',
+        selfId: 'self',
+        peerId: 'alice',
+        peerName: 'Alice',
+        peerNickname: 'Al',
+        peerAvatarKey: 'alice/avatar.jpg',
+        lastSeq: 5,
+        unreadCount: 5,
+        // The authoritative summary echoes the newest body as ciphertext; the
+        // already-decrypted local row resolves it.
+        lastMessage: message(
+          'm5',
+          conversationId: 'new-chat',
+          seq: 5,
+          senderId: 'alice',
+          content: 'e2ee:v1:5',
+        ),
+      );
+
+      // Deliver seq 1..5 rapidly; the provisional row must appear after seq 1,
+      // well before the gated HTTP call resolves.
+      final deliveries = [
+        for (var seq = 1; seq <= 5; seq += 1)
+          socket.handleServerFrameForTesting(messageFrame(seq)),
+      ];
+      await deliveries[0];
+      final provisional = await dao.conversation('new-chat');
+      expect(provisional, isNotNull, reason: 'provisional row appears immediately');
+      expect(provisional!.peerName, 'Alice');
+      expect(provisional.lastSeq, 1);
+
+      await Future.wait(deliveries);
+      api.conversationGate!.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(api.conversationRequests, ['new-chat'], reason: 'single-flight dedupe');
+
+      final hydrated = (await dao.conversation('new-chat'))!;
+      expect(hydrated.peerNickname, 'Al');
+      expect(hydrated.peerAvatarUrl, 'alice/avatar.jpg');
+      expect(hydrated.lastSeq, 5);
+      expect(hydrated.unreadCount, 5);
+      expect(hydrated.lastMessagePreview, 'plain 5');
+      expect((await dao.watchMessages('new-chat').first), hasLength(5));
+    });
+
+    test('a transient hydration failure retries on the next message', () async {
+      api.conversationError = Exception('offline');
+
+      await socket.handleServerFrameForTesting(messageFrame(1));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect((await dao.conversation('new-chat'))!.lastMessagePreview, 'plain 1');
+
+      api.conversationError = null;
+      api.fetched['new-chat'] = conversation(
+        'new-chat',
+        selfId: 'self',
+        peerId: 'alice',
+        peerName: 'Alice',
+        peerNickname: 'Al',
+        lastSeq: 2,
+      );
+      await socket.handleServerFrameForTesting(messageFrame(2));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(api.conversationRequests, hasLength(2));
+      expect((await dao.conversation('new-chat'))!.peerNickname, 'Al');
+    });
+
+    test('a 403/404 hydration deletes the conversation locally', () async {
+      api.fetched.remove('new-chat');
+      await socket.handleServerFrameForTesting(messageFrame(1));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(await dao.conversation('new-chat'), isNull);
+    });
+
+    test('conversation_updated emits on the update stream', () async {
+      final emitted = <String>[];
+      final sub = socket.conversationUpdatedEvents.listen(emitted.add);
+      addTearDown(sub.cancel);
+
+      api.fetched['new-chat'] = conversation(
+        'new-chat',
+        selfId: 'self',
+        peerId: 'alice',
+        peerName: 'Alice',
+        lastSeq: 0,
+      );
+      await socket.handleServerFrameForTesting({
+        'type': 'conversation_updated',
+        'conversation_id': 'new-chat',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(emitted, ['new-chat']);
+      expect((await dao.conversation('new-chat'))!.peerName, 'Alice');
+    });
+
+    test('a late hydration response after disconnect does not write', () async {
+      api.conversationGate = Completer<void>();
+      api.fetched['new-chat'] = conversation(
+        'new-chat',
+        selfId: 'self',
+        peerId: 'alice',
+        peerName: 'Alice',
+        lastSeq: 1,
+      );
+      final delivery = socket.handleServerFrameForTesting(messageFrame(1));
+      await Future<void>.delayed(Duration.zero);
+
+      await socket.disconnect();
+      api.conversationGate!.complete();
+      await delivery;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // The provisional row was persisted before disconnect; the late
+      // authoritative summary is dropped (no peer fields applied).
+      final row = await dao.conversation('new-chat');
+      expect(row?.peerNickname, isNull);
+    });
+  });
 }

@@ -619,4 +619,162 @@ void main() {
     });
   });
 
+  group('first-contact provisional conversation', () {
+    test('atomically creates the conversation row for an unknown chat', () async {
+      await dao.upsertServerMessage(
+        message(
+          'm1',
+          conversationId: 'new-chat',
+          seq: 1,
+          senderId: 'alice',
+          content: 'hello from a stranger',
+        ),
+        ensureConversation: const ProvisionalConversationHint(
+          peerId: 'alice',
+          peerName: 'Alice',
+          peerAvatarUrl: 'alice/avatar.jpg',
+        ),
+        incrementUnread: true,
+      );
+
+      final rows = await dao.watchConversations().first;
+      expect(rows, hasLength(1), reason: 'the chat list must emit immediately');
+      final row = rows.single;
+      expect(row.id, 'new-chat');
+      expect(row.type, 'direct');
+      expect(row.peerId, 'alice');
+      expect(row.peerName, 'Alice');
+      expect(row.peerAvatarUrl, 'alice/avatar.jpg');
+      expect(row.lastSeq, 1);
+      expect(row.lastMessagePreview, 'hello from a stranger');
+      expect(row.unreadCount, 1);
+
+      // The message is not orphaned.
+      expect((await dao.watchMessages('new-chat').first).single.content,
+          'hello from a stranger');
+    });
+
+    test('a group hint caches the group name and no peer identity', () async {
+      await dao.upsertServerMessage(
+        message('g1', conversationId: 'group-1', seq: 1, senderId: 'alice', content: 'hi team'),
+        ensureConversation: const ProvisionalConversationHint(
+          type: 'group',
+          conversationName: 'Weekend Squad',
+          peerId: 'alice',
+          peerName: 'Alice',
+        ),
+      );
+
+      final row = (await dao.conversation('group-1'))!;
+      expect(row.type, 'group');
+      expect(row.name, 'Weekend Squad');
+      expect(row.peerId, isNull);
+      expect(row.peerName, isNull);
+    });
+
+    test('increments unread per new inbound message but never on replay', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me', lastSeq: 0));
+
+      for (final seq in [1, 2, 3]) {
+        await dao.upsertServerMessage(
+          message('m$seq', seq: seq, senderId: 'them', content: 'hi $seq'),
+          incrementUnread: true,
+        );
+      }
+      expect((await dao.conversation('conv-1'))!.unreadCount, 3);
+
+      // A sync replay of an already-stored row must not double-count.
+      await dao.upsertServerMessage(
+        message('m3', seq: 3, senderId: 'them', content: 'hi 3'),
+        incrementUnread: true,
+      );
+      expect((await dao.conversation('conv-1'))!.unreadCount, 3);
+    });
+
+    test('a message at or below the read cursor does not bump unread', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      await dao.setReadCursor('conv-1', 5);
+
+      await dao.upsertServerMessage(
+        message('m6', seq: 6, senderId: 'them', content: 'new'),
+        incrementUnread: true,
+      );
+      expect((await dao.conversation('conv-1'))!.unreadCount, 1);
+
+      await dao.upsertServerMessage(
+        message('m2', seq: 2, senderId: 'them', content: 'old'),
+        incrementUnread: true,
+      );
+      expect(
+        (await dao.conversation('conv-1'))!.unreadCount,
+        1,
+        reason: 'a message below the read cursor was already read',
+      );
+    });
+
+    test('a stale REST summary preserves live unread and preview', () async {
+      await dao.upsertConversation(conversation('conv-1', selfId: 'me'));
+      await dao.upsertServerMessage(
+        message('m1', seq: 1, senderId: 'them', content: 'Hello 1'),
+        incrementUnread: true,
+      );
+      await dao.upsertServerMessage(
+        message('m2', seq: 2, senderId: 'them', content: 'Hello 2'),
+        incrementUnread: true,
+      );
+
+      var row = (await dao.conversation('conv-1'))!;
+      expect(row.lastSeq, 2);
+      expect(row.unreadCount, 2);
+
+      // The REST summary was captured at creation (seq 0, unread 0) but
+      // resolves after the live frames were persisted.
+      await dao.upsertConversation(
+        conversation('conv-1', selfId: 'me', peerName: 'Alice', lastSeq: 0, unreadCount: 0),
+        selfId: 'me',
+      );
+
+      row = (await dao.conversation('conv-1'))!;
+      expect(row.peerName, 'Alice', reason: 'authoritative peer metadata upgrades');
+      expect(row.lastSeq, 2, reason: 'newer local seq is kept');
+      expect(row.lastMessagePreview, 'Hello 2', reason: 'decrypted preview is kept');
+      expect(row.unreadCount, 2, reason: 'live unread count is never clobbered');
+    });
+
+    test('an authoritative summary overwrites provisional peer fields', () async {
+      await dao.upsertServerMessage(
+        message('m1', conversationId: 'new-chat', seq: 1, senderId: 'alice', content: 'hi'),
+        ensureConversation: const ProvisionalConversationHint(
+          peerId: 'alice',
+          peerName: 'Alice (Ali)',
+        ),
+        incrementUnread: true,
+      );
+
+      await dao.upsertConversation(
+        conversation(
+          'new-chat',
+          selfId: 'me',
+          peerId: 'alice',
+          peerName: 'Alice',
+          peerNickname: 'Ali',
+          lastSeq: 1,
+          unreadCount: 1,
+          // The authoritative summary carries the same message back as
+          // ciphertext; the already-decrypted preview must win.
+          lastMessage: message('m1', conversationId: 'new-chat', seq: 1,
+              senderId: 'alice', content: 'e2ee:v1:{"ct":"secret"}'),
+        ),
+        selfId: 'me',
+      );
+
+      final row = (await dao.conversation('new-chat'))!;
+      expect(row.peerName, 'Alice');
+      expect(row.peerNickname, 'Ali');
+      expect(row.lastSeq, 1);
+      expect(row.lastMessagePreview, 'hi', reason: 'the decrypted preview survives');
+      expect(row.unreadCount, 1);
+    });
+  });
+
 }

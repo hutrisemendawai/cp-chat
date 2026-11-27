@@ -240,9 +240,9 @@ services:
       SCYLLA_CONTACT_POINTS: ${SCYLLA_CONTACT_POINTS:-scylla:9042}
       OTEL_ENABLED: ${OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
-      # A rolling deploy sends SIGTERM; Docker's default 10 s would cut the
-      # drain short, so allow the configured budget plus a margin.
-      stop_grace_period: 60s
+    # A rolling deploy sends SIGTERM; Docker's default 10 s would cut the
+    # drain short, so allow the configured budget plus a margin.
+    stop_grace_period: 60s
     ports:
       - "${GATEWAY_PUBLISHED_PORT:-8081}:8081"
     healthcheck:

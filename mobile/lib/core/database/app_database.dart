@@ -113,13 +113,19 @@ class Drafts extends Table {
   Set<Column<Object>> get primaryKey => {conversationId};
 }
 
+class _FilePathRef {
+  _FilePathRef([this.path]);
+  String? path;
+}
+
 @DriftDatabase(
   tables: [LocalConversations, LocalMessages, OutboxEntries, AccountMeta, Drafts],
 )
 class AppDatabase extends _$AppDatabase {
   /// Opens a file-backed database for a single account partition.
   AppDatabase.forFile(File file)
-      : filePath = file.path,
+      : _pathRef = _FilePathRef(file.path),
+        isFileBacked = true,
         super(
           LazyDatabase(() async {
             await file.parent.create(recursive: true);
@@ -132,30 +138,56 @@ class AppDatabase extends _$AppDatabase {
 
   /// Opens an account database lazily after resolving [AppDirs] and awaiting
   /// any pending close of the same file in [DbGate] (§3.2).
-  AppDatabase.forAccountLazy({
+  factory AppDatabase.forAccountLazy({
     required String accountId,
     required AppDirs dirs,
     required DbGate gate,
-  })  : filePath = dirs.cachedNoBackupDir == null
-            ? null
-            : AccountPaths(
-                accountId: accountId,
-                noBackupRoot: dirs.cachedNoBackupDir!,
-                cacheRoot: dirs.cachedCacheDir ?? dirs.cachedNoBackupDir!,
-              ).dbFile.path,
+  }) {
+    final initialPath = dirs.cachedNoBackupDir == null
+        ? null
+        : AccountPaths(
+            accountId: accountId,
+            noBackupRoot: dirs.cachedNoBackupDir!,
+            cacheRoot: dirs.cachedCacheDir ?? dirs.cachedNoBackupDir!,
+          ).dbFile.path;
+    final pathRef = _FilePathRef(initialPath);
+    return AppDatabase._forAccountLazy(
+      accountId: accountId,
+      dirs: dirs,
+      gate: gate,
+      pathRef: pathRef,
+    );
+  }
+
+  AppDatabase._forAccountLazy({
+    required String accountId,
+    required AppDirs dirs,
+    required DbGate gate,
+    required _FilePathRef pathRef,
+  })  : _pathRef = pathRef,
+        isFileBacked = true,
         super(
           LazyDatabase(() async {
             final paths = await AccountPaths.resolve(accountId, dirs);
+            pathRef.path = paths.dbFile.path;
             await gate.waitFor(paths.dbFile.path);
             await paths.partitionDir.create(recursive: true);
             return NativeDatabase(paths.dbFile);
           }),
         );
 
-  AppDatabase.forTesting(super.executor, {this.filePath});
+  AppDatabase.forTesting(super.executor, {String? filePath})
+      : _pathRef = _FilePathRef(filePath),
+        isFileBacked = filePath != null;
 
-  /// Canonical file path for [DbGate] serialisation, or `null` for in-memory DBs.
-  final String? filePath;
+  final _FilePathRef _pathRef;
+
+  /// Whether this database is backed by a file partition (vs in-memory).
+  final bool isFileBacked;
+
+  /// Canonical file path for [DbGate] serialisation, or `null` for in-memory DBs
+  /// (or before a lazy file-backed DB has resolved its path).
+  String? get filePath => _pathRef.path;
 
   bool _closed = false;
   bool get isClosed => _closed;

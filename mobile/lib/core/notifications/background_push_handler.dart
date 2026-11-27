@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:ui' show IsolateNameServer;
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
 
 import '../account/account_id.dart';
 import '../account/account_paths.dart';
@@ -17,6 +20,7 @@ import '../crypto/e2ee_manager.dart';
 import '../crypto/e2ee_service.dart';
 import '../database/app_database.dart';
 import '../database/chat_dao.dart';
+import '../logging/app_logger.dart';
 import '../models/models.dart';
 import '../network/api_client.dart';
 import '../storage/app_dirs.dart';
@@ -44,6 +48,21 @@ enum BackgroundPushOutcome {
   shownDecrypted,
   shownPlaintext,
   shownFallback,
+}
+
+/// Non-secret diagnostic reason recorded when a background push falls back to
+/// a generic placeholder instead of decrypted text.
+enum BackgroundFallbackReason {
+  layoutUnmigrated,
+  noBackupDirUnavailable,
+  dbMissing,
+  lockTimeout,
+  noLocalKeys,
+  decryptFailed,
+  syncFailed,
+  syncGapTooLarge,
+  syncDiscontinuous,
+  staleSeq,
 }
 
 /// Parsed fields of a `push_schema: "2"` (or legacy data-only) FCM payload.
@@ -147,10 +166,11 @@ class BackgroundPushHandler {
     Future<MessageNotificationSink> Function()? notificationSinkFactory,
     E2eeService Function()? e2eeServiceFactory,
     SendPort? Function(String name)? portLookup,
-    this.mainIsolateHandoffTimeout = const Duration(seconds: 5),
+    this.mainIsolateHandoffTimeout = const Duration(seconds: 2),
     this.lockTimeout = const Duration(seconds: 5),
-    this.maxSyncPages = 2,
-    this.syncPageLimit = 50,
+    this.maxSyncPages = 3,
+    this.syncPageLimit = 200,
+    this.syncBudget = const Duration(seconds: 12),
   })  : _tokenStoreFactory = tokenStoreFactory ?? TokenStore.forBackground,
         _appDirsFactory = appDirsFactory ?? AppDirs.new,
         _apiClientFactory = apiClientFactory ?? _defaultApiClient,
@@ -160,6 +180,10 @@ class BackgroundPushHandler {
         _portLookup = portLookup ?? IsolateNameServer.lookupPortByName;
 
   static final BackgroundPushHandler shared = BackgroundPushHandler();
+
+  static const String diagFileName = 'bg_push_diag.jsonl';
+  static const String bgE2eeMarkerFileName = '.bg_e2ee_ts';
+  static const int maxDiagLines = 50;
 
   final TokenStore Function() _tokenStoreFactory;
   final AppDirs Function() _appDirsFactory;
@@ -171,6 +195,7 @@ class BackgroundPushHandler {
   final Duration lockTimeout;
   final int maxSyncPages;
   final int syncPageLimit;
+  final Duration syncBudget;
 
   /// In-isolate FIFO queue so rapid back-to-back FCM pushes execute strictly
   /// one at a time.
@@ -180,9 +205,109 @@ class BackgroundPushHandler {
       ApiClient(
         store,
         deviceId: deviceId,
+        clearTokensOnRefreshFailure: false,
         connectTimeout: const Duration(seconds: 5),
         receiveTimeout: const Duration(seconds: 8),
       );
+
+  /// Reads the marker timestamp written whenever the background isolate
+  /// commits updated E2EE ratchet sessions.
+  static Future<String?> readBackgroundE2eeMarker(Directory partitionDir) async {
+    try {
+      final file = File(p.join(partitionDir.path, bgE2eeMarkerFileName));
+      if (!await file.exists()) return null;
+      final value = (await file.readAsString()).trim();
+      return value.isEmpty ? null : value;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> _writeBackgroundE2eeMarker(Directory partitionDir) async {
+    try {
+      final file = File(p.join(partitionDir.path, bgE2eeMarkerFileName));
+      await file.writeAsString(
+        '${DateTime.now().toUtc().microsecondsSinceEpoch}',
+        flush: true,
+      );
+    } catch (_) {}
+  }
+
+  /// Drains bounded non-secret background push diagnostic entries recorded
+  /// while the app was closed and forwards them through [logger].
+  static Future<void> drainDiagnostics(
+    Directory partitionDir,
+    AppLogger logger,
+  ) async {
+    final file = File(p.join(partitionDir.path, diagFileName));
+    try {
+      if (!await file.exists()) return;
+      final lines = await file.readAsLines();
+      await file.delete();
+      for (final raw in lines) {
+        final trimmed = raw.trim();
+        if (trimmed.isEmpty) continue;
+        try {
+          final decoded = jsonDecode(trimmed);
+          if (decoded is Map<String, dynamic>) {
+            final reason = decoded['fallback_reason']?.toString() ?? 'unknown';
+            logger.warn(
+              'fcm_bg_diag',
+              'background push fallback: $reason',
+              meta: decoded.map((k, v) => MapEntry(k, v)),
+            );
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  static Future<void> _recordDiagnostic(
+    Directory? partitionDir, {
+    required ParsedFcmMessage parsed,
+    required BackgroundPushOutcome outcome,
+    BackgroundFallbackReason? fallbackReason,
+    String? decryptReason,
+  }) async {
+    if (partitionDir == null) return;
+    try {
+      if (!await partitionDir.exists()) return;
+      final file = File(p.join(partitionDir.path, diagFileName));
+      final entry = jsonEncode(<String, Object?>{
+        'ts': DateTime.now().toUtc().toIso8601String(),
+        'outcome': outcome.name,
+        if (fallbackReason != null) 'fallback_reason': fallbackReason.name,
+        if (decryptReason != null && decryptReason.isNotEmpty)
+          'decrypt_reason': decryptReason,
+        'conversation_id': parsed.conversationId,
+        if (parsed.seq != null) 'seq': parsed.seq,
+        if (parsed.pushSchema != null) 'push_schema': parsed.pushSchema,
+        'content_omitted': parsed.contentOmitted,
+      });
+      List<String> lines = [];
+      if (await file.exists()) {
+        lines = (await file.readAsLines())
+            .where((l) => l.trim().isNotEmpty)
+            .toList();
+      }
+      lines.add(entry);
+      if (lines.length > maxDiagLines) {
+        lines = lines.sublist(lines.length - maxDiagLines);
+      }
+      await file.writeAsString('${lines.join('\n')}\n', flush: true);
+    } catch (_) {}
+  }
+
+  static String? _extractDecryptReason(AppLogger bgLogger) {
+    for (var i = bgLogger.entries.length - 1; i >= 0; i -= 1) {
+      final entry = bgLogger.entries[i];
+      if (entry.tag == 'e2ee') {
+        final reason = entry.meta?['reason']?.toString();
+        if (reason != null && reason.isNotEmpty) return reason;
+      }
+    }
+    return null;
+  }
 
   static Future<MessageNotificationSink> _defaultNotificationSink() async {
     final service = LocalNotificationService();
@@ -273,7 +398,10 @@ class BackgroundPushHandler {
     }
 
     final layout = await tokenStore.readValue(LegacyMigration.layoutKey);
-    if (layout != LegacyMigration.layoutVersion) {
+    final hasExplicitOldLayout = layout != null &&
+        layout.isNotEmpty &&
+        layout != LegacyMigration.layoutVersion;
+    if (hasExplicitOldLayout) {
       await _showNotification(
         parsed: parsed,
         accountId: activeAccountId,
@@ -283,6 +411,7 @@ class BackgroundPushHandler {
       );
       return BackgroundPushOutcome.shownFallback;
     }
+    final layoutUnset = layout == null || layout.isEmpty;
 
     // 5. Resolve canonical noBackupDir strictly (never split the DB).
     final dirs = _appDirsFactory();
@@ -304,6 +433,14 @@ class BackgroundPushHandler {
       cacheRoot: noBackupRoot,
     );
     if (!await paths.dbFile.exists()) {
+      await _recordDiagnostic(
+        paths.partitionDir,
+        parsed: parsed,
+        outcome: BackgroundPushOutcome.shownFallback,
+        fallbackReason: layoutUnset
+            ? BackgroundFallbackReason.layoutUnmigrated
+            : BackgroundFallbackReason.dbMissing,
+      );
       await _showNotification(
         parsed: parsed,
         accountId: activeAccountId,
@@ -314,8 +451,9 @@ class BackgroundPushHandler {
       return BackgroundPushOutcome.shownFallback;
     }
 
-    // 6. Acquire exclusive cross-isolate partition lock, verify integrity,
-    //    decrypt & persist, then close DB and release lock before notifying.
+    // 6. Phase 1 under `.partition.lock`: verify integrity, handle Case 1
+    //    inline or Case 3 stale lookups, or return a `_SyncPlan` for Case 2 so
+    //    network `/sync` runs WITHOUT holding `.partition.lock`.
     _PartitionResult result;
     try {
       result = await PartitionLock.withLock<_PartitionResult>(
@@ -331,6 +469,12 @@ class BackgroundPushHandler {
       );
     } catch (error) {
       debugPrint('BackgroundPushHandler partition lock/processing failed: $error');
+      await _recordDiagnostic(
+        paths.partitionDir,
+        parsed: parsed,
+        outcome: BackgroundPushOutcome.shownFallback,
+        fallbackReason: BackgroundFallbackReason.lockTimeout,
+      );
       await _showNotification(
         parsed: parsed,
         accountId: activeAccountId,
@@ -341,8 +485,60 @@ class BackgroundPushHandler {
       return BackgroundPushOutcome.shownFallback;
     }
 
+    // Case 2: network `/sync` executes OUTSIDE `.partition.lock`, then
+    // re-acquires `.partition.lock` briefly to decrypt and commit contiguously.
+    if (result.syncPlan != null) {
+      final plan = result.syncPlan!;
+      final fetched = await _fetchSyncPages(
+        parsed: parsed,
+        plan: plan,
+        tokenStore: tokenStore,
+      );
+      try {
+        result = await PartitionLock.withLock<_PartitionResult>(
+          paths.partitionDir,
+          () => _applySyncedMessagesUnderLock(
+            parsed: parsed,
+            plan: plan,
+            fetched: fetched,
+            paths: paths,
+            tokenStore: tokenStore,
+            userId: userId,
+            activeAccountId: activeAccountId!,
+          ),
+          timeout: lockTimeout,
+        );
+      } catch (error) {
+        debugPrint('BackgroundPushHandler sync apply failed: $error');
+        await _recordDiagnostic(
+          paths.partitionDir,
+          parsed: parsed,
+          outcome: BackgroundPushOutcome.shownFallback,
+          fallbackReason: BackgroundFallbackReason.lockTimeout,
+        );
+        await _showNotification(
+          parsed: parsed,
+          accountId: activeAccountId,
+          isGroup: plan.isGroup,
+          title: plan.title,
+          displayContent: _fallbackDisplayContent(parsed),
+        );
+        return BackgroundPushOutcome.shownFallback;
+      }
+    }
+
     if (result.abortOutcome != null) {
       return result.abortOutcome!;
+    }
+
+    if (result.outcome == BackgroundPushOutcome.shownFallback) {
+      await _recordDiagnostic(
+        paths.partitionDir,
+        parsed: parsed,
+        outcome: result.outcome,
+        fallbackReason: result.fallbackReason,
+        decryptReason: result.decryptReason,
+      );
     }
 
     await _showNotification(
@@ -401,6 +597,22 @@ class BackgroundPushHandler {
 
       final dao = ChatDao(db);
       final conv = await dao.conversation(parsed.conversationId);
+      // A terminated app may receive its very first message from a non-friend:
+      // persist a provisional conversation row atomically with the message so
+      // reopening the Chats tab already shows the chat + unread badge offline.
+      final isFromOther = parsed.senderId == null || parsed.senderId != userId;
+      final ProvisionalConversationHint? hint = conv == null
+          ? ProvisionalConversationHint(
+              type: parsed.isGroup ? 'group' : 'direct',
+              conversationName: parsed.isGroup
+                  ? (parsed.conversationName.trim().isEmpty
+                      ? null
+                      : parsed.conversationName.trim())
+                  : null,
+              peerId: isFromOther ? parsed.senderId : null,
+              peerName: isFromOther ? parsed.senderName : null,
+            )
+          : null;
 
       if (parsed.seq != null && conv != null && parsed.seq! <= conv.clearedSeq) {
         return const _PartitionResult.abort(
@@ -423,11 +635,16 @@ class BackgroundPushHandler {
       final deviceId = await tokenStore.readDeviceId();
 
       // Case 1: Fast path — contiguous inline payload (zero network round trip).
+      final needsCase1Decrypt = !isGroup &&
+          parsed.msgType == 'text' &&
+          parsed.content != null &&
+          isEncryptedContent(parsed.content!);
       if (parsed.seq != null &&
           parsed.seq! == cursor + 1 &&
           !parsed.contentOmitted &&
           parsed.content != null &&
-          parsed.clientMsgId != null) {
+          parsed.clientMsgId != null &&
+          (!needsCase1Decrypt || parsed.senderId != null)) {
         final rawMessage = Message(
           id: parsed.messageId ?? parsed.clientMsgId!,
           conversationId: parsed.conversationId,
@@ -439,14 +656,14 @@ class BackgroundPushHandler {
           createdAt: parsed.createdAt,
         );
 
-        if (!isGroup &&
-            parsed.msgType == 'text' &&
-            isEncryptedContent(parsed.content!)) {
+        if (needsCase1Decrypt) {
+          final bgLogger = AppLogger();
           final e2ee = E2eeManager(
             tokenStore: tokenStore,
             accountStore: accountStore,
             api: _apiClientFactory(tokenStore, deviceId),
             service: _e2eeServiceFactory(),
+            logger: bgLogger,
           );
           final loaded = await e2ee.loadExistingWithoutBootstrap();
           if (!loaded) {
@@ -455,6 +672,7 @@ class BackgroundPushHandler {
               displayContent: undecryptableContent,
               isGroup: false,
               outcome: BackgroundPushOutcome.shownFallback,
+              fallbackReason: BackgroundFallbackReason.noLocalKeys,
             );
           }
 
@@ -481,9 +699,15 @@ class BackgroundPushHandler {
               createdAt: rawMessage.createdAt,
             );
             // Crash-safe write order: commit SQLite FIRST, Keystore SECOND.
-            await dao.upsertServerMessage(decryptedMsg, status: 'sent');
+            await dao.upsertServerMessage(
+              decryptedMsg,
+              status: 'sent',
+              ensureConversation: hint,
+              incrementUnread: isFromOther,
+            );
             try {
               await e2ee.commitSessions();
+              await _writeBackgroundE2eeMarker(paths.partitionDir);
             } catch (error) {
               debugPrint(
                 'BackgroundPushHandler session commit failed after DB write: $error',
@@ -503,11 +727,18 @@ class BackgroundPushHandler {
             displayContent: undecryptableContent,
             isGroup: false,
             outcome: BackgroundPushOutcome.shownFallback,
+            fallbackReason: BackgroundFallbackReason.decryptFailed,
+            decryptReason: _extractDecryptReason(bgLogger),
           );
         }
 
         // Group text, plaintext, or media (no symmetric ratchet involved).
-        await dao.upsertServerMessage(rawMessage, status: 'sent');
+        await dao.upsertServerMessage(
+          rawMessage,
+          status: 'sent',
+          ensureConversation: hint,
+          incrementUnread: isFromOther,
+        );
         return _PartitionResult.show(
           title: title,
           displayContent: rawMessage.content,
@@ -516,216 +747,349 @@ class BackgroundPushHandler {
         );
       }
 
-      // Case 2: Sequence gap (seq > cursor + 1) or oversized payload
-      // (`content_omitted: "true"`): fetch missing range via authenticated
-      // `/sync` and decrypt/persist strictly in ascending seq order.
+      // Case 2: Sequence gap (seq > cursor + 1), oversized payload
+      // (`content_omitted: "true"`), or missing senderId on encrypted payload:
+      // release `.partition.lock` and fetch via `/sync` before re-acquiring.
       if (parsed.seq != null &&
           (parsed.seq! > cursor + 1 ||
               parsed.contentOmitted ||
-              parsed.content == null)) {
-        return await _syncGapOrOversized(
-          parsed: parsed,
-          conv: conv,
-          dao: dao,
-          tokenStore: tokenStore,
-          accountStore: accountStore,
-          deviceId: deviceId,
-          isGroup: isGroup,
-          title: title,
-          initialCursor: cursor,
+              parsed.content == null ||
+              (needsCase1Decrypt && parsed.senderId == null))) {
+        return _PartitionResult.needsSync(
+          _SyncPlan(
+            initialCursor: cursor,
+            isGroup: isGroup,
+            title: title,
+            deviceId: deviceId,
+            hint: hint,
+            isFromOther: isFromOther,
+          ),
         );
       }
 
       // Case 3: Stale seq (<= cursor) that was not found by clientMsgId or
-      // legacy data-only payload without seq: show safe fallback without
-      // mutating the ratchet.
+      // legacy data-only payload without seq. Check `(conversationId, seq)`
+      // before falling back so an already-readable row suppresses duplicates.
+      if (parsed.seq != null) {
+        final existingBySeq =
+            await dao.messageBySeq(parsed.conversationId, parsed.seq!);
+        if (existingBySeq != null && _isReadableContent(existingBySeq.content)) {
+          return const _PartitionResult.abort(
+            BackgroundPushOutcome.suppressedDuplicate,
+          );
+        }
+      }
       return _PartitionResult.show(
         title: title,
         displayContent: _fallbackDisplayContent(parsed),
         isGroup: isGroup,
         outcome: BackgroundPushOutcome.shownFallback,
+        fallbackReason: BackgroundFallbackReason.staleSeq,
       );
     } finally {
       await db.close();
     }
   }
 
-  Future<_PartitionResult> _syncGapOrOversized({
+  /// Fetches missing pages over HTTP WITHOUT holding `.partition.lock`.
+  Future<_FetchedSyncBatch> _fetchSyncPages({
     required ParsedFcmMessage parsed,
-    required LocalConversation? conv,
-    required ChatDao dao,
+    required _SyncPlan plan,
     required TokenStore tokenStore,
-    required AccountStore accountStore,
-    required String? deviceId,
-    required bool isGroup,
-    required String title,
-    required int initialCursor,
   }) async {
-    final api = _apiClientFactory(tokenStore, deviceId);
-    E2eeManager? e2ee;
-    var keysLoaded = false;
-    var runningCursor = initialCursor;
-    Message? targetMessage;
-    var targetWasEncrypted = false;
+    final api = _apiClientFactory(tokenStore, plan.deviceId);
+    final deadline = DateTime.now().add(syncBudget);
+    final collected = <Message>[];
+    var fetchCursor = plan.initialCursor;
+    var maxClearedSeq = 0;
+    var latestSeq = 0;
+    var hadError = false;
+    var hitPageOrBudgetCap = false;
 
     try {
       for (var pageIndex = 0; pageIndex < maxSyncPages; pageIndex += 1) {
-        final needed = math.max(1, parsed.seq! - runningCursor);
+        if (DateTime.now().isAfter(deadline)) {
+          hitPageOrBudgetCap = true;
+          break;
+        }
+        final needed = math.max(1, parsed.seq! - fetchCursor);
         final limit = math.min(syncPageLimit, math.max(needed, 10));
         final result = await api.sync(
           parsed.conversationId,
-          afterSeq: runningCursor,
+          afterSeq: fetchCursor,
           limit: limit,
         );
+        if (result.clearedSeq > maxClearedSeq) {
+          maxClearedSeq = result.clearedSeq;
+        }
+        if (result.latestSeq > latestSeq) {
+          latestSeq = result.latestSeq;
+        }
+        if (result.clearedSeq > fetchCursor) {
+          fetchCursor = result.clearedSeq;
+        }
+        if (parsed.seq! <= maxClearedSeq) {
+          break;
+        }
+        if (result.messages.isEmpty) break;
+        collected.addAll(result.messages);
+        final lastFetchedSeq = result.messages.last.seq;
+        if (lastFetchedSeq <= fetchCursor) break;
+        fetchCursor = lastFetchedSeq;
+        if (fetchCursor >= result.latestSeq || fetchCursor >= parsed.seq!) {
+          break;
+        }
+        if (pageIndex == maxSyncPages - 1 && fetchCursor < parsed.seq!) {
+          hitPageOrBudgetCap = true;
+        }
+      }
+    } catch (error) {
+      hadError = true;
+      debugPrint('BackgroundPushHandler sync failed: $error');
+    }
 
-        if (result.clearedSeq > 0) {
-          await dao.applyClearedSeq(parsed.conversationId, result.clearedSeq);
-          if (parsed.seq! <= result.clearedSeq) {
-            return const _PartitionResult.abort(
-              BackgroundPushOutcome.suppressedCleared,
-            );
-          }
-          if (result.clearedSeq > runningCursor) {
-            runningCursor = result.clearedSeq;
-          }
+    return _FetchedSyncBatch(
+      api: api,
+      messages: collected,
+      maxClearedSeq: maxClearedSeq,
+      latestSeq: latestSeq,
+      hadError: hadError,
+      hitPageOrBudgetCap: hitPageOrBudgetCap,
+    );
+  }
+
+  /// Re-acquires `.partition.lock` briefly to verify continuity, decrypt
+  /// fetched messages in ascending `seq` order, commit SQLite BEFORE
+  /// persisting ratchet sessions, and return the display payload.
+  Future<_PartitionResult> _applySyncedMessagesUnderLock({
+    required ParsedFcmMessage parsed,
+    required _SyncPlan plan,
+    required _FetchedSyncBatch fetched,
+    required AccountPaths paths,
+    required TokenStore tokenStore,
+    required String userId,
+    required String activeAccountId,
+  }) async {
+    final accountStore = AccountStore(tokenStore, activeAccountId);
+    final db = AppDatabase.forFile(paths.dbFile);
+    try {
+      final dbOwner = await db.readMeta(PartitionGuard.ownerUserIdKey);
+      final dbPartId = await db.readMeta(PartitionGuard.partitionIdKey);
+      final storePartId = await accountStore.readPartitionId();
+      if (dbOwner != userId ||
+          dbPartId == null ||
+          dbPartId.isEmpty ||
+          storePartId == null ||
+          storePartId.isEmpty ||
+          dbPartId != storePartId) {
+        return const _PartitionResult.abort(
+          BackgroundPushOutcome.droppedIntegrityMismatch,
+        );
+      }
+
+      final dao = ChatDao(db);
+      final conv = await dao.conversation(parsed.conversationId);
+      final isGroup = plan.isGroup || conv?.type == 'group';
+      final title = _resolveTitle(parsed: parsed, conv: conv, isGroup: isGroup);
+
+      if (fetched.maxClearedSeq > 0) {
+        await dao.applyClearedSeq(parsed.conversationId, fetched.maxClearedSeq);
+        if (parsed.seq! <= fetched.maxClearedSeq) {
+          return const _PartitionResult.abort(
+            BackgroundPushOutcome.suppressedCleared,
+          );
+        }
+      }
+
+      if (parsed.clientMsgId != null) {
+        final existing = await dao.message(parsed.clientMsgId!);
+        if (existing != null && _isReadableContent(existing.content)) {
+          return const _PartitionResult.abort(
+            BackgroundPushOutcome.suppressedDuplicate,
+          );
+        }
+      }
+
+      var runningCursor = await dao.effectiveCursor(parsed.conversationId);
+      if (fetched.maxClearedSeq > runningCursor) {
+        runningCursor = fetched.maxClearedSeq;
+      }
+
+      final bgLogger = AppLogger();
+      E2eeManager? e2ee;
+      var keysLoaded = false;
+      Message? targetMessage;
+      var targetWasEncrypted = false;
+
+      for (final msg in fetched.messages) {
+        if (msg.seq <= runningCursor) continue;
+        // Enforce strict contiguous seq invariant so the symmetric ratchet
+        // never skips past an unreceived message.
+        if (msg.seq != runningCursor + 1) {
+          return _PartitionResult.show(
+            title: title,
+            displayContent: _fallbackDisplayContent(parsed),
+            isGroup: isGroup,
+            outcome: BackgroundPushOutcome.shownFallback,
+            fallbackReason: BackgroundFallbackReason.syncDiscontinuous,
+          );
         }
 
-        if (result.messages.isEmpty) break;
+        final isTarget = (parsed.clientMsgId != null &&
+                msg.clientMsgId == parsed.clientMsgId) ||
+            msg.seq == parsed.seq;
 
-        for (final msg in result.messages) {
-          if (msg.seq <= runningCursor) continue;
-          // Enforce strict contiguous seq invariant so the symmetric ratchet
-          // never skips past an unreceived message.
-          if (msg.seq != runningCursor + 1) {
-            return _PartitionResult.show(
-              title: title,
-              displayContent: _fallbackDisplayContent(parsed),
-              isGroup: isGroup,
-              outcome: BackgroundPushOutcome.shownFallback,
-            );
-          }
-
-          final isTarget = (parsed.clientMsgId != null &&
-                  msg.clientMsgId == parsed.clientMsgId) ||
-              msg.seq == parsed.seq;
-
-          final existing = await dao.message(msg.clientMsgId);
-          if (existing != null && _isReadableContent(existing.content)) {
-            runningCursor = msg.seq;
-            if (isTarget) {
-              targetMessage = Message(
-                id: msg.id,
-                conversationId: msg.conversationId,
-                seq: msg.seq,
-                senderId: msg.senderId,
-                clientMsgId: msg.clientMsgId,
-                type: msg.type,
-                content: existing.content,
-                createdAt: msg.createdAt,
-              );
-            }
-            continue;
-          }
-
-          if (!isGroup &&
-              msg.type == 'text' &&
-              isEncryptedContent(msg.content)) {
-            e2ee ??= E2eeManager(
-              tokenStore: tokenStore,
-              accountStore: accountStore,
-              api: api,
-              service: _e2eeServiceFactory(),
-            );
-            if (!keysLoaded) {
-              keysLoaded = await e2ee.loadExistingWithoutBootstrap();
-              if (!keysLoaded) {
-                return _PartitionResult.show(
-                  title: title,
-                  displayContent: undecryptableContent,
-                  isGroup: false,
-                  outcome: BackgroundPushOutcome.shownFallback,
-                );
-              }
-            }
-
-            final plaintext = await e2ee.plaintextFor(
-              msg.clientMsgId,
-              msg.conversationId,
-              msg.content,
-              isGroup: false,
-              senderId: msg.senderId,
-              peerId: conv?.peerId ?? msg.senderId,
-              deferSessionPersist: true,
-              allowBootstrap: false,
-            );
-            if (!_isReadableContent(plaintext)) {
-              // Abort before persisting or advancing ratchet.
-              return _PartitionResult.show(
-                title: title,
-                displayContent: undecryptableContent,
-                isGroup: false,
-                outcome: BackgroundPushOutcome.shownFallback,
-              );
-            }
-
-            final decryptedMsg = Message(
+        final existing = await dao.message(msg.clientMsgId);
+        if (existing != null && _isReadableContent(existing.content)) {
+          runningCursor = msg.seq;
+          if (isTarget) {
+            targetMessage = Message(
               id: msg.id,
               conversationId: msg.conversationId,
               seq: msg.seq,
               senderId: msg.senderId,
               clientMsgId: msg.clientMsgId,
               type: msg.type,
-              content: plaintext,
+              content: existing.content,
               createdAt: msg.createdAt,
             );
-            // Crash-safe write order: SQLite FIRST, Keystore SECOND.
-            await dao.upsertServerMessage(decryptedMsg, status: 'sent');
-            try {
-              await e2ee.commitSessions();
-            } catch (error) {
-              debugPrint(
-                'BackgroundPushHandler sync session commit failed after DB write: $error',
+          }
+          continue;
+        }
+
+        if (!isGroup &&
+            msg.type == 'text' &&
+            isEncryptedContent(msg.content)) {
+          if (msg.senderId == userId) {
+            await dao.upsertServerMessage(
+              Message(
+                id: msg.id,
+                conversationId: msg.conversationId,
+                seq: msg.seq,
+                senderId: msg.senderId,
+                clientMsgId: msg.clientMsgId,
+                type: msg.type,
+                content: undecryptableContent,
+                createdAt: msg.createdAt,
+              ),
+              status: 'sent',
+              ensureConversation: plan.hint,
+              incrementUnread: false,
+            );
+            runningCursor = msg.seq;
+            continue;
+          }
+
+          e2ee ??= E2eeManager(
+            tokenStore: tokenStore,
+            accountStore: accountStore,
+            api: fetched.api,
+            service: _e2eeServiceFactory(),
+            logger: bgLogger,
+          );
+          if (!keysLoaded) {
+            keysLoaded = await e2ee.loadExistingWithoutBootstrap();
+            if (!keysLoaded) {
+              return _PartitionResult.show(
+                title: title,
+                displayContent: undecryptableContent,
+                isGroup: false,
+                outcome: BackgroundPushOutcome.shownFallback,
+                fallbackReason: BackgroundFallbackReason.noLocalKeys,
               );
             }
-            runningCursor = msg.seq;
-            if (isTarget) {
-              targetMessage = decryptedMsg;
-              targetWasEncrypted = true;
-            }
-          } else {
-            await dao.upsertServerMessage(msg, status: 'sent');
-            runningCursor = msg.seq;
-            if (isTarget) {
-              targetMessage = msg;
-            }
+          }
+
+          final plaintext = await e2ee.plaintextFor(
+            msg.clientMsgId,
+            msg.conversationId,
+            msg.content,
+            isGroup: false,
+            senderId: msg.senderId,
+            peerId: conv?.peerId ?? msg.senderId,
+            deferSessionPersist: true,
+            allowBootstrap: false,
+          );
+          if (!_isReadableContent(plaintext)) {
+            return _PartitionResult.show(
+              title: title,
+              displayContent: undecryptableContent,
+              isGroup: false,
+              outcome: BackgroundPushOutcome.shownFallback,
+              fallbackReason: BackgroundFallbackReason.decryptFailed,
+              decryptReason: _extractDecryptReason(bgLogger),
+            );
+          }
+
+          final decryptedMsg = Message(
+            id: msg.id,
+            conversationId: msg.conversationId,
+            seq: msg.seq,
+            senderId: msg.senderId,
+            clientMsgId: msg.clientMsgId,
+            type: msg.type,
+            content: plaintext,
+            createdAt: msg.createdAt,
+          );
+          // Crash-safe write order: SQLite FIRST, Keystore SECOND.
+          await dao.upsertServerMessage(
+            decryptedMsg,
+            status: 'sent',
+            ensureConversation: plan.hint,
+            incrementUnread: plan.isFromOther,
+          );
+          try {
+            await e2ee.commitSessions();
+            await _writeBackgroundE2eeMarker(paths.partitionDir);
+          } catch (error) {
+            debugPrint(
+              'BackgroundPushHandler sync session commit failed after DB write: $error',
+            );
+          }
+          runningCursor = msg.seq;
+          if (isTarget) {
+            targetMessage = decryptedMsg;
+            targetWasEncrypted = true;
+          }
+        } else {
+          await dao.upsertServerMessage(
+            msg,
+            status: 'sent',
+            ensureConversation: plan.hint,
+            incrementUnread: plan.isFromOther && msg.senderId != userId,
+          );
+          runningCursor = msg.seq;
+          if (isTarget) {
+            targetMessage = msg;
           }
         }
-
-        if (runningCursor >= result.latestSeq || runningCursor >= parsed.seq!) {
-          break;
-        }
       }
-    } catch (error) {
-      debugPrint('BackgroundPushHandler sync failed: $error');
-    }
 
-    if (targetMessage != null) {
+      if (targetMessage != null) {
+        return _PartitionResult.show(
+          title: title,
+          displayContent: targetMessage.content,
+          isGroup: isGroup,
+          outcome: targetWasEncrypted
+              ? BackgroundPushOutcome.shownDecrypted
+              : BackgroundPushOutcome.shownPlaintext,
+        );
+      }
+
       return _PartitionResult.show(
         title: title,
-        displayContent: targetMessage.content,
+        displayContent: _fallbackDisplayContent(parsed),
         isGroup: isGroup,
-        outcome: targetWasEncrypted
-            ? BackgroundPushOutcome.shownDecrypted
-            : BackgroundPushOutcome.shownPlaintext,
+        outcome: BackgroundPushOutcome.shownFallback,
+        fallbackReason: fetched.hadError
+            ? BackgroundFallbackReason.syncFailed
+            : (fetched.hitPageOrBudgetCap
+                ? BackgroundFallbackReason.syncGapTooLarge
+                : BackgroundFallbackReason.syncFailed),
       );
+    } finally {
+      await db.close();
     }
-
-    return _PartitionResult.show(
-      title: title,
-      displayContent: _fallbackDisplayContent(parsed),
-      isGroup: isGroup,
-      outcome: BackgroundPushOutcome.shownFallback,
-    );
   }
 
   Future<void> _showNotification({
@@ -800,23 +1164,77 @@ class BackgroundPushHandler {
   }
 }
 
+class _SyncPlan {
+  const _SyncPlan({
+    required this.initialCursor,
+    required this.isGroup,
+    required this.title,
+    required this.deviceId,
+    required this.hint,
+    required this.isFromOther,
+  });
+
+  final int initialCursor;
+  final bool isGroup;
+  final String title;
+  final String? deviceId;
+  final ProvisionalConversationHint? hint;
+  final bool isFromOther;
+}
+
+class _FetchedSyncBatch {
+  const _FetchedSyncBatch({
+    required this.api,
+    required this.messages,
+    required this.maxClearedSeq,
+    required this.latestSeq,
+    required this.hadError,
+    required this.hitPageOrBudgetCap,
+  });
+
+  final ApiClient api;
+  final List<Message> messages;
+  final int maxClearedSeq;
+  final int latestSeq;
+  final bool hadError;
+  final bool hitPageOrBudgetCap;
+}
+
 class _PartitionResult {
   const _PartitionResult.abort(BackgroundPushOutcome this.abortOutcome)
       : title = '',
         displayContent = '',
         isGroup = false,
-        outcome = abortOutcome;
+        outcome = abortOutcome,
+        syncPlan = null,
+        fallbackReason = null,
+        decryptReason = null;
+
+  const _PartitionResult.needsSync(_SyncPlan this.syncPlan)
+      : abortOutcome = null,
+        title = '',
+        displayContent = '',
+        isGroup = false,
+        outcome = BackgroundPushOutcome.shownFallback,
+        fallbackReason = null,
+        decryptReason = null;
 
   const _PartitionResult.show({
     required this.title,
     required this.displayContent,
     required this.isGroup,
     required this.outcome,
-  }) : abortOutcome = null;
+    this.fallbackReason,
+    this.decryptReason,
+  })  : abortOutcome = null,
+        syncPlan = null;
 
   final BackgroundPushOutcome? abortOutcome;
+  final _SyncPlan? syncPlan;
   final String title;
   final String displayContent;
   final bool isGroup;
   final BackgroundPushOutcome outcome;
+  final BackgroundFallbackReason? fallbackReason;
+  final String? decryptReason;
 }

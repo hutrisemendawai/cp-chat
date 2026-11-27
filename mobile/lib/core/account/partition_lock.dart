@@ -41,8 +41,9 @@ class PartitionLock {
     Future<T> Function() action, {
     Duration timeout = defaultTimeout,
     Duration staleAfter = defaultStaleAfter,
+    String fileName = lockFileName,
   }) async {
-    final lockPath = p.join(partitionDir.path, lockFileName);
+    final lockPath = p.join(partitionDir.path, fileName);
     final prev = _inIsolate[lockPath] ?? Future<void>.value();
     final done = Completer<void>();
     _inIsolate[lockPath] = done.future;
@@ -121,8 +122,7 @@ class PartitionLock {
       final stat = await lockFile.stat();
       final age = DateTime.now().difference(stat.modified);
       if (age >= staleAfter) {
-        await _deleteQuietly(lockFile);
-        return true;
+        return await _reclaimAtomically(lockFile);
       }
 
       if (Platform.isLinux || Platform.isAndroid) {
@@ -132,8 +132,7 @@ class PartitionLock {
           final ownerPid = int.tryParse(raw.substring(0, colon));
           if (ownerPid != null && ownerPid != pid) {
             if (!await Directory('/proc/$ownerPid').exists()) {
-              await _deleteQuietly(lockFile);
-              return true;
+              return await _reclaimAtomically(lockFile);
             }
           }
         }
@@ -142,6 +141,17 @@ class PartitionLock {
       // Lock disappeared or is mid-write; retry cleanly.
     }
     return false;
+  }
+
+  static Future<bool> _reclaimAtomically(File lockFile) async {
+    final reclaimPath = '${lockFile.path}.reclaim.${_uuid.v4()}';
+    try {
+      final moved = await lockFile.rename(reclaimPath);
+      await _deleteQuietly(moved);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Future<void> _release(File lockFile, String token) async {

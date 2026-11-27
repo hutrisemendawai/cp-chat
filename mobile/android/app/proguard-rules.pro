@@ -18,6 +18,7 @@
 -keep class io.flutter.view.** { *; }
 -keep class io.flutter.embedding.** { *; }
 -keep class io.flutter.plugins.firebase.** { *; }
+-keep class com.cpchat.storage_dirs.** { *; }
 
 # Serialization of plugin data classes via JSON.
 -keepclassmembers class * {

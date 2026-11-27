@@ -1,6 +1,7 @@
 package com.cpchat.storage_dirs;
 
 import android.content.Context;
+import androidx.annotation.Keep;
 import androidx.annotation.NonNull;
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.plugin.common.MethodCall;
@@ -14,6 +15,7 @@ import io.flutter.plugin.common.MethodChannel.Result;
  * both the main FlutterEngine and headless background engines (such as FCM's
  * FLTFireBGExecutor) where MainActivity is never instantiated.
  */
+@Keep
 public class CpchatStorageDirsPlugin implements FlutterPlugin, MethodCallHandler {
   private static final String CHANNEL_NAME = "cpchat/storage";
 

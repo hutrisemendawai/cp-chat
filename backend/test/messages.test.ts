@@ -345,6 +345,48 @@ describe('message REST endpoints', () => {
     expect(tooLarge.statusCode).toBe(422);
   });
 
+  it('serves sync and pagination to a recipient who never added the sender', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    const eve = await registerUser(harness, 'Eve');
+    const conversationId = await createDirect(harness, alice, bob);
+
+    for (let index = 0; index < 3; index += 1) {
+      await messages.append({
+        conversationId,
+        senderId: alice.id,
+        clientMsgId: randomUUID(),
+        type: 'text',
+        content: `one-way ${index}`,
+      });
+    }
+
+    // Bob receives Alice's messages even though only Alice added Bob.
+    const sync = await harness.app.inject({
+      method: 'GET',
+      url: `/api/v1/conversations/${conversationId}/sync?after_seq=0`,
+      headers: auth(bob),
+    });
+    expect(sync.statusCode).toBe(200);
+    expect(sync.json().messages.map((message: { seq: number }) => message.seq)).toEqual([1, 2, 3]);
+
+    const page = await harness.app.inject({
+      method: 'GET',
+      url: `/api/v1/conversations/${conversationId}/messages?before_seq=3&limit=2`,
+      headers: auth(bob),
+    });
+    expect(page.statusCode).toBe(200);
+    expect(page.json().messages.map((message: { seq: number }) => message.seq)).toEqual([2, 1]);
+
+    // A true outsider is still forbidden.
+    const forbidden = await harness.app.inject({
+      method: 'GET',
+      url: `/api/v1/conversations/${conversationId}/sync?after_seq=0`,
+      headers: auth(eve),
+    });
+    expect(forbidden.statusCode).toBe(403);
+  });
+
   it('forbids non-members from paging or syncing', async () => {
     const alice = await registerUser(harness, 'Alice');
     const bob = await registerUser(harness, 'Bob');

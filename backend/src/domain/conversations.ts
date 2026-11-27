@@ -116,6 +116,22 @@ export class ConversationRepository {
    * unique index means two simultaneous creators converge on one row.
    */
   async findOrCreateDirect(currentUserId: string, otherUserId: string): Promise<ConversationRow> {
+    const { conversation } = await this.findOrCreateDirectWithStatus(
+      currentUserId,
+      otherUserId,
+    );
+    return conversation;
+  }
+
+  /**
+   * Same as {@link findOrCreateDirect}, but also reports whether this call
+   * created the conversation. Callers use `created` to announce a brand new
+   * direct chat to both members exactly once instead of on every re-open.
+   */
+  async findOrCreateDirectWithStatus(
+    currentUserId: string,
+    otherUserId: string,
+  ): Promise<{ conversation: ConversationRow; created: boolean }> {
     if (currentUserId === otherUserId) {
       throw new ApiError('validation_error', 'A direct conversation needs another member');
     }
@@ -134,6 +150,7 @@ export class ConversationRepository {
       );
 
       let conversation = insert.rows[0];
+      const created = conversation !== undefined;
       if (!conversation) {
         const existing = await client.query<ConversationRow & { last_seq: string }>(
           `SELECT ${CONVERSATION_COLUMNS} FROM conversations WHERE direct_key = $1`,
@@ -149,7 +166,7 @@ export class ConversationRepository {
       }
 
       await client.query('COMMIT');
-      return mapConversation(conversation);
+      return { conversation: mapConversation(conversation), created };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;

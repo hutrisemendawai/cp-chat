@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
@@ -47,8 +48,24 @@ class ChatController {
     if (trimmed.isEmpty || user == null) return;
 
     final dao = _ref.read(chatDaoProvider);
-    final conversation = await dao.conversation(_conversationId);
+    var conversation = await dao.conversation(_conversationId);
     final isGroup = conversation?.type == 'group';
+
+    // Resolve the direct peer deterministically before encrypting. A reply sent
+    // immediately after first contact may race ahead of the local conversation
+    // row, so hydrate it from the server rather than downgrading to plaintext.
+    if (!isGroup && conversation?.peerId == null) {
+      try {
+        final fresh = await _api.conversation(_conversationId);
+        await dao.upsertConversation(fresh, selfId: user.id);
+        conversation = await dao.conversation(_conversationId);
+      } catch (error) {
+        debugPrint('ChatController peer resolution failed: $error');
+      }
+    }
+    if (!isGroup && conversation?.peerId == null) {
+      throw const E2eeSendException();
+    }
 
     final body = await _ref.read(e2eeManagerProvider).encryptForConversation(
           conversationId: _conversationId,

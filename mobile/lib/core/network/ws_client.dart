@@ -60,6 +60,7 @@ class ChatSocket {
     this.scope,
     this.serverRotatedAt,
     this.beforeSync,
+    this.activeConversationId,
   });
 
   final ChatDao _dao;
@@ -77,6 +78,10 @@ class ChatSocket {
   /// Optional hook run immediately before `syncAll` (used to flush offline
   /// queued server history clears before pulling messages).
   final Future<void> Function()? beforeSync;
+
+  /// The conversation currently on screen, if any. A live message for it must
+  /// not increment the unread badge.
+  final String? Function()? activeConversationId;
 
   final Future<String?> Function(
     String conversationId,
@@ -103,6 +108,15 @@ class ChatSocket {
 
   Stream<Presence> get presenceEvents => _presenceController.stream;
 
+  /// Fires the conversation id whenever it has been (re)hydrated or changed on
+  /// the server. The UI invalidates its metadata cache so an open `ChatScreen`
+  /// refreshes the header/members/presence without a manual pull-to-refresh.
+  final StreamController<String> _conversationUpdatedController =
+      StreamController<String>.broadcast();
+
+  Stream<String> get conversationUpdatedEvents =>
+      _conversationUpdatedController.stream;
+
   /// The current connection status, reactive so a screen can show a banner.
   final ValueNotifier<SocketStatus> connection = ValueNotifier<SocketStatus>(
     const SocketStatus.disconnected(),
@@ -121,6 +135,14 @@ class ChatSocket {
   Completer<void>? _syncBarrier;
   final Map<String, Future<void>> _messageQueues = {};
   final Map<String, (String, int)> _recoveryCursors = {};
+
+  /// Single-flight conversation hydration: concurrent inbound messages for the
+  /// same unknown conversation share one `GET /api/v1/conversations/:id`.
+  final Map<String, Future<Conversation?>> _inFlightHydrations = {};
+
+  /// Conversations whose hydration failed transiently; the next message or
+  /// reconnect retries them.
+  final Set<String> _pendingHydrations = {};
 
   bool get isConnected => _channel != null;
   bool get _scopeClosed => _disposed || (scope != null && !scope!.isOpen);
@@ -217,6 +239,8 @@ class ChatSocket {
     _sendTimers.clear();
     _awaitingAck.clear();
     _recoveryCursors.clear();
+    _inFlightHydrations.clear();
+    _pendingHydrations.clear();
     _attempt = 0;
     _connecting = false;
 
@@ -283,6 +307,12 @@ class ChatSocket {
       if (_scopeClosed || tokenBefore != _disconnectToken) return;
 
       await _dao.upsertConversations(conversations, selfId: user);
+
+      // syncAll is authoritative for the conversation list: any pending
+      // hydration for a conversation it just returned is now satisfied.
+      for (final conversation in conversations) {
+        _pendingHydrations.remove(conversation.id);
+      }
 
       for (final conversation in conversations) {
         if (_scopeClosed || tokenBefore != _disconnectToken) return;
@@ -390,11 +420,91 @@ class ChatSocket {
     }
   }
 
+  /// Fetches a conversation summary, deduplicating concurrent callers so a
+  /// burst of inbound messages for the same unknown chat issues exactly one
+  /// REST request. Runs OUTSIDE `_serializeMessages` to avoid a deadlock with
+  /// the caller that is already holding the per-conversation queue.
+  Future<Conversation?> _fetchConversationSingleFlight(
+    String conversationId,
+    int disconnectToken,
+  ) {
+    final existing = _inFlightHydrations[conversationId];
+    if (existing != null) return existing;
+
+    final run = () async {
+      try {
+        final conversation = await _api.conversation(conversationId);
+        if (_scopeClosed || disconnectToken != _disconnectToken) return null;
+        _pendingHydrations.remove(conversationId);
+        return conversation;
+      } on ApiException catch (error) {
+        if (_scopeClosed || disconnectToken != _disconnectToken) return null;
+        if (error.statusCode == 403 || error.statusCode == 404) {
+          await _dao.deleteConversation(conversationId);
+          _pendingHydrations.remove(conversationId);
+          return null;
+        }
+        // Transient failure (offline/5xx): retry on the next message or sync.
+        _pendingHydrations.add(conversationId);
+        return null;
+      } catch (error) {
+        if (_scopeClosed || disconnectToken != _disconnectToken) return null;
+        debugPrint('ChatSocket conversation hydration failed: $error');
+        _pendingHydrations.add(conversationId);
+        return null;
+      }
+    }();
+
+    _inFlightHydrations[conversationId] = run;
+    unawaited(
+      run.whenComplete(() {
+        if (identical(_inFlightHydrations[conversationId], run)) {
+          _inFlightHydrations.remove(conversationId);
+        }
+      }),
+    );
+    return run;
+  }
+
+  /// Hydrates an unknown conversation from REST, persists it, and notifies the
+  /// UI. Safe to call concurrently with message persistence: the fetch happens
+  /// first, the Drift upsert is serialized per conversation.
+  Future<void> _hydrateConversation(
+    String conversationId, {
+    bool runSummarySync = false,
+  }) async {
+    final tokenBefore = _disconnectToken;
+    final selfId = await _selfId();
+    if (_scopeClosed || tokenBefore != _disconnectToken) return;
+
+    final conversation = await _fetchConversationSingleFlight(conversationId, tokenBefore);
+    if (conversation == null) return;
+    if (_scopeClosed || tokenBefore != _disconnectToken) return;
+
+    final barrier = _syncBarrier;
+    if (barrier != null) await barrier.future;
+    if (_scopeClosed || tokenBefore != _disconnectToken) return;
+
+    await _serializeMessages(conversationId, () async {
+      if (_scopeClosed || tokenBefore != _disconnectToken) return;
+      await _dao.upsertConversation(conversation, selfId: selfId);
+      _pendingHydrations.remove(conversationId);
+      if (runSummarySync) {
+        await _syncSummary(conversation, disconnectToken: tokenBefore);
+      }
+    });
+
+    if (_scopeClosed) return;
+    _conversationUpdatedController.add(conversationId);
+  }
+
   Future<int> _syncConversation(
     String conversationId,
     int afterSeq, {
     int? throughSeq,
     int? disconnectToken,
+    ProvisionalConversationHint? ensureConversation,
+    bool incrementUnread = false,
   }) async {
     var cursor = afterSeq;
     var droppedPreRotation = 0;
@@ -429,8 +539,10 @@ class ChatSocket {
         final stored = await _persistServerMessage(
           message,
           isHistoricBackfill: true,
+          ensureConversation: ensureConversation,
+          incrementUnread: incrementUnread,
         );
-        if (!stored) {
+        if (stored == null) {
           droppedPreRotation += 1;
           droppedAt = message.createdAt;
         }
@@ -697,29 +809,67 @@ class ChatSocket {
         'created_at': frame['created_at'],
       });
       final senderName = frame['sender_name'] as String?;
+      final senderAvatarUrl = frame['sender_avatar_url'] as String?;
+      final conversationType = frame['conversation_type'] as String?;
+      final conversationName = frame['conversation_name'] as String?;
 
       final barrier = _syncBarrier;
       if (barrier != null) await barrier.future;
       if (_scopeClosed) return;
 
-      var persisted = false;
+      final selfId = await _selfId();
+      if (_scopeClosed) return;
+      final isFromOther = selfId == null || message.senderId != selfId;
+      final isActiveChat = activeConversationId?.call() == message.conversationId;
+
+      Message? toEmit;
+      var needsHydration = false;
       await _serializeMessages(message.conversationId, () async {
         if (_scopeClosed) return;
+        final existingConv = await _dao.conversation(message.conversationId);
+        needsHydration =
+            existingConv == null || _pendingHydrations.contains(message.conversationId);
+        final hint = existingConv == null
+            ? ProvisionalConversationHint(
+                type: conversationType ?? 'direct',
+                conversationName: conversationName,
+                peerId: isFromOther ? message.senderId : null,
+                peerName: isFromOther ? senderName : null,
+                peerAvatarUrl: isFromOther ? senderAvatarUrl : null,
+              )
+            : null;
+
         final cursor = await _dao.effectiveCursor(message.conversationId);
         if (message.seq > cursor + 1) {
           final synced = await _syncConversation(
             message.conversationId,
             cursor,
+            ensureConversation: hint,
+            incrementUnread: isFromOther && !isActiveChat,
           );
           if (_scopeClosed) return;
           if (synced < message.seq - 1) return;
         }
-        await _persistServerMessage(message, isHistoricBackfill: false);
+        final wasAlreadyReadable = await _alreadyReadable(message);
+        final stored = await _persistServerMessage(
+          message,
+          isHistoricBackfill: false,
+          conversationTypeOverride: conversationType,
+          ensureConversation: hint,
+          incrementUnread: isFromOther && !isActiveChat,
+        );
         if (_scopeClosed) return;
         acknowledgeDelivered(message.conversationId, message.seq);
-        persisted = true;
+        if (stored != null && !wasAlreadyReadable) {
+          toEmit = stored;
+        }
       });
-      if (persisted && !_scopeClosed) unawaited(_emitIncoming(message, senderName));
+      if (_scopeClosed) return;
+      if (needsHydration) {
+        // Runs outside the per-conversation queue so it cannot deadlock it.
+        unawaited(_hydrateConversation(message.conversationId));
+      }
+      if (toEmit != null) unawaited(_emitIncoming(toEmit!, senderName));
     } catch (error) {
       debugPrint('ChatSocket failed to persist message: $error');
     }
@@ -753,12 +903,21 @@ class ChatSocket {
     final createdAt = createdAtRaw == null
         ? DateTime.now().toUtc()
         : (DateTime.tryParse(createdAtRaw)?.toUtc() ?? DateTime.now().toUtc());
+    final conversationType = data['conversation_type']?.toString().trim();
+    final conversationName = data['conversation_name']?.toString().trim();
+    final senderAvatarUrl = data['sender_avatar_url']?.toString().trim();
 
     final barrier = _syncBarrier;
     if (barrier != null) await barrier.future;
     if (_scopeClosed) return;
 
+    final selfId = await _selfId();
+    if (_scopeClosed) return;
+    final isFromOther = selfId == null || senderId != selfId;
+    final isActiveChat = activeConversationId?.call() == conversationId;
+
     Message? toEmit;
+    var needsHydration = false;
     await _serializeMessages(conversationId, () async {
       if (_scopeClosed) return;
 
@@ -773,6 +932,28 @@ class ChatSocket {
           return;
         }
       }
+
+      final existingConv = await _dao.conversation(conversationId);
+      needsHydration =
+          existingConv == null || _pendingHydrations.contains(conversationId);
+      final hint = existingConv == null
+          ? ProvisionalConversationHint(
+              type: (conversationType != null && conversationType.isNotEmpty)
+                  ? conversationType
+                  : 'direct',
+              conversationName:
+                  (conversationName != null && conversationName.isNotEmpty)
+                      ? conversationName
+                      : null,
+              peerId: isFromOther ? senderId : null,
+              peerName: isFromOther ? senderName : null,
+              peerAvatarUrl: (isFromOther &&
+                      senderAvatarUrl != null &&
+                      senderAvatarUrl.isNotEmpty)
+                  ? senderAvatarUrl
+                  : null,
+            )
+          : null;
 
       final cursor = await _dao.effectiveCursor(conversationId);
       final canInline = seq != null &&
@@ -795,14 +976,37 @@ class ChatSocket {
           content: content,
           createdAt: createdAt,
         );
-        await _persistServerMessage(msg, isHistoricBackfill: false);
+        final stored = await _persistServerMessage(
+          msg,
+          isHistoricBackfill: false,
+          conversationTypeOverride: conversationType,
+          ensureConversation: hint,
+          incrementUnread: isFromOther && !isActiveChat,
+        );
         if (_scopeClosed) return;
-        toEmit = msg;
+        toEmit = stored;
         return;
       }
 
       // Gap or oversized (>4 KB) payload: catch up contiguously via REST sync.
-      await _syncConversation(conversationId, cursor);
+      try {
+        await _syncConversation(
+          conversationId,
+          cursor,
+          ensureConversation: hint,
+          incrementUnread: isFromOther && !isActiveChat,
+        );
+      } catch (error) {
+        logger?.warn(
+          'fcm',
+          'main isolate fcm sync failed',
+          meta: {
+            'conversation_id': conversationId,
+            'seq': seq,
+            'error': error.runtimeType.toString(),
+          },
+        );
+      }
       if (_scopeClosed) return;
 
       if (clientMsgId != null && clientMsgId.isNotEmpty) {
@@ -828,6 +1032,12 @@ class ChatSocket {
           messageId.isNotEmpty &&
           senderId != null &&
           senderId.isNotEmpty) {
+        final isGroupPush = (conversationType ?? existingConv?.type) == 'group';
+        final fallbackContent = (msgType == 'image' || msgType == 'file')
+            ? (content ?? '')
+            : (content != null && content.isNotEmpty && !isEncryptedContent(content))
+                ? content
+                : (isGroupPush ? '' : undecryptableContent);
         toEmit = Message(
           id: messageId,
           conversationId: conversationId,
@@ -836,15 +1046,17 @@ class ChatSocket {
           clientMsgId:
               (clientMsgId != null && clientMsgId.isNotEmpty) ? clientMsgId : messageId,
           type: msgType,
-          content: (msgType == 'image' || msgType == 'file')
-              ? (content ?? '')
-              : undecryptableContent,
+          content: fallbackContent,
           createdAt: createdAt,
         );
       }
     });
 
-    if (toEmit != null && !_scopeClosed) {
+    if (_scopeClosed) return;
+    if (needsHydration) {
+      unawaited(_hydrateConversation(conversationId));
+    }
+    if (toEmit != null) {
       await _emitIncoming(toEmit!, senderName);
     }
   }
@@ -870,23 +1082,48 @@ class ChatSocket {
     );
   }
 
-  /// Persists one server message after decrypting an E2EE body.
+  /// Persists one server message after decrypting an E2EE body and returns the
+  /// persisted (plaintext) message.
   ///
-  /// Returns `false` when a pre-rotation encrypted body during historic
-  /// backfill failed to decrypt and was intentionally dropped instead of
-  /// storing a stub row (§2.7).
-  Future<bool> _persistServerMessage(
+  /// Returns `null` when the scope closed or when a pre-rotation encrypted body
+  /// during historic backfill failed to decrypt and was intentionally dropped
+  /// instead of storing a stub row (§2.7).
+  Future<Message?> _persistServerMessage(
     Message message, {
     bool isHistoricBackfill = false,
+    String? conversationTypeOverride,
+    ProvisionalConversationHint? ensureConversation,
+    bool incrementUnread = false,
   }) async {
-    if (_scopeClosed) return false;
+    if (_scopeClosed) return null;
     if (await _alreadyReadable(message)) {
-      await _dao.upsertServerMessage(message, status: 'sent');
-      return true;
+      final existing = await _dao.message(message.clientMsgId);
+      await _dao.upsertServerMessage(
+        message,
+        status: 'sent',
+        ensureConversation: ensureConversation,
+        incrementUnread: incrementUnread,
+      );
+      if (existing != null && existing.content != message.content) {
+        return Message(
+          id: message.id,
+          conversationId: message.conversationId,
+          seq: message.seq,
+          senderId: message.senderId,
+          clientMsgId: message.clientMsgId,
+          type: message.type,
+          content: existing.content,
+          createdAt: message.createdAt,
+        );
+      }
+      return message;
     }
 
-    final plaintext = await _decryptForStorage(message);
-    if (_scopeClosed) return false;
+    final plaintext = await _decryptForStorage(
+      message,
+      conversationTypeOverride: conversationTypeOverride,
+    );
+    if (_scopeClosed) return null;
 
     final failedDecrypt = isEncryptedContent(message.content) &&
         (plaintext == null ||
@@ -898,7 +1135,7 @@ class ChatSocket {
       if (rotatedAt != null && message.createdAt.isBefore(rotatedAt)) {
         // Defence in depth (§2.7): pre-rotation ciphertext is cryptographically
         // unreadable; drop it instead of persisting a stub row.
-        return false;
+        return null;
       }
     }
 
@@ -917,19 +1154,29 @@ class ChatSocket {
             content: content,
             createdAt: message.createdAt,
           );
-    await _dao.upsertServerMessage(stored, status: 'sent');
-    return true;
+    await _dao.upsertServerMessage(
+      stored,
+      status: 'sent',
+      ensureConversation: ensureConversation,
+      incrementUnread: incrementUnread,
+    );
+    return stored;
   }
 
-  Future<String?> _decryptForStorage(Message message) async {
+  Future<String?> _decryptForStorage(
+    Message message, {
+    String? conversationTypeOverride,
+  }) async {
     if (_scopeClosed) return null;
     final decryptor = decrypt;
     if (decryptor == null || message.type != 'text') return null;
     if (!isEncryptedContent(message.content)) return null;
     try {
-      final isGroup =
-          await _dao.conversationType(message.conversationId) == 'group';
+      // Prefer the frame's own hint so `isGroup` is accurate even before the
+      // REST hydration commits the conversation row.
+      final localType = await _dao.conversationType(message.conversationId);
       if (_scopeClosed) return null;
+      final isGroup = (conversationTypeOverride ?? localType) == 'group';
       return await decryptor(
         message.conversationId,
         message.clientMsgId,
@@ -1022,28 +1269,7 @@ class ChatSocket {
     if (_scopeClosed) return;
     final conversationId = frame['conversation_id'];
     if (conversationId is! String) return;
-
-    final selfId = await _selfId();
-    final tokenBefore = _disconnectToken;
-    try {
-      final conversation = await _api.conversation(conversationId);
-      if (_scopeClosed || tokenBefore != _disconnectToken) return;
-      final barrier = _syncBarrier;
-      if (barrier != null) await barrier.future;
-      if (_scopeClosed || tokenBefore != _disconnectToken) return;
-      await _serializeMessages(conversationId, () async {
-        if (_scopeClosed) return;
-        await _dao.upsertConversation(conversation, selfId: selfId);
-        await _syncSummary(conversation, disconnectToken: tokenBefore);
-      });
-    } on ApiException catch (error) {
-      if (_scopeClosed) return;
-      if (error.statusCode == 403 || error.statusCode == 404) {
-        await _dao.deleteConversation(conversationId);
-      }
-    } catch (error) {
-      debugPrint('ChatSocket refresh conversation failed: $error');
-    }
+    await _hydrateConversation(conversationId, runSummarySync: true);
   }
 
   Future<void> _handleReadState(Map<String, dynamic> frame) async {
@@ -1082,6 +1308,8 @@ class ChatSocket {
         await _handleReadState(frame);
       case 'status':
         await _handleStatus(frame);
+      case 'conversation_updated':
+        await _handleConversationUpdated(frame);
     }
   }
 
@@ -1160,5 +1388,6 @@ class ChatSocket {
     _reconnect?.cancel();
     connection.dispose();
     await _presenceController.close();
+    await _conversationUpdatedController.close();
   }
 }

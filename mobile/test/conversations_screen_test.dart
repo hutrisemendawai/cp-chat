@@ -161,4 +161,25 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('No chats found'), findsOneWidget);
   });
+
+  testWidgets(
+    'a first message from a non-friend emerges live with a preview and badge',
+    (tester) async {
+      await pumpApp(tester);
+      // An empty chat list, as if the app had connected before the DM existed.
+      await showConversations(tester, const []);
+      expect(find.text('No conversations yet'), findsOneWidget);
+
+      // A live incoming message persisted a provisional conversation row.
+      await showConversations(tester, [
+        conversation(id: 'new', preview: 'Hello from A #1', lastSeq: 1)
+            .copyWith(unreadCount: 1),
+      ]);
+
+      expect(find.text('No conversations yet'), findsNothing);
+      expect(find.text('Alice'), findsOneWidget);
+      expect(find.text('Hello from A #1'), findsOneWidget);
+      expect(find.text('1'), findsOneWidget);
+    },
+  );
 }

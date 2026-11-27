@@ -155,7 +155,16 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
 
   app.post('/api/v1/auth/logout', async (request, reply) => {
     const input = parse(refreshSchema, request.body);
-    await refreshTokens.revoke(input.refresh_token);
+    const revoked = await refreshTokens.revoke(input.refresh_token);
+    if (revoked) {
+      const requestDeviceId = deviceIdFrom(request, input.device_id);
+      const deviceIds = [revoked.deviceId, requestDeviceId].filter(
+        (value): value is string => typeof value === 'string' && value.length > 0,
+      );
+      if (deviceIds.length > 0) {
+        await ctx.devices.unregisterMatching(revoked.userId, { deviceIds });
+      }
+    }
     reply.status(204).send();
   });
 }

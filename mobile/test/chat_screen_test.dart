@@ -243,6 +243,52 @@ void main() {
     expect(feed(tester).position.pixels, 0);
   });
 
+  testWidgets(
+    'an open direct chat renders live messages and falls back to the cached peer',
+    (tester) async {
+      final stream = StreamController<List<LocalMessage>>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpChat(
+        tester,
+        // Metadata has not resolved yet (or failed transiently): the header must
+        // still fall back to the cached peer row.
+        offline: true,
+        cached: LocalConversation(
+          id: 'g1',
+          type: 'direct',
+          peerId: 'alice',
+          peerName: 'Alice',
+          lastSeq: 0,
+          lastReadSeq: 0,
+          clearedSeq: 0,
+          unreadCount: 0,
+          updatedAt: DateTime.utc(2026, 1, 1),
+        ),
+        messageStream: stream.stream,
+      );
+
+      expect(find.text('Alice'), findsOneWidget);
+
+      // A live message arrives on the open chat: the bubble appears immediately.
+      stream.add([
+        LocalMessage(
+          clientMsgId: 'c1',
+          conversationId: 'g1',
+          seq: 1,
+          senderId: 'alice',
+          type: 'text',
+          content: 'live while open',
+          createdAt: DateTime.utc(2026, 1, 1),
+          status: 'sent',
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('live while open'), findsOneWidget);
+    },
+  );
+
   testWidgets('an incoming message does not yank a user reading history', (tester) async {
     final stream = StreamController<List<LocalMessage>>.broadcast();
     addTearDown(stream.close);

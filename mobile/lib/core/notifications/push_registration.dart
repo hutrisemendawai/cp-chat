@@ -64,7 +64,10 @@ class PushRegistration {
   /// Retries initial FID registration after an offline or timed-out launch once
   /// connectivity returns (for example when the WebSocket reconnects).
   Future<void> ensureRegistered() async {
-    if (!_started || _registered || !_isAvailable()) return;
+    if (!_started || !_isAvailable()) return;
+    _refresh ??= (_refreshStream ?? FcmService.onTokenRefresh)
+        .listen((fid) => unawaited(_register(fid)));
+    if (_registered) return;
     await _registerCurrent();
   }
 

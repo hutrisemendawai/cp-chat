@@ -101,7 +101,17 @@ export function registerConversationRoutes(app: FastifyInstance, ctx: AppContext
       throw new ApiError('validation_error', 'A direct conversation requires exactly one member');
     }
     const otherId = memberIds[0]!;
-    const conversation = await conversations.findOrCreateDirect(request.userId, otherId);
+    const { conversation, created } = await conversations.findOrCreateDirectWithStatus(
+      request.userId,
+      otherId,
+    );
+    if (created) {
+      // A brand-new 1:1 chat must reach the other member live: without this the
+      // recipient only learns of it on the next reconnect/sync. Announce to the
+      // two verified members only, never to anyone else (privacy invariant).
+      await members.invalidate(conversation.id);
+      await announce(conversation.id, [request.userId, otherId]);
+    }
     const summary = await conversations.getSummary(conversation.id, request.userId);
     reply.status(201).send(summary);
   });

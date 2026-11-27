@@ -369,17 +369,18 @@ void main() {
       );
     });
 
-    test('falls back to plaintext when there is no peer or bundle', () async {
+    test('fails closed for an unknown peer and falls back without a bundle', () async {
       final store = _MemoryTokenStore(userId: 'alice');
       final manager = await _sender(store, _FakeApi(store));
 
+      // No peer id resolvable: a direct chat must never downgrade to plaintext.
       expect(
         await manager.encryptForConversation(
           conversationId: 'conv-1',
           plaintext: 'no peer known',
           isGroup: false,
         ),
-        'no peer known',
+        isNull,
       );
       expect(
         await manager.encryptForConversation(

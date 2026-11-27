@@ -1,5 +1,5 @@
 import { ApiError } from '../lib/errors.js';
-import type { Db } from '../lib/db.js';
+import { withTransaction, type Db } from '../lib/db.js';
 import { generateRefreshToken, hashRefreshToken } from '../lib/tokens.js';
 
 export type RefreshTokenRow = {
@@ -37,43 +37,74 @@ export class RefreshTokenRepository {
     deviceId: string | null,
   ): Promise<{ userId: string; token: string; id: string }> {
     const hash = hashRefreshToken(presentedToken);
-    const { rows } = await this.db.query<RefreshTokenRow>(
-      `SELECT id, user_id, expires_at, revoked_at, replaced_by
-         FROM refresh_tokens
-        WHERE token_hash = $1`,
-      [hash],
-    );
-    const row = rows[0];
-    if (!row) {
+    const outcome = await withTransaction(this.db, async (client) => {
+      const { rows } = await client.query<RefreshTokenRow>(
+        `SELECT id, user_id, expires_at, revoked_at, replaced_by
+           FROM refresh_tokens
+          WHERE token_hash = $1
+            FOR UPDATE`,
+        [hash],
+      );
+      const row = rows[0];
+      if (!row) {
+        return { kind: 'not_found' as const };
+      }
+
+      if (row.revoked_at) {
+        await client.query(
+          `UPDATE refresh_tokens SET revoked_at = NOW()
+            WHERE user_id = $1 AND revoked_at IS NULL`,
+          [row.user_id],
+        );
+        return { kind: 'revoked' as const };
+      }
+
+      if (row.expires_at.getTime() <= Date.now()) {
+        return { kind: 'expired' as const };
+      }
+
+      const { token, hash: nextHash } = generateRefreshToken();
+      const expiresAt = new Date(Date.now() + this.ttlSeconds * 1000);
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO refresh_tokens (user_id, token_hash, device_id, expires_at)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [row.user_id, nextHash, deviceId, expiresAt],
+      );
+      const nextId = inserted.rows[0]!.id;
+
+      await client.query(
+        `UPDATE refresh_tokens
+            SET revoked_at = NOW(), replaced_by = $2
+          WHERE id = $1 AND revoked_at IS NULL`,
+        [row.id, nextId],
+      );
+
+      return { kind: 'ok' as const, userId: row.user_id, token, id: nextId };
+    });
+
+    if (outcome.kind === 'not_found') {
       throw new ApiError('invalid_token', 'Refresh token is not recognised');
     }
-
-    if (row.revoked_at) {
-      await this.revokeFamily(row.user_id);
+    if (outcome.kind === 'revoked') {
       throw new ApiError('invalid_token', 'Refresh token has been revoked');
     }
-
-    if (row.expires_at.getTime() <= Date.now()) {
+    if (outcome.kind === 'expired') {
       throw new ApiError('invalid_token', 'Refresh token has expired');
     }
 
-    const next = await this.issue(row.user_id, deviceId);
-    await this.db.query(
-      `UPDATE refresh_tokens
-          SET revoked_at = NOW(), replaced_by = $2
-        WHERE id = $1 AND revoked_at IS NULL`,
-      [row.id, next.id],
-    );
-
-    return { userId: row.user_id, token: next.token, id: next.id };
+    return { userId: outcome.userId, token: outcome.token, id: outcome.id };
   }
 
-  async revoke(presentedToken: string): Promise<void> {
-    await this.db.query(
+  async revoke(presentedToken: string): Promise<{ userId: string; deviceId: string | null } | null> {
+    const { rows } = await this.db.query<{ user_id: string; device_id: string | null }>(
       `UPDATE refresh_tokens SET revoked_at = NOW()
-        WHERE token_hash = $1 AND revoked_at IS NULL`,
+        WHERE token_hash = $1 AND revoked_at IS NULL
+        RETURNING user_id, device_id`,
       [hashRefreshToken(presentedToken)],
     );
+    const row = rows[0];
+    return row ? { userId: row.user_id, deviceId: row.device_id } : null;
   }
 
   async revokeFamily(userId: string): Promise<void> {

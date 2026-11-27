@@ -190,11 +190,11 @@ describe('fcm dispatch', () => {
     aliceSocket.close();
   });
 
-  it('does not push to a recipient with a live socket', async () => {
+  it('does not push to a recipient device with a live socket', async () => {
     const alice = await registerUser(harness, 'Alice');
     const bob = await registerUser(harness, 'Bob');
     const conversationId = await createDirect(harness, alice, bob);
-    await seedDevice(bob, 'bob-phone', 'bob-fid');
+    await seedDevice(bob, bob.deviceId, 'bob-fid');
 
     const aliceSocket = await connect(alice);
     const bobSocket = await connect(bob);
@@ -211,6 +211,34 @@ describe('fcm dispatch', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(pushes).toHaveLength(0);
+
+    aliceSocket.close();
+    bobSocket.close();
+  });
+
+  it('pushes to an offline secondary device even when another device has a live socket', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+    const conversationId = await createDirect(harness, alice, bob);
+    await seedDevice(bob, bob.deviceId, 'bob-online-fid', 2);
+    await seedDevice(bob, 'bob-offline-phone', 'bob-offline-fid', 2);
+
+    const aliceSocket = await connect(alice);
+    const bobSocket = await connect(bob);
+    const clientMsgId = randomUUID();
+    aliceSocket.send({
+      type: 'send',
+      conversation_id: conversationId,
+      client_msg_id: clientMsgId,
+      msg_type: 'text',
+      content: 'multi-device ping',
+    });
+    await aliceSocket.wait((item) => item.type === 'status' && item.status === 'sent');
+    await bobSocket.wait((item) => item.type === 'message' && item.client_msg_id === clientMsgId);
+
+    const push = await eventually(() => pushes[0]);
+    expect(push.mode).toBe('data_only');
+    expect(push.fids).toEqual(['bob-offline-fid']);
 
     aliceSocket.close();
     bobSocket.close();
@@ -460,5 +488,45 @@ describe('fcm dispatch', () => {
     expect((msg.android as Record<string, unknown>).notification).toBeUndefined();
     expect((msg.data as Record<string, string>).push_schema).toBe('2');
     expect((msg.data as Record<string, string>).content).toBe('e2ee:v1:{"v":1}');
+  });
+
+  it('does not prune device tokens on messaging/invalid-argument and chunks batches at 500', async () => {
+    const chunkSizes: number[] = [];
+    const service = new NotificationService(TEST_CONFIG, createLogger(TEST_CONFIG, 'test'));
+    (service as unknown as { messaging: unknown }).messaging = {
+      sendEachForMulticast: async (message: { fids: string[] }) => {
+        chunkSizes.push(message.fids.length);
+        return {
+          successCount: message.fids.length - 1,
+          failureCount: 1,
+          responses: message.fids.map((_, i) =>
+            i === 0
+              ? { success: false, error: { code: 'messaging/invalid-argument' } }
+              : { success: true },
+          ),
+        };
+      },
+    };
+
+    const fids = Array.from({ length: 505 }, (_, i) => `fid-${i}`);
+    const stale = await service.notifyDataOnly(fids, {
+      title: 'Alice',
+      body: 'Encrypted message',
+      conversationId: 'c1',
+      conversationType: 'direct',
+      messageId: 'm1',
+      clientMsgId: 'cm1',
+      seq: 7,
+      senderId: 'alice',
+      senderName: 'Alice',
+      recipientUserId: 'bob',
+      conversationName: '',
+      type: 'text',
+      createdAt: '2026-11-26T12:00:00.000Z',
+      content: 'e2ee:v1:{"v":1}',
+    });
+
+    expect(chunkSizes).toEqual([500, 5]);
+    expect(stale).toEqual([]);
   });
 });

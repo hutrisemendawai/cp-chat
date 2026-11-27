@@ -75,8 +75,9 @@ const STALE_TOKEN_CODES = new Set([
   'messaging/registration-token-not-registered',
   'messaging/unregistered',
   'messaging/invalid-registration-token',
-  'messaging/invalid-argument',
 ]);
+
+const FCM_MAX_BATCH_SIZE = 500;
 
 /**
  * FCM push for recipients with no live gateway connection.
@@ -185,42 +186,65 @@ export class NotificationService {
   ): Promise<string[]> {
     if (!this.messaging || fids.length === 0) return [];
 
-    try {
-      const response = await this.messaging.sendEachForMulticast(message);
+    const dataMap = 'data' in message && message.data ? message.data : undefined;
+    const dataKeys = dataMap ? Object.keys(dataMap) : [];
+    const dataBytes = dataMap ? Buffer.byteLength(JSON.stringify(dataMap), 'utf8') : 0;
+    const contentOmitted = dataMap?.content_omitted === 'true';
 
-      const stale: string[] = [];
-      response.responses.forEach((result, index) => {
-        const code = result.error?.code;
-        if (!code) return;
-        const fid = fids[index];
-        if (fid && STALE_TOKEN_CODES.has(code)) stale.push(fid);
-        // Anything the OS rejects is logged (never the message body) so a
-        // silently-undelivered push is diagnosable from the server logs.
-        this.logger.warn({ code, fid, mode }, 'FCM rejected a send');
-      });
+    const stale: string[] = [];
+    let sent = 0;
+    let failed = 0;
 
-      this.logger.info(
-        {
-          mode,
-          sent: response.successCount,
-          failed: response.failureCount,
-          total: fids.length,
-          pruned: stale.length,
-        },
-        'FCM multicast sent',
-      );
+    for (let offset = 0; offset < fids.length; offset += FCM_MAX_BATCH_SIZE) {
+      const chunk = fids.slice(offset, offset + FCM_MAX_BATCH_SIZE);
+      try {
+        const response = await this.messaging.sendEachForMulticast({
+          ...message,
+          fids: chunk,
+        });
 
-      if (stale.length > 0) {
-        this.logger.info(
-          { mode, stale: stale.length, total: fids.length },
-          'pruning unregistered FCM installations',
-        );
+        sent += response.successCount;
+        failed += response.failureCount;
+
+        response.responses.forEach((result, index) => {
+          const code = result.error?.code;
+          if (!code) return;
+          const fid = chunk[index];
+          if (code === 'messaging/invalid-argument') {
+            this.logger.error(
+              { code, fid, mode, data_keys: dataKeys, data_bytes: dataBytes },
+              'FCM rejected payload as invalid-argument; keeping device token',
+            );
+            return;
+          }
+          if (fid && STALE_TOKEN_CODES.has(code)) stale.push(fid);
+          this.logger.warn({ code, fid, mode }, 'FCM rejected a send');
+        });
+      } catch (error) {
+        failed += chunk.length;
+        this.logger.warn({ err: error, mode, total: chunk.length }, 'FCM send failed');
       }
-      return stale;
-    } catch (error) {
-      this.logger.warn({ err: error, mode, total: fids.length }, 'FCM send failed');
-      return [];
     }
+
+    this.logger.info(
+      {
+        mode,
+        sent,
+        failed,
+        total: fids.length,
+        pruned: stale.length,
+        content_omitted: contentOmitted,
+      },
+      'FCM multicast sent',
+    );
+
+    if (stale.length > 0) {
+      this.logger.info(
+        { mode, stale: stale.length, total: fids.length },
+        'pruning unregistered FCM installations',
+      );
+    }
+    return stale;
   }
 
   /**

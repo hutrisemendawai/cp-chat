@@ -18,6 +18,7 @@ import 'package:cp_chat/core/crypto/e2ee_manager.dart';
 import 'package:cp_chat/core/crypto/e2ee_service.dart';
 import 'package:cp_chat/core/database/app_database.dart';
 import 'package:cp_chat/core/database/chat_dao.dart';
+import 'package:cp_chat/core/logging/app_logger.dart';
 import 'package:cp_chat/core/models/models.dart';
 import 'package:cp_chat/core/network/api_client.dart';
 import 'package:cp_chat/core/network/ws_client.dart';
@@ -343,6 +344,47 @@ void main() {
 
       // Updated ratchet sessions are persisted in Bob's AccountStore.
       expect(await fixture.accountStore.readE2eeSessions(), isNotNull);
+    });
+
+    test('terminated first contact persists both the message and a conversation row',
+        () async {
+      // Bob has never seen this conversation: no local_conversations row yet.
+      final fixture = await _BobPartitionFixture.create(seedConversation: false);
+      addTearDown(fixture.dispose);
+      final sink = _RecordingSink();
+
+      final ciphertext = await fixture.aliceEncrypt('Hi, first contact');
+
+      final handler = BackgroundPushHandler(
+        tokenStoreFactory: () => fixture.store,
+        appDirsFactory: () => fixture.dirs,
+        apiClientFactory: (s, _) => _FakeApi(s),
+        notificationSinkFactory: () async => sink,
+        portLookup: (_) => null,
+      );
+
+      final outcome = await handler.handle(
+        RemoteMessage(data: _v2PushData(content: ciphertext)),
+      );
+      expect(outcome, BackgroundPushOutcome.shownDecrypted);
+
+      final db = AppDatabase.forFile(fixture.paths.dbFile);
+      try {
+        final dao = ChatDao(db);
+        final stored = await dao.message('client-1');
+        expect(stored, isNotNull);
+        expect(stored!.content, 'Hi, first contact');
+
+        final conv = await dao.conversation('conv-1');
+        expect(conv, isNotNull, reason: 'a provisional conversation row is created');
+        expect(conv!.type, 'direct');
+        expect(conv.peerId, 'alice');
+        expect(conv.peerName, 'Alice');
+        expect(conv.lastMessagePreview, 'Hi, first contact');
+        expect(conv.unreadCount, 1);
+      } finally {
+        await db.close();
+      }
     });
 
     test('opening the app after background decrypt skips re-decryption and decrypts seq+1 cleanly',
@@ -870,6 +912,168 @@ void main() {
       final dirs = AppDirs(channel: channel);
       final strict = await dirs.noBackupDirStrict();
       expect(strict, isNull);
+    });
+
+    test('self-sent encrypted message in a gap advances cursor so subsequent peer message decrypts',
+        () async {
+      final fixture = await _BobPartitionFixture.create();
+      addTearDown(fixture.dispose);
+      final sink = _RecordingSink();
+
+      final ct1 = await fixture.aliceEncrypt('From Alice 1');
+      final ct3 = await fixture.aliceEncrypt('From Alice 3');
+      // Bob sent seq=2 from another device (ciphertext unreadable to this device).
+      const selfCiphertext = 'e2ee:v1:{"v":1,"ik":"aQ==","ek":"ZQ==","spk":1,"i":0,"ct":"Y3Q=","n":"bm9uY2UxMjM0NTY=","m":"bWFjMTIzNDU2Nzg5MDEyMzQ1Ng=="}';
+
+      final handler = BackgroundPushHandler(
+        tokenStoreFactory: () => fixture.store,
+        appDirsFactory: () => fixture.dirs,
+        apiClientFactory: (s, _) => _FakeApi(
+          s,
+          syncHandler: (cid, afterSeq, limit) async => SyncResult(
+            latestSeq: 3,
+            messages: [
+              message('self-2', conversationId: cid, seq: 2, senderId: 'bob', content: selfCiphertext),
+              message('client-3', conversationId: cid, seq: 3, senderId: 'alice', content: ct3),
+            ],
+          ),
+        ),
+        notificationSinkFactory: () async => sink,
+        portLookup: (_) => null,
+      );
+
+      expect(
+        await handler.handleData(_v2PushData(
+          messageId: 'srv-1',
+          clientMsgId: 'client-1',
+          seq: 1,
+          content: ct1,
+        )),
+        BackgroundPushOutcome.shownDecrypted,
+      );
+
+      final outcome = await handler.handleData(_v2PushData(
+        messageId: 'srv-3',
+        clientMsgId: 'client-3',
+        seq: 3,
+        content: ct3,
+      ));
+      expect(outcome, BackgroundPushOutcome.shownDecrypted);
+      expect(sink.shown.last.body, 'From Alice 3');
+    });
+
+    test('unset layoutKey still decrypts when partition DB and account_meta are valid',
+        () async {
+      final fixture = await _BobPartitionFixture.create();
+      addTearDown(fixture.dispose);
+      final sink = _RecordingSink();
+      fixture.store.data.remove(LegacyMigration.layoutKey);
+
+      final ct = await fixture.aliceEncrypt('Layout unset recovery');
+      final handler = BackgroundPushHandler(
+        tokenStoreFactory: () => fixture.store,
+        appDirsFactory: () => fixture.dirs,
+        apiClientFactory: (s, _) => _FakeApi(s),
+        notificationSinkFactory: () async => sink,
+        portLookup: (_) => null,
+      );
+
+      final outcome = await handler.handleData(_v2PushData(content: ct));
+      expect(outcome, BackgroundPushOutcome.shownDecrypted);
+      expect(sink.shown.single.body, 'Layout unset recovery');
+    });
+
+    test('Case 3 stale seq suppresses duplicate when a readable row exists at (conversationId, seq)',
+        () async {
+      final fixture = await _BobPartitionFixture.create();
+      addTearDown(fixture.dispose);
+      final sink = _RecordingSink();
+      final ct = await fixture.aliceEncrypt('Already stored');
+
+      final handler = BackgroundPushHandler(
+        tokenStoreFactory: () => fixture.store,
+        appDirsFactory: () => fixture.dirs,
+        apiClientFactory: (s, _) => _FakeApi(s),
+        notificationSinkFactory: () async => sink,
+        portLookup: (_) => null,
+      );
+
+      expect(
+        await handler.handleData(_v2PushData(clientMsgId: 'client-1', seq: 1, content: ct)),
+        BackgroundPushOutcome.shownDecrypted,
+      );
+      expect(
+        await handler.handleData(_v2PushData(clientMsgId: 'other-id', seq: 1, content: ct)),
+        BackgroundPushOutcome.suppressedDuplicate,
+      );
+      expect(sink.shown, hasLength(1));
+    });
+
+    test('records non-secret fallback diagnostics and drains them into AppLogger', () async {
+      final fixture = await _BobPartitionFixture.create();
+      addTearDown(fixture.dispose);
+      final sink = _RecordingSink();
+      final ct = await fixture.aliceEncrypt('Top secret body');
+      fixture.store.data.remove(fixture.accountStore.e2eeKeysKey);
+
+      final handler = BackgroundPushHandler(
+        tokenStoreFactory: () => fixture.store,
+        appDirsFactory: () => fixture.dirs,
+        apiClientFactory: (s, _) => _FakeApi(s),
+        notificationSinkFactory: () async => sink,
+        portLookup: (_) => null,
+      );
+
+      final outcome = await handler.handleData(_v2PushData(content: ct));
+      expect(outcome, BackgroundPushOutcome.shownFallback);
+
+      final diagFile = File('${fixture.paths.partitionDir.path}/${BackgroundPushHandler.diagFileName}');
+      expect(await diagFile.exists(), isTrue);
+      final rawDiag = await diagFile.readAsString();
+      expect(rawDiag, contains('noLocalKeys'));
+      expect(rawDiag, isNot(contains('Top secret body')));
+      expect(rawDiag, isNot(contains('e2ee:v1:')));
+
+      final logger = AppLogger();
+      await BackgroundPushHandler.drainDiagnostics(fixture.paths.partitionDir, logger);
+      expect(await diagFile.exists(), isFalse);
+      expect(logger.entries, hasLength(1));
+      expect(logger.entries.single.tag, 'fcm_bg_diag');
+      expect(logger.entries.single.meta?['fallback_reason'], 'noLocalKeys');
+    });
+
+    test('ChatSocket.ingestFcmPush preserves plaintext group content when /sync throws',
+        () async {
+      final fixture = await _BobPartitionFixture.create();
+      addTearDown(fixture.dispose);
+      final db = AppDatabase.forFile(fixture.paths.dbFile);
+      addTearDown(db.close);
+      final dao = ChatDao(db);
+      final api = _FakeApi(
+        fixture.store,
+        syncHandler: (_, _, _) async => throw const SocketException('offline'),
+      );
+      final socket = ChatSocket(dao, api, fixture.store);
+      addTearDown(socket.dispose);
+
+      final emitted = <Message>[];
+      socket.onIncomingMessage = (msg, {String? senderName}) => emitted.add(msg);
+
+      await socket.ingestFcmPush(_v2PushData(
+        conversationId: 'group-9',
+        conversationType: 'group',
+        conversationName: 'Ops',
+        messageId: 'srv-5',
+        clientMsgId: 'client-5',
+        seq: 5,
+        senderId: 'alice',
+        senderName: 'Alice',
+        msgType: 'text',
+        content: 'Deploy is green',
+      ));
+
+      expect(emitted, hasLength(1));
+      expect(emitted.single.content, 'Deploy is green');
     });
   });
 

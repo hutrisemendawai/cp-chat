@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto';
+
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import { MessageRepository } from '../src/domain/messages.js';
 import {
   auth,
   createHarness,
@@ -259,6 +262,67 @@ describe('friends', () => {
       headers: auth(alice),
     });
     expect(profile.json().is_friend).toBe(true);
+  });
+
+  it('a one-way friendship never blocks conversation or message access', async () => {
+    const alice = await registerUser(harness, 'Alice');
+    const bob = await registerUser(harness, 'Bob');
+
+    // Alice adds Bob; Bob has not (and must not need to) add Alice.
+    await addFriend(alice, { user_id: bob.id });
+
+    const created = await harness.app.inject({
+      method: 'POST',
+      url: '/api/v1/conversations',
+      headers: auth(alice),
+      payload: { type: 'direct', member_ids: [bob.id] },
+    });
+    expect(created.statusCode).toBe(201);
+    const conversationId = created.json().id as string;
+
+    const repo = new MessageRepository(harness.db);
+    for (let index = 0; index < 2; index += 1) {
+      await repo.append({
+        conversationId,
+        senderId: alice.id,
+        clientMsgId: randomUUID(),
+        type: 'text',
+        content: `hello ${index}`,
+      });
+    }
+
+    // Bob can list and read the conversation with Alice's full profile.
+    const list = await harness.app.inject({
+      method: 'GET',
+      url: '/api/v1/conversations',
+      headers: auth(bob),
+    });
+    const entry = list
+      .json()
+      .conversations.find((conversation: { id: string }) => conversation.id === conversationId);
+    expect(entry).toBeDefined();
+    const aliceMember = entry.members.find(
+      (member: { user: { id: string } }) => member.user.id === alice.id,
+    );
+    expect(aliceMember.user).toMatchObject({ name: 'Alice' });
+    expect(aliceMember.user).toHaveProperty('avatar_url');
+    expect(aliceMember.user).toHaveProperty('nickname');
+
+    const summary = await harness.app.inject({
+      method: 'GET',
+      url: `/api/v1/conversations/${conversationId}`,
+      headers: auth(bob),
+    });
+    expect(summary.statusCode).toBe(200);
+    expect(summary.json().members).toHaveLength(2);
+
+    // Bob's friends list stays empty (the relationship is directed).
+    const bobFriends = await harness.app.inject({
+      method: 'GET',
+      url: '/api/v1/friends',
+      headers: auth(bob),
+    });
+    expect(bobFriends.json().friends).toEqual([]);
   });
 });
 

@@ -147,4 +147,102 @@ void main() {
 
     await socket.dispose();
   });
+
+  test(
+    'first contact decrypts without a local conversation and enables an encrypted reply',
+    () async {
+      // Bob (the recipient) has never seen 'conv-1': no local_conversations row
+      // and no prior session with Alice.
+      final bobService = E2eeService(prekeyCount: 3);
+      final bobKeys = await bobService.generateKeyMaterial(startPrekeyId: 100);
+      final bobStore = _MemoryStore(userId: 'bob')
+        ..keyBlob = await bobService.exportKeyMaterial(bobKeys);
+      final bobPublic = await bobService.buildPublicBundle(bobKeys);
+
+      final aliceStore = _MemoryStore(userId: 'alice');
+      final alice = E2eeManager(
+        tokenStore: aliceStore,
+        api: _FakeApi(aliceStore, bundles: {'bob': _bundleFor(bobPublic)}),
+      );
+      await alice.bootstrap();
+
+      final first = (await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'hello from a stranger',
+        isGroup: false,
+        peerId: 'bob',
+      ))!;
+      final second = (await alice.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'second message',
+        isGroup: false,
+        peerId: 'bob',
+      ))!;
+
+      final manager = E2eeManager(
+        tokenStore: bobStore,
+        api: _FakeApi(bobStore),
+        service: E2eeService(prekeyCount: 3),
+      );
+      await manager.bootstrap();
+
+      final socket = ChatSocket(
+        dao,
+        _FakeApi(bobStore),
+        bobStore,
+        decrypt: (conversationId, clientMsgId, senderId, body, {required isGroup}) {
+          return manager.plaintextFor(
+            clientMsgId,
+            conversationId,
+            body,
+            isGroup: isGroup,
+            senderId: senderId,
+          );
+        },
+      );
+      addTearDown(socket.dispose);
+
+      for (final (seq, ciphertext) in [(1, first), (2, second)]) {
+        await socket.handleServerFrameForTesting({
+          'type': 'message',
+          'message_id': 'srv-$seq',
+          'conversation_id': 'conv-1',
+          'seq': seq,
+          'sender_id': 'alice',
+          'sender_name': 'Alice',
+          'conversation_type': 'direct',
+          'client_msg_id': 'm$seq',
+          'msg_type': 'text',
+          'content': ciphertext,
+          'created_at': DateTime.utc(2026, 1, 1, 0, 0, seq).toIso8601String(),
+        });
+      }
+
+      final rows = await dao.watchMessages('conv-1').first;
+      expect(rows.map((row) => row.content).toList(),
+          ['hello from a stranger', 'second message']);
+
+      // The conversation row was created atomically with the first message.
+      final conv = await dao.conversation('conv-1');
+      expect(conv, isNotNull);
+      expect(conv!.peerId, 'alice');
+      expect(conv.peerName, 'Alice');
+      expect(conv.lastMessagePreview, 'second message');
+      expect(conv.unreadCount, 2);
+
+      // Bob can immediately reply on the established session, no plaintext.
+      final reply = await manager.encryptForConversation(
+        conversationId: 'conv-1',
+        plaintext: 'hi back',
+        isGroup: false,
+        peerId: conv.peerId,
+      );
+      expect(reply, isNotNull);
+      expect(reply, startsWith('e2ee:v1:'));
+      expect(
+        await alice.plaintextFor('reply-1', 'conv-1', reply!, isGroup: false, senderId: 'bob'),
+        'hi back',
+      );
+    },
+  );
 }
