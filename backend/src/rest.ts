@@ -1,4 +1,5 @@
 import { loadConfig } from './config.js';
+import { CallSweeper } from './domain/call-sweeper.js';
 import { createDb } from './lib/db.js';
 import { configureLogMirror, createLogger } from './lib/logger.js';
 import { LogStore } from './lib/log-store.js';
@@ -26,12 +27,18 @@ async function main() {
   const tracing = await startTracing(config, 'rest');
 
   const ctx = createContext(config, db, redis, logs);
+  await ctx.notifications.initialize();
+
+  const callSweeper = new CallSweeper(ctx.callSignaling, createLogger(config, 'call-sweeper'));
+  callSweeper.start();
+
   const app = buildServer(ctx, logger);
 
   await app.listen({ host: config.REST_HOST, port: config.REST_PORT });
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'shutting down');
+    callSweeper.stop();
     // Fail readiness first so the load balancer drains traffic during a rolling
     // deploy; Fastify then finishes in-flight requests before we close pools.
     await app.close();

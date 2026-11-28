@@ -5,11 +5,13 @@ import 'package:material_ui/material_ui.dart';
 import '../../core/database/app_database.dart';
 import '../../core/models/models.dart';
 import '../../core/providers.dart';
+import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/connection_banner.dart';
 import '../../shared/widgets/app_widgets.dart';
 import '../../shared/widgets/user_avatar.dart';
 import '../../shared/widgets/user_search_picker.dart';
+import '../calls/call_controller.dart';
 import '../chat/media_message.dart';
 import '../presence/presence_controller.dart';
 
@@ -477,6 +479,8 @@ class _ConversationTile extends ConsumerWidget {
     final presence = isGroup || conversation.peerId == null
         ? null
         : ref.watch(presenceProvider(conversation.peerId!));
+    final activeGroupCall =
+        isGroup ? ref.watch(activeGroupCallsProvider)[conversation.id] : null;
 
     return InkWell(
       onTap: onTap,
@@ -537,6 +541,38 @@ class _ConversationTile extends ConsumerWidget {
                           ),
                         ),
                       ),
+                      if (activeGroupCall != null) ...[
+                        const SizedBox(width: AppSpacing.sm),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppColors.whatsappEmerald.withValues(alpha: 0.16),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.call,
+                                size: 12,
+                                color: AppColors.whatsappEmerald,
+                              ),
+                              SizedBox(width: 4),
+                              Text(
+                                'In call',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.whatsappEmerald,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                       if (unread > 0) ...[
                         const SizedBox(width: AppSpacing.sm),
                         _UnreadBadge(count: unread),

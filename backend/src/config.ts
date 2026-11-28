@@ -108,6 +108,15 @@ const envSchema = z.object({
   OTEL_SERVICE_NAME: z.string().default('cp-chat'),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().default('http://localhost:4318'),
   OTEL_TRACES_SAMPLER_RATIO: z.coerce.number().min(0).max(1).default(0.1),
+
+  // ---- Voice & Video Calls (Self-Hosted LiveKit SFU) ----
+  LIVEKIT_API_KEY: z.string().optional(),
+  LIVEKIT_API_SECRET: z.string().optional(),
+  LIVEKIT_URL: z.string().default('http://127.0.0.1:7880'),
+  LIVEKIT_PUBLIC_URL: z.string().default('ws://10.0.2.2:7880'),
+  LIVEKIT_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().max(3600).default(600),
+  CALL_RING_TIMEOUT_SECONDS: z.coerce.number().int().positive().max(120).default(40),
+  CALL_MAX_GROUP_PARTICIPANTS: z.coerce.number().int().positive().max(100).default(20),
 });
 
 export type Config = z.infer<typeof envSchema> & { gatewayNodeId: string };

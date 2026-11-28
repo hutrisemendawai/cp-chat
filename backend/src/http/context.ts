@@ -4,10 +4,14 @@ import type { Config } from '../config.js';
 import { createBroker, type Broker } from '../lib/broker.js';
 import type { Db } from '../lib/db.js';
 import { ApiError } from '../lib/errors.js';
+import { NotificationService } from '../lib/fcm.js';
+import { LiveKitService, type LiveKitClient } from '../lib/livekit.js';
 import { createLogger } from '../lib/logger.js';
 import { LogStore } from '../lib/log-store.js';
 import type { Cache } from '../lib/redis.js';
 import { verifyAccessToken } from '../lib/tokens.js';
+import { CallRepository } from '../domain/calls.js';
+import { CallSignalingService } from '../domain/call-signaling.js';
 import { ConversationRepository } from '../domain/conversations.js';
 import { DeviceRepository } from '../domain/devices.js';
 import { FriendRepository } from '../domain/friends.js';
@@ -39,6 +43,15 @@ export type AppContext = {
   scylla: ScyllaMessageRepository | null;
   keys: KeyRepository;
   logs: LogStore;
+  notifications: NotificationService;
+  livekit: LiveKitClient;
+  calls: CallRepository;
+  callSignaling: CallSignalingService;
+};
+
+export type ContextOverrides = {
+  notifications?: NotificationService;
+  livekit?: LiveKitClient;
 };
 
 export function createContext(
@@ -50,6 +63,7 @@ export function createContext(
     maxEntries: config.LOG_MAX_ENTRIES,
     enabled: config.LOG_BUFFER_ENABLED,
   }),
+  overrides: ContextOverrides = {},
 ): AppContext {
   const presence = new PresenceService(redis, db, config.PRESENCE_TTL_SECONDS);
   // Member projections need presence for the status badge; pass the service so
@@ -65,15 +79,35 @@ export function createContext(
       ? new ScyllaMessageRepository(createScyllaClient(config), createLogger(config, 'scylla'))
       : null;
 
+  const broker = createBroker(config, redis, config.gatewayNodeId, logger);
+  const users = new UserRepository(db);
+  const devices = new DeviceRepository(db);
+  const notifications =
+    overrides.notifications ?? new NotificationService(config, createLogger(config, 'fcm'));
+  const livekit =
+    overrides.livekit ?? new LiveKitService(config, createLogger(config, 'livekit'));
+  const calls = new CallRepository(db);
+  const callSignaling = new CallSignalingService(
+    config,
+    calls,
+    livekit,
+    users,
+    devices,
+    notifications,
+    broker,
+    redis,
+    createLogger(config, 'calls'),
+  );
+
   return {
     config,
     db,
     redis,
     // Producers connect lazily, so constructing the broker costs nothing in a
     // process that never publishes (e.g. a REST-only replica).
-    broker: createBroker(config, redis, config.gatewayNodeId, logger),
+    broker,
     scylla,
-    users: new UserRepository(db),
+    users,
     friends: new FriendRepository(db, presence),
     refreshTokens: new RefreshTokenRepository(db, config.REFRESH_TOKEN_TTL_SECONDS),
     conversations,
@@ -81,13 +115,17 @@ export function createContext(
       scylla,
       logger: createLogger(config, 'messages'),
     }),
-    devices: new DeviceRepository(db),
+    devices,
     keys: new KeyRepository(db),
     media: new MediaRepository(db),
     members: new MemberCache(redis, conversations, config.MEMBERS_CACHE_TTL_SECONDS),
     presence,
     storage: new StorageService(config),
     logs,
+    notifications,
+    livekit,
+    calls,
+    callSignaling,
   };
 }
 

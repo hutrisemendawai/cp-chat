@@ -8,6 +8,7 @@ import '../account/partition_lock.dart';
 import '../crypto/e2ee_service.dart' show PublicKeyBundle, PublicPrekey, RemotePrekeyBundle;
 import '../config/app_config.dart';
 import '../logging/app_logger.dart';
+import '../models/call_models.dart';
 import '../models/models.dart';
 import '../storage/token_store.dart';
 
@@ -347,6 +348,84 @@ class ApiClient {
 
     final response = await dio.patch<dynamic>('/api/v1/users/me', data: payload);
     return User.fromJson(_ok(response));
+  }
+
+  // -------------------------------------------------------------------------
+  // Voice & Video Calls (LiveKit orchestration)
+  // -------------------------------------------------------------------------
+
+  Future<CallJoinGrant> startCall(
+    String conversationId, {
+    required CallMediaType mediaType,
+  }) async {
+    final response = await dio.post<dynamic>(
+      '/api/v1/conversations/$conversationId/calls',
+      data: {'media_type': mediaType.wireValue},
+    );
+    return CallJoinGrant.fromJson(_ok(response));
+  }
+
+  Future<CallJoinGrant> acceptCall(String callId) async {
+    final response = await dio.post<dynamic>('/api/v1/calls/$callId/accept');
+    return CallJoinGrant.fromJson(_ok(response));
+  }
+
+  Future<CallJoinGrant> joinCall(String callId) async {
+    final response = await dio.post<dynamic>('/api/v1/calls/$callId/join');
+    return CallJoinGrant.fromJson(_ok(response));
+  }
+
+  Future<CallTokenRefresh> refreshCallToken(String callId) async {
+    final response = await dio.post<dynamic>('/api/v1/calls/$callId/token');
+    return CallTokenRefresh.fromJson(_ok(response));
+  }
+
+  Future<void> rejectCall(String callId, {String reason = 'declined'}) async {
+    final response = await dio.post<dynamic>(
+      '/api/v1/calls/$callId/reject',
+      data: {'reason': reason},
+    );
+    final status = response.statusCode ?? 0;
+    if (status != 204 && status != 200) {
+      throw ApiException.fromResponse(status, _body(response.data));
+    }
+  }
+
+  Future<void> cancelCall(String callId) async {
+    final response = await dio.post<dynamic>('/api/v1/calls/$callId/cancel');
+    final status = response.statusCode ?? 0;
+    if (status != 204 && status != 200) {
+      throw ApiException.fromResponse(status, _body(response.data));
+    }
+  }
+
+  Future<void> leaveCall(String callId) async {
+    final response = await dio.post<dynamic>('/api/v1/calls/$callId/leave');
+    final status = response.statusCode ?? 0;
+    if (status != 204 && status != 200) {
+      throw ApiException.fromResponse(status, _body(response.data));
+    }
+  }
+
+  Future<ActiveCallSummary?> activeCallForConversation(String conversationId) async {
+    final response = await dio.get<dynamic>(
+      '/api/v1/conversations/$conversationId/active-call',
+    );
+    final body = _ok(response);
+    final raw = body['active_call'];
+    if (raw is! Map<String, dynamic>) return null;
+    return ActiveCallSummary.fromJson(raw);
+  }
+
+  Future<List<ActiveCallSummary>> activeCalls() async {
+    final response = await dio.get<dynamic>('/api/v1/calls/active');
+    final body = _ok(response);
+    final rawList = body['calls'];
+    if (rawList is! List) return const [];
+    return rawList
+        .whereType<Map<String, dynamic>>()
+        .map(ActiveCallSummary.fromJson)
+        .toList();
   }
 
   Future<List<Conversation>> conversations({int limit = 50}) async {

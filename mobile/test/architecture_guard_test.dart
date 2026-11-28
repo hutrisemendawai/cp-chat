@@ -1,9 +1,11 @@
 import 'dart:io';
 
+import 'package:cp_chat/core/models/call_models.dart';
 import 'package:cp_chat/core/models/models.dart';
 import 'package:cp_chat/core/providers.dart';
 import 'package:cp_chat/core/storage/app_dirs.dart';
 import 'package:cp_chat/core/storage/token_store.dart';
+import 'package:cp_chat/features/calls/call_controller.dart';
 import 'package:cp_chat/features/chat/chat_controller.dart';
 import 'package:cp_chat/features/chat/conversation_metadata.dart';
 import 'package:cp_chat/features/groups/group_controller.dart';
@@ -81,6 +83,23 @@ void main() {
       final accountStoreA = container.read(accountStoreProvider);
       final groupCtrlA = container.read(groupControllerProvider);
       final chatCtrlA = container.read(chatControllerProvider('conv-1'));
+      final callMediaA = container.read(livekitMediaServiceProvider);
+
+      container.read(activeGroupCallsProvider.notifier).upsert(
+            ActiveCallSummary(
+              callId: 'call-a',
+              conversationId: 'group-a',
+              roomName: 'call_call-a',
+              type: CallType.group,
+              mediaType: CallMediaType.voice,
+              initiatedBy: 'user-a',
+              status: 'active',
+              participantCount: 1,
+              participantIds: const ['user-a'],
+              startedAt: DateTime.now().toUtc(),
+            ),
+          );
+      expect(container.read(activeGroupCallsProvider), isNotEmpty);
 
       container.read(activeConversationIdProvider.notifier).open('conv-1');
       expect(container.read(activeConversationIdProvider), 'conv-1');
@@ -109,6 +128,7 @@ void main() {
       final accountStoreB = container.read(accountStoreProvider);
       final groupCtrlB = container.read(groupControllerProvider);
       final chatCtrlB = container.read(chatControllerProvider('conv-1'));
+      final callMediaB = container.read(livekitMediaServiceProvider);
 
       expect(identical(scopeA, scopeB), isFalse);
       expect(identical(dbA, dbB), isFalse);
@@ -123,16 +143,20 @@ void main() {
       expect(identical(accountStoreA, accountStoreB), isFalse);
       expect(identical(groupCtrlA, groupCtrlB), isFalse);
       expect(identical(chatCtrlA, chatCtrlB), isFalse);
+      expect(identical(callMediaA, callMediaB), isFalse);
+      expect(container.read(activeGroupCallsProvider), isEmpty);
+      expect(container.read(callControllerProvider).isIdle, isTrue);
       expect(container.read(peopleControllerProvider).query, isEmpty);
 
-      // Verify presence / conversationMetadata / friends / userProfile source
-      // files explicitly watch accountScopeProvider.
+      // Verify presence / conversationMetadata / friends / userProfile / calls
+      // source files explicitly watch accountScopeProvider.
       final providerFiles = [
         'lib/features/presence/presence_controller.dart',
         'lib/features/people/people_controller.dart',
         'lib/features/chat/conversation_metadata.dart',
         'lib/features/groups/group_controller.dart',
         'lib/features/chat/chat_controller.dart',
+        'lib/features/calls/call_controller.dart',
       ];
       for (final path in providerFiles) {
         final content = File(path).readAsStringSync();

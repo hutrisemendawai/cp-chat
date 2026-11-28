@@ -1,0 +1,34 @@
+# Self-hosted LiveKit SFU configuration for local LAN / Android emulator dev
+# Usage: LIVEKIT_CONFIG_FILE=./infra/livekit/livekit.dev.yaml docker compose up -d livekit
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  port_range_start: 50000
+  port_range_end: 50100
+  tcp_port: 7881
+  use_external_ip: false
+  enable_loopback_candidate: true
+
+redis:
+  address: 127.0.0.1:6379
+  db: 1
+
+room:
+  auto_create: false
+  empty_timeout: 45
+  departure_timeout: 20
+
+turn:
+  enabled: false
+
+webhook:
+  api_key: ""
+  urls:
+    - http://127.0.0.1:8080/api/v1/webhooks/livekit
+
+logging:
+  level: info
+  pion_level: warn

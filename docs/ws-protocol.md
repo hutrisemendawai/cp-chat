@@ -353,6 +353,23 @@ as the socket is up. A screen shows a reconnect banner while the socket is down.
   current snapshot from `GET /api/v1/presence/{id}` (see the REST spec) and then
   apply subsequent frames.
 
+### Voice & Video Call Signaling Frames (Server -> Client)
+
+Call state mutations happen over REST (`POST /api/v1/conversations/{id}/calls`,
+`/calls/{callId}/accept`, `/join`, `/reject`, `/cancel`, `/leave`) and LiveKit
+webhooks (`POST /api/v1/webhooks/livekit`). The REST API publishes realtime call
+frames through the broker so connected devices react immediately:
+
+- `call_incoming`: `{ type, call_id, conversation_id, call_type: "1on1", media_type, room_name, caller: { id, name, avatar_url }, expires_at }` — rings all callee devices.
+- `call_accepted`: `{ type, call_id, conversation_id, accepted_by }` — notifies caller that the callee accepted.
+- `call_answered_elsewhere`: `{ type, call_id, conversation_id, handled_by_device_id }` — stops ringing on callee's other devices.
+- `call_rejected`: `{ type, call_id, conversation_id, rejected_by, reason: "declined" | "busy" }` — notifies caller of rejection/busy.
+- `call_cancelled`: `{ type, call_id, conversation_id, cancelled_by }` — stops ringing when caller hangs up early.
+- `call_ended`: `{ type, call_id, conversation_id, reason }` — terminates a 1:1 call (`hangup`, `missed`, `room_finished`, etc.).
+- `group_call_started`: `{ type, call_id, conversation_id, conversation_name, media_type, started_by: { id, name }, participant_count, participant_ids }` — announces an active group call.
+- `group_call_updated`: `{ type, call_id, conversation_id, participant_count, participant_ids }` — updates live participant count on group banners.
+- `group_call_ended`: `{ type, call_id, conversation_id, reason }` — clears the group active-call banner after the LiveKit room finishes.
+
 ## Delivery guarantees
 
 | Property | Mechanism |

@@ -23,6 +23,8 @@ export const redisKeys = {
     return `direct:${low}:${high}`;
   },
   rateLimit: (userId: string) => `ratelimit:${userId}`,
+  callUser: (userId: string) => `call:user:${userId}`,
+  activeCall: (conversationId: string) => `call:active:${conversationId}`,
   channelForNode: (nodeId: string) => `gw:${nodeId}`,
   allNodesChannel: 'gw:all',
 };

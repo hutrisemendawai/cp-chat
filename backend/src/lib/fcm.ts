@@ -23,6 +23,49 @@ export type PushPayload = {
   content?: string;
 };
 
+export type CallPushEventType =
+  | 'call_invite'
+  | 'call_cancel'
+  | 'call_ended'
+  | 'group_call_started';
+
+export type CallPushPayload = {
+  type: CallPushEventType;
+  callId: string;
+  conversationId: string;
+  conversationType: 'direct' | 'group';
+  conversationName: string;
+  callType: '1on1' | 'group';
+  mediaType: 'voice' | 'video';
+  callerId: string;
+  callerName: string;
+  recipientUserId: string;
+  expiresAtMs?: number;
+  reason?: string;
+};
+
+/**
+ * Builds the `push_schema: "2"` string-only FCM `data` map for call signaling.
+ * Never includes LiveKit JWT tokens or room secrets.
+ */
+export function buildCallPushMap(payload: CallPushPayload): Record<string, string> {
+  return {
+    push_schema: '2',
+    type: payload.type,
+    call_id: payload.callId,
+    conversation_id: payload.conversationId,
+    conversation_type: payload.conversationType,
+    conversation_name: payload.conversationName,
+    call_type: payload.callType,
+    media_type: payload.mediaType,
+    caller_id: payload.callerId,
+    caller_name: payload.callerName,
+    recipient_user_id: payload.recipientUserId,
+    expires_at: payload.expiresAtMs !== undefined ? String(payload.expiresAtMs) : '',
+    reason: payload.reason ?? '',
+  };
+}
+
 /**
  * Maximum UTF-8 JSON size for the FCM `data` map. FCM enforces a hard 4,096 B
  * limit; budgeting at 3,500 B leaves comfortable headroom for wire framing and
@@ -175,6 +218,24 @@ export class NotificationService {
       data: buildDataOnlyMap(payload),
       android: {
         priority: 'high',
+      },
+    });
+  }
+
+  /**
+   * Sends a high-priority data-only FCM message for incoming call signaling,
+   * cancellation, or group call announcements. Uses a 45 s TTL so stale rings
+   * are never delivered minutes later when a phone comes back online.
+   */
+  async notifyCallEvent(fids: string[], payload: CallPushPayload): Promise<string[]> {
+    if (!this.messaging || fids.length === 0) return [];
+
+    return this.sendMulticast(fids, 'data_only', {
+      fids,
+      data: buildCallPushMap(payload),
+      android: {
+        priority: 'high',
+        ttl: 45_000,
       },
     });
   }

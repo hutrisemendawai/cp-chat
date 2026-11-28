@@ -117,6 +117,12 @@ class ChatSocket {
   Stream<String> get conversationUpdatedEvents =>
       _conversationUpdatedController.stream;
 
+  /// Realtime voice/video call signaling frames pushed by the API via the broker.
+  final StreamController<Map<String, dynamic>> _callEventController =
+      StreamController<Map<String, dynamic>>.broadcast();
+
+  Stream<Map<String, dynamic>> get callEvents => _callEventController.stream;
+
   /// The current connection status, reactive so a screen can show a banner.
   final ValueNotifier<SocketStatus> connection = ValueNotifier<SocketStatus>(
     const SocketStatus.disconnected(),
@@ -788,6 +794,18 @@ class ChatSocket {
         _handlePresence(decoded);
       case 'conversation_updated':
         unawaited(_handleConversationUpdated(decoded));
+      case 'call_incoming':
+      case 'call_accepted':
+      case 'call_answered_elsewhere':
+      case 'call_rejected':
+      case 'call_cancelled':
+      case 'call_ended':
+      case 'group_call_started':
+      case 'group_call_updated':
+      case 'group_call_ended':
+        if (!_callEventController.isClosed) {
+          _callEventController.add(decoded);
+        }
       case 'error':
         unawaited(_handleError(decoded));
       default:
@@ -1389,5 +1407,6 @@ class ChatSocket {
     connection.dispose();
     await _presenceController.close();
     await _conversationUpdatedController.close();
+    await _callEventController.close();
   }
 }

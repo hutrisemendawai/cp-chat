@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyBaseLogger } from 'fastify';
 import type { AppContext } from './context.js';
 import { sendError } from './context.js';
 import { registerAuthRoutes } from './auth-routes.js';
+import { registerCallRoutes } from './call-routes.js';
 import { registerConversationRoutes } from './conversation-routes.js';
 import { registerFriendRoutes } from './friend-routes.js';
 import { registerKeyRoutes } from './key-routes.js';
@@ -94,6 +95,7 @@ export function buildServer(ctx: AppContext, logger: Logger): FastifyInstance {
   registerSearchRoutes(app, ctx);
   registerPresenceRoutes(app, ctx);
   registerKeyRoutes(app, ctx);
+  registerCallRoutes(app, ctx);
   registerLogRoutes(app, ctx);
 
   return app;

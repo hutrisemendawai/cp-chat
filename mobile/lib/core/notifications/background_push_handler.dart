@@ -48,6 +48,9 @@ enum BackgroundPushOutcome {
   shownDecrypted,
   shownPlaintext,
   shownFallback,
+  shownCallInvite,
+  cancelledCallNotification,
+  droppedExpiredCall,
 }
 
 /// Non-secret diagnostic reason recorded when a background push falls back to
@@ -315,6 +318,124 @@ class BackgroundPushHandler {
     return service;
   }
 
+  static const Set<String> _callPushTypes = {
+    'call_invite',
+    'call_cancel',
+    'call_ended',
+    'group_call_started',
+  };
+
+  static bool isCallPushType(String type) => _callPushTypes.contains(type);
+
+  Future<BackgroundPushOutcome> _handleCallPush(
+    Map<String, dynamic> data,
+    String type,
+  ) async {
+    final callId = data['call_id']?.toString().trim() ?? '';
+    final conversationId = data['conversation_id']?.toString().trim() ?? '';
+    if (callId.isEmpty || conversationId.isEmpty) {
+      return BackgroundPushOutcome.droppedInvalid;
+    }
+
+    // Delegate to the live main isolate whenever the app process is in memory.
+    if (await _tryDelegateToMainIsolate(data)) {
+      return BackgroundPushOutcome.delegatedToMainIsolate;
+    }
+
+    // Terminated state: verify session + account ownership without touching SQLite.
+    final tokenStore = _tokenStoreFactory();
+    final access = await tokenStore.readAccessToken();
+    final refresh = await tokenStore.readRefreshToken();
+    final hasSession =
+        (access != null && access.isNotEmpty) || (refresh != null && refresh.isNotEmpty);
+    final userId = await tokenStore.readUserId();
+    var activeAccountId = await tokenStore.readActiveAccountId();
+    if ((activeAccountId == null || activeAccountId.isEmpty) &&
+        userId != null &&
+        userId.isNotEmpty) {
+      activeAccountId = accountIdForUser(userId);
+    }
+
+    final recipientUserId = data['recipient_user_id']?.toString().trim();
+    if (!shouldHandleFcmForAccount(
+          recipientUserId: recipientUserId,
+          activeAccountId: activeAccountId,
+          hasSession: hasSession,
+        ) ||
+        userId == null ||
+        userId.isEmpty ||
+        activeAccountId == null ||
+        activeAccountId.isEmpty) {
+      return BackgroundPushOutcome.droppedAccountMismatch;
+    }
+
+    final sink = await _notificationSinkFactory();
+
+    if (type == 'call_cancel' || type == 'call_ended') {
+      if (sink is LocalNotificationService) {
+        await sink.cancelCallNotification(callId);
+      }
+      return BackgroundPushOutcome.cancelledCallNotification;
+    }
+
+    // Respect Do Not Disturb preference for incoming rings and group call alerts.
+    final cachedUser = await tokenStore.readUser();
+    if (cachedUser?.status == 'dnd') {
+      return BackgroundPushOutcome.suppressedPolicy;
+    }
+
+    if (type == 'call_invite') {
+      final expiresRaw = int.tryParse(data['expires_at']?.toString().trim() ?? '');
+      if (expiresRaw != null &&
+          DateTime.now().toUtc().millisecondsSinceEpoch >= expiresRaw) {
+        return BackgroundPushOutcome.droppedExpiredCall;
+      }
+      final callerId = data['caller_id']?.toString().trim() ?? '';
+      final callerName = data['caller_name']?.toString().trim().isNotEmpty == true
+          ? data['caller_name']!.toString().trim()
+          : 'Incoming call';
+      final mediaType = data['media_type']?.toString().trim() ?? 'voice';
+
+      if (sink is LocalNotificationService) {
+        await sink.showIncomingCallNotification(
+          callId: callId,
+          conversationId: conversationId,
+          callerId: callerId,
+          callerName: callerName,
+          mediaType: mediaType,
+          accountId: activeAccountId,
+          expiresAtMs: expiresRaw,
+        );
+      } else {
+        await sink.showMessageNotification(
+          conversationId: conversationId,
+          title: callerName,
+          body: mediaType == 'video' ? 'Incoming video call' : 'Incoming voice call',
+          messageId: callId,
+          accountId: activeAccountId,
+        );
+      }
+      return BackgroundPushOutcome.shownCallInvite;
+    }
+
+    // Lightweight group call announcement ("Alice started a group call in <Group>").
+    final callerName = data['caller_name']?.toString().trim().isNotEmpty == true
+        ? data['caller_name']!.toString().trim()
+        : 'Someone';
+    final groupName = data['conversation_name']?.toString().trim().isNotEmpty == true
+        ? data['conversation_name']!.toString().trim()
+        : 'Group';
+    final mediaType = data['media_type']?.toString().trim() == 'video' ? 'video' : 'voice';
+    await sink.showMessageNotification(
+      conversationId: conversationId,
+      title: groupName,
+      body: '$callerName started a group $mediaType call',
+      messageId: callId,
+      accountId: activeAccountId,
+    );
+    return BackgroundPushOutcome.shownCallInvite;
+  }
+
   Future<BackgroundPushOutcome> handle(RemoteMessage message) {
     return handleData(
       message.data,
@@ -340,6 +461,14 @@ class BackgroundPushHandler {
     // 1. Legacy v1 payload: Android OS already painted the notification block.
     if (hasNotificationBlock) {
       return BackgroundPushOutcome.ignoredOsRendered;
+    }
+
+    // 1b. Call signaling fast-path (`call_invite`, `call_cancel`, `call_ended`,
+    //     `group_call_started`) runs BEFORE message parsing / SQLite lock for
+    //     sub-second terminated-state wake-up while enforcing account isolation.
+    final rawPushType = data['type']?.toString().trim() ?? '';
+    if (isCallPushType(rawPushType)) {
+      return _handleCallPush(data, rawPushType);
     }
 
     // 2. Parse metadata.

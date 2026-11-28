@@ -17,6 +17,11 @@ export type ErrorCode =
   | 'unsupported_media_type'
   | 'keys_not_found'
   | 'encryption_required'
+  | 'callee_busy'
+  | 'call_not_found'
+  | 'call_already_ended'
+  | 'call_full'
+  | 'calls_unavailable'
   | 'internal_error';
 
 const STATUS: Record<ErrorCode, number> = {
@@ -38,6 +43,11 @@ const STATUS: Record<ErrorCode, number> = {
   unsupported_media_type: 415,
   keys_not_found: 404,
   encryption_required: 422,
+  callee_busy: 409,
+  call_not_found: 404,
+  call_already_ended: 409,
+  call_full: 409,
+  calls_unavailable: 503,
   internal_error: 500,
 };
 

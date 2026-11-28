@@ -10,21 +10,58 @@ class NotificationTapTarget {
   const NotificationTapTarget({
     required this.conversationId,
     this.accountId,
+    this.kind = 'message',
+    this.callId,
+    this.callerId,
+    this.callerName,
+    this.mediaType,
+    this.expiresAtMs,
+    this.actionId,
   });
 
   final String conversationId;
   final String? accountId;
+  final String kind;
+  final String? callId;
+  final String? callerId;
+  final String? callerName;
+  final String? mediaType;
+  final int? expiresAtMs;
+  final String? actionId;
 
-  /// Encodes as `{"a":"<accountId>","c":"<conversationId>"}` (or bare `{"c":...}`
-  /// when no account id is known).
+  bool get isCall => kind == 'call' && callId != null && callId!.isNotEmpty;
+
+  NotificationTapTarget copyWith({String? actionId}) {
+    return NotificationTapTarget(
+      conversationId: conversationId,
+      accountId: accountId,
+      kind: kind,
+      callId: callId,
+      callerId: callerId,
+      callerName: callerName,
+      mediaType: mediaType,
+      expiresAtMs: expiresAtMs,
+      actionId: actionId ?? this.actionId,
+    );
+  }
+
+  /// Encodes as `{"a":"<accountId>","c":"<conversationId>"}` (plus optional
+  /// call metadata when `kind == 'call'`).
   String encode() => jsonEncode({
         if (accountId != null && accountId!.isNotEmpty) 'a': accountId,
         'c': conversationId,
+        if (kind != 'message') 'k': kind,
+        if (callId != null && callId!.isNotEmpty) 'call_id': callId,
+        if (callerId != null && callerId!.isNotEmpty) 'caller_id': callerId,
+        if (callerName != null && callerName!.isNotEmpty)
+          'caller_name': callerName,
+        if (mediaType != null && mediaType!.isNotEmpty) 'media_type': mediaType,
+        if (expiresAtMs != null) 'expires_at': expiresAtMs,
       });
 
   /// Parses either the account-tagged JSON format or a legacy bare
   /// `conversationId` string. Returns `null` for empty/unparseable payloads.
-  static NotificationTapTarget? parse(String? raw) {
+  static NotificationTapTarget? parse(String? raw, {String? actionId}) {
     if (raw == null || raw.isEmpty) return null;
     final trimmed = raw.trim();
     if (trimmed.startsWith('{')) {
@@ -34,9 +71,21 @@ class NotificationTapTarget {
           final conv = decoded['c']?.toString() ?? '';
           if (conv.isEmpty) return null;
           final acct = decoded['a']?.toString();
+          final kind = decoded['k']?.toString() ?? 'message';
+          final expRaw = decoded['expires_at'];
+          final expiresAtMs = expRaw is num
+              ? expRaw.toInt()
+              : int.tryParse(expRaw?.toString() ?? '');
           return NotificationTapTarget(
             conversationId: conv,
             accountId: (acct == null || acct.isEmpty) ? null : acct,
+            kind: kind,
+            callId: decoded['call_id']?.toString(),
+            callerId: decoded['caller_id']?.toString(),
+            callerName: decoded['caller_name']?.toString(),
+            mediaType: decoded['media_type']?.toString(),
+            expiresAtMs: expiresAtMs,
+            actionId: (actionId == null || actionId.isEmpty) ? null : actionId,
           );
         }
       } catch (_) {
@@ -44,7 +93,7 @@ class NotificationTapTarget {
       }
       return null;
     }
-    return NotificationTapTarget(conversationId: trimmed);
+    return NotificationTapTarget(conversationId: trimmed, actionId: actionId);
   }
 
   /// Returns `true` when this tap target belongs to the currently active
@@ -83,6 +132,10 @@ class LocalNotificationService implements MessageNotificationSink {
   /// same id so a background push and a foreground banner look identical.
   static const String channelId = 'cpchat_messages';
   static const String channelName = 'Messages';
+  static const String callChannelId = 'cpchat_calls';
+  static const String callChannelName = 'Incoming Calls';
+  static const String actionCallAccept = 'call_accept';
+  static const String actionCallDecline = 'call_decline';
 
   final FlutterLocalNotificationsPlugin _plugin;
   final StreamController<String> _taps = StreamController<String>.broadcast();
@@ -125,24 +178,38 @@ class LocalNotificationService implements MessageNotificationSink {
       ),
       onDidReceiveNotificationResponse: _onResponse,
     );
-    await _plugin
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(
-          const AndroidNotificationChannel(
-            channelId,
-            channelName,
-            description: 'Incoming chat messages',
-            importance: Importance.high,
-            playSound: true,
-            enableVibration: true,
-            enableLights: true,
-          ),
-        );
+    final androidPlugin = _plugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    await androidPlugin?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        channelId,
+        channelName,
+        description: 'Incoming chat messages',
+        importance: Importance.high,
+        playSound: true,
+        enableVibration: true,
+        enableLights: true,
+      ),
+    );
+    await androidPlugin?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        callChannelId,
+        callChannelName,
+        description: 'Incoming voice and video calls',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+        enableLights: true,
+      ),
+    );
 
     if (checkLaunchDetails) {
       final launch = await _plugin.getNotificationAppLaunchDetails();
       if (launch?.didNotificationLaunchApp ?? false) {
-        final parsed = NotificationTapTarget.parse(launch?.notificationResponse?.payload);
+        final parsed = NotificationTapTarget.parse(
+          launch?.notificationResponse?.payload,
+          actionId: launch?.notificationResponse?.actionId,
+        );
         if (parsed != null) {
           _coldStartTarget = parsed;
         }
@@ -196,6 +263,76 @@ class LocalNotificationService implements MessageNotificationSink {
       ),
       payload: target.encode(),
     );
+  }
+
+  /// Shows a high-priority full-screen incoming call notification with Accept
+  /// and Decline actions so locked / backgrounded / terminated devices ring.
+  Future<void> showIncomingCallNotification({
+    required String callId,
+    required String conversationId,
+    required String callerId,
+    required String callerName,
+    required String mediaType,
+    String? accountId,
+    int? expiresAtMs,
+  }) async {
+    if (!_initialized) return;
+    final id = callNotificationIdFor(callId);
+    final target = NotificationTapTarget(
+      conversationId: conversationId,
+      accountId: accountId,
+      kind: 'call',
+      callId: callId,
+      callerId: callerId,
+      callerName: callerName,
+      mediaType: mediaType,
+      expiresAtMs: expiresAtMs,
+    );
+    if (accountId != null && accountId.isNotEmpty) {
+      (_shownIdsByAccount[accountId] ??= <int>{}).add(id);
+    }
+    final isVideo = mediaType == 'video';
+    await _plugin.show(
+      id: id,
+      title: callerName,
+      body: isVideo ? 'Incoming video call' : 'Incoming voice call',
+      notificationDetails: NotificationDetails(
+        android: AndroidNotificationDetails(
+          callChannelId,
+          callChannelName,
+          channelDescription: 'Incoming voice and video calls',
+          importance: Importance.max,
+          priority: Priority.max,
+          category: AndroidNotificationCategory.call,
+          fullScreenIntent: true,
+          ongoing: true,
+          autoCancel: false,
+          visibility: NotificationVisibility.public,
+          tag: 'call:$callId',
+          actions: const [
+            AndroidNotificationAction(
+              actionCallAccept,
+              'Accept',
+              showsUserInterface: true,
+              cancelNotification: true,
+            ),
+            AndroidNotificationAction(
+              actionCallDecline,
+              'Decline',
+              showsUserInterface: true,
+              cancelNotification: true,
+            ),
+          ],
+        ),
+      ),
+      payload: target.encode(),
+    );
+  }
+
+  /// Dismisses an incoming call notification immediately (cancel/timeout/answered elsewhere).
+  Future<void> cancelCallNotification(String callId) async {
+    if (!_initialized || callId.isEmpty) return;
+    await _plugin.cancel(id: callNotificationIdFor(callId), tag: 'call:$callId');
   }
 
   /// Clears the notification shown for one conversation (its chat was opened).
@@ -254,11 +391,19 @@ class LocalNotificationService implements MessageNotificationSink {
   }
 
   void _onResponse(NotificationResponse response) {
-    final parsed = NotificationTapTarget.parse(response.payload);
+    final parsed = NotificationTapTarget.parse(
+      response.payload,
+      actionId: response.actionId,
+    );
     if (parsed == null) return;
     _tapTargets.add(parsed);
-    _taps.add(parsed.conversationId);
+    if (!parsed.isCall) {
+      _taps.add(parsed.conversationId);
+    }
   }
+
+  static int callNotificationIdFor(String callId) =>
+      ('call:$callId'.hashCode & 0x7fffffff);
 
   /// Stable notification id hashed from `(accountId, conversationId)` so
   /// banners for different accounts never collide.

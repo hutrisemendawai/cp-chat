@@ -189,6 +189,22 @@ services:
       SCYLLA_CONTACT_POINTS: ${SCYLLA_CONTACT_POINTS:-scylla:9042}
       OTEL_ENABLED: ${OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      # FCM push (used by call initiation/cancellation REST endpoints).
+      FCM_CREDENTIALS_FILE: ${FCM_CREDENTIALS_FILE:-}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL:-}
+      FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY:-}
+      # Self-hosted LiveKit SFU (voice & video calls).
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      LIVEKIT_URL: ${SERVICE_LIVEKIT_URL:-http://host.docker.internal:7880}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-ws://10.0.2.2:7880}
+      LIVEKIT_TOKEN_TTL_SECONDS: ${LIVEKIT_TOKEN_TTL_SECONDS:-600}
+      CALL_RING_TIMEOUT_SECONDS: ${CALL_RING_TIMEOUT_SECONDS:-40}
+      CALL_MAX_GROUP_PARTICIPANTS: ${CALL_MAX_GROUP_PARTICIPANTS:-20}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${API_PORT:-8080}:8080"
     healthcheck:
@@ -250,6 +266,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Self-hosted LiveKit SFU for 1-on-1 and group voice/video calls.
+  # Runs with host networking for direct UDP media ports (50000-60000/udp),
+  # WebRTC-over-TCP (7881/tcp), and built-in TURN (3478/udp, 5349/tcp).
+  livekit:
+    image: livekit/livekit-server:v1.9.11
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-devsecret-change-me-at-least-32-chars}"
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ${LIVEKIT_CONFIG_FILE:-./infra/livekit/livekit.yaml}:/etc/livekit.yaml:ro
+      - ${LIVEKIT_TLS_CERT_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro
 
 volumes:
   postgres-data:

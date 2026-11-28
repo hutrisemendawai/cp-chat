@@ -40,3 +40,10 @@
 # referenced by a kept class as a release-build error; this rule tells it to
 # ignore that optional reference.
 -dontwarn com.google.android.play.core.**
+
+# WebRTC & LiveKit (JNI + reflection callbacks)
+-keep class org.webrtc.** { *; }
+-dontwarn org.webrtc.**
+-keep class com.cloudwebrtc.webrtc.** { *; }
+-keep class io.livekit.** { *; }
+-keep class com.cpchat.mobile.CallForegroundService { *; }

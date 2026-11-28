@@ -1232,6 +1232,206 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/conversations/{id}/calls:
+    post:
+      tags: [Calls]
+      summary: Start a 1:1 call or start/join an active group call
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [media_type]
+              properties:
+                media_type:
+                  type: string
+                  enum: [voice, video]
+      responses:
+        '201':
+          description: New call created with LiveKit join grant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallJoinResponse'
+        '200':
+          description: Converged onto an existing active call in this conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallJoinResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Recipient is busy (`callee_busy`) or group call is full (`call_full`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: LiveKit calling is not configured (`calls_unavailable`)
+
+  /api/v1/conversations/{id}/active-call:
+    get:
+      tags: [Calls]
+      summary: Get the currently ringing or active call for a conversation
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: Active call summary or null
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  active_call:
+                    allOf:
+                      - $ref: '#/components/schemas/CallSummary'
+                    nullable: true
+
+  /api/v1/calls/active:
+    get:
+      tags: [Calls]
+      summary: List active calls across all conversations the caller belongs to
+      responses:
+        '200':
+          description: List of active calls
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [calls]
+                properties:
+                  calls:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CallSummary'
+
+  /api/v1/calls/{callId}/accept:
+    post:
+      tags: [Calls]
+      summary: Accept a ringing 1:1 call and mint a LiveKit token
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Accepted call with LiveKit join grant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallJoinResponse'
+        '409':
+          description: Call is no longer ringing (`call_already_ended`)
+
+  /api/v1/calls/{callId}/join:
+    post:
+      tags: [Calls]
+      summary: Late-join an active group call and mint a LiveKit token
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: LiveKit join grant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallJoinResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Call ended (`call_already_ended`) or participant cap reached (`call_full`)
+
+  /api/v1/calls/{callId}/token:
+    post:
+      tags: [Calls]
+      summary: Refresh a short-lived LiveKit token during an active call
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Refreshed LiveKit token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [livekit_url, token, expires_in]
+                properties:
+                  livekit_url: { type: string }
+                  token: { type: string }
+                  expires_in: { type: integer }
+
+  /api/v1/calls/{callId}/reject:
+    post:
+      tags: [Calls]
+      summary: Decline an incoming 1:1 call
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  enum: [declined, busy]
+                  default: declined
+      responses:
+        '204':
+          description: Rejected
+
+  /api/v1/calls/{callId}/cancel:
+    post:
+      tags: [Calls]
+      summary: Cancel an outgoing ringing 1:1 call
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Cancelled
+
+  /api/v1/calls/{callId}/leave:
+    post:
+      tags: [Calls]
+      summary: Leave a call (ends 1:1 calls; keeps group calls alive for other members)
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Left call
+
+  /api/v1/webhooks/livekit:
+    post:
+      tags: [Calls]
+      summary: LiveKit SFU webhook receiver (loopback only, Authorization JWT signed)
+      security: []
+      responses:
+        '200':
+          description: Webhook processed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1878,6 +2078,41 @@ components:
         ts:
           type: integer
           format: int64
+
+    CallSummary:
+      type: object
+      required:
+        [id, conversation_id, room_name, type, media_type, initiated_by, status, started_at, participant_count, participant_ids]
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        room_name: { type: string }
+        type: { type: string, enum: [1on1, group] }
+        media_type: { type: string, enum: [voice, video] }
+        initiated_by: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [ringing, active, ended, missed, rejected, cancelled, busy, failed]
+        ring_expires_at: { type: string, format: date-time, nullable: true }
+        started_at: { type: string, format: date-time }
+        answered_at: { type: string, format: date-time, nullable: true }
+        ended_at: { type: string, format: date-time, nullable: true }
+        end_reason: { type: string, nullable: true }
+        participant_count: { type: integer }
+        participant_ids:
+          type: array
+          items: { type: string, format: uuid }
+
+    CallJoinResponse:
+      type: object
+      required: [call, livekit_url, token, expires_in]
+      properties:
+        call:
+          $ref: '#/components/schemas/CallSummary'
+        livekit_url: { type: string }
+        token: { type: string }
+        expires_in: { type: integer }
+        joined_existing: { type: boolean }
 
 security:
   - bearerAuth: []

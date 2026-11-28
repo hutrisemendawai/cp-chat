@@ -9,11 +9,14 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/crypto/e2ee_service.dart' show isEncryptedContent, undecryptableContent;
 import '../../core/database/app_database.dart';
+import '../../core/models/call_models.dart';
 import '../../core/providers.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/connection_banner.dart';
 import '../../shared/widgets/user_avatar.dart';
+import '../calls/call_controller.dart';
+import '../calls/widgets/active_call_banner.dart';
 import '../presence/presence_controller.dart';
 import 'chat_controller.dart';
 import 'chat_search_sheet.dart';
@@ -114,6 +117,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
           ),
     );
     final controller = ref.read(chatControllerProvider(widget.conversationId));
+    // Hydrate any live group call banner for this chat.
+    unawaited(
+      ref
+          .read(callControllerProvider.notifier)
+          .refreshConversationActiveCall(widget.conversationId),
+    );
     // Catch up on anything missed, then mark the newest message read.
     await ref.read(chatSocketProvider).syncAll(selfId: ref.read(currentUserProvider)?.id);
     await controller.markRead();
@@ -296,6 +305,124 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
     _isNearBottom = true;
   }
 
+  Future<void> _startCall({
+    required CallMediaType mediaType,
+    required bool isGroup,
+    required String title,
+    String? peerAvatarUrl,
+    bool allowAudioFallback = false,
+  }) async {
+    final feedback = await ref.read(callControllerProvider.notifier).startCall(
+          conversationId: widget.conversationId,
+          mediaType: mediaType,
+          isGroup: isGroup,
+          title: title,
+          peerAvatarUrl: peerAvatarUrl,
+          allowAudioFallback: allowAudioFallback,
+        );
+    if (!mounted) return;
+    await _handleCallFeedback(
+      feedback,
+      onAudioFallback: () => _startCall(
+        mediaType: CallMediaType.voice,
+        isGroup: isGroup,
+        title: title,
+        peerAvatarUrl: peerAvatarUrl,
+        allowAudioFallback: true,
+      ),
+    );
+  }
+
+  Future<void> _joinGroupCall(
+    ActiveCallSummary summary, {
+    required String title,
+  }) async {
+    final feedback = await ref.read(callControllerProvider.notifier).joinGroupCall(
+          summary,
+          title: title,
+          enableVideo: summary.isVideo,
+        );
+    if (!mounted) return;
+    await _handleCallFeedback(feedback);
+  }
+
+  Future<void> _handleCallFeedback(
+    CallStartFeedback feedback, {
+    Future<void> Function()? onAudioFallback,
+  }) async {
+    switch (feedback) {
+      case CallStartFeedback.started:
+        return;
+      case CallStartFeedback.permissionPermanentlyDenied:
+        final perms = ref.read(callPermissionServiceProvider);
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Call permissions required'),
+            content: const Text(
+              'CP Chat needs microphone (and camera for video) permission to place calls. '
+              'Please enable it in Android app settings.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  Navigator.of(dialogContext).pop();
+                  unawaited(perms.openSettings());
+                },
+                child: const Text('Open Settings'),
+              ),
+            ],
+          ),
+        );
+      case CallStartFeedback.cameraDeniedAudioFallback:
+        if (onAudioFallback == null) return;
+        final fallback = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Camera permission denied'),
+            content: const Text(
+              'Camera access was denied. Would you like to start this call with audio only?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('Join with audio only'),
+              ),
+            ],
+          ),
+        );
+        if (fallback == true && mounted) {
+          await onAudioFallback();
+        }
+      case CallStartFeedback.permissionDenied:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Microphone permission is required for calls.'),
+          ),
+        );
+      case CallStartFeedback.busy:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Already in another call.')),
+        );
+      case CallStartFeedback.unavailable:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Calling service is currently unavailable.')),
+        );
+      case CallStartFeedback.failed:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not start call.')),
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -345,6 +472,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
     final groupSubtitle = isGroup && metadata.value != null
         ? '${metadata.value!.members.length} members'
         : null;
+
+    final callState = ref.watch(callControllerProvider);
+    final activeGroupCall = isGroup
+        ? ref.watch(activeGroupCallsProvider)[widget.conversationId]
+        : null;
+    final inCallForThisChat =
+        callState.isLiveSession && callState.currentConversationId == widget.conversationId;
+    final peerAvatar = peer?.user.avatarUrl ?? cached?.peerAvatarUrl;
 
     // Tapping the header opens a group's info, or a direct chat's peer profile.
 
@@ -432,6 +567,40 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
           ),
         ),
         actions: [
+          if (inCallForThisChat)
+            IconButton(
+              tooltip: 'Return to call',
+              icon: const Icon(Icons.call, color: AppColors.whatsappEmerald),
+              onPressed: () {
+                ref.read(callControllerProvider.notifier).setMinimized(false);
+              },
+            )
+          else ...[
+            IconButton(
+              tooltip: 'Voice call',
+              icon: const Icon(Icons.call_outlined),
+              onPressed: () => unawaited(
+                _startCall(
+                  mediaType: CallMediaType.voice,
+                  isGroup: isGroup,
+                  title: title,
+                  peerAvatarUrl: peerAvatar,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Video call',
+              icon: const Icon(Icons.videocam_outlined),
+              onPressed: () => unawaited(
+                _startCall(
+                  mediaType: CallMediaType.video,
+                  isGroup: isGroup,
+                  title: title,
+                  peerAvatarUrl: peerAvatar,
+                ),
+              ),
+            ),
+          ],
           IconButton(
             tooltip: 'Search in chat',
             icon: const Icon(Icons.search),
@@ -466,6 +635,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
       body: Column(
         children: [
           const ConnectionBanner(),
+          if (isGroup && activeGroupCall != null && !inCallForThisChat)
+            GroupActiveCallBanner(
+              summary: activeGroupCall,
+              onJoin: () => unawaited(
+                _joinGroupCall(activeGroupCall, title: title),
+              ),
+            ),
           if (!isGroup)
             ValueListenableBuilder<bool>(
               valueListenable: ref.watch(e2eeManagerProvider).keyMismatch,

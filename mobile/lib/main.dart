@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:uuid/uuid.dart';
 
+import 'core/models/call_models.dart';
 import 'core/models/models.dart';
 import 'core/notifications/background_push_handler.dart';
 import 'core/notifications/fcm_service.dart';
@@ -17,6 +18,10 @@ import 'core/storage/app_dirs.dart';
 import 'core/storage/token_store.dart';
 import 'core/theme/app_theme.dart';
 import 'features/auth/auth_screen.dart';
+import 'features/calls/active_call_screen.dart';
+import 'features/calls/call_controller.dart';
+import 'features/calls/incoming_call_screen.dart';
+import 'features/calls/widgets/active_call_banner.dart';
 import 'features/chat/chat_screen.dart';
 import 'features/conversations/conversations_screen.dart';
 import 'features/groups/create_group_screen.dart';
@@ -105,6 +110,18 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/search',
         builder: (context, state) => SearchScreen(key: accountKey('search')),
+      ),
+      GoRoute(
+        path: '/call/incoming',
+        builder: (context, state) => IncomingCallScreen(
+          key: accountKey('call-incoming'),
+        ),
+      ),
+      GoRoute(
+        path: '/call/active',
+        builder: (context, state) => ActiveCallScreen(
+          key: accountKey('call-active'),
+        ),
       ),
       GoRoute(
         path: '/users/:id',
@@ -298,6 +315,20 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
   }
 
   Future<void> _handleMainIsolateFcmData(Map<String, dynamic> data) async {
+    final rawType = data['type']?.toString().trim() ?? '';
+    if (BackgroundPushHandler.isCallPushType(rawType)) {
+      final scope = ref.read(accountScopeProvider);
+      if (!shouldHandleFcmForAccount(
+        recipientUserId: data['recipient_user_id']?.toString(),
+        activeAccountId: scope?.accountId,
+        hasSession: ref.read(authControllerProvider).isAuthenticated,
+      )) {
+        return;
+      }
+      await ref.read(callControllerProvider.notifier).handleFcmCallEvent(data);
+      return;
+    }
+
     final parsed = ParsedFcmMessage.tryParse(data);
     if (parsed == null) return;
     final scope = ref.read(accountScopeProvider);
@@ -400,7 +431,51 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
         !target.matchesActiveAccount(activeAccountId)) {
       return;
     }
+    if (target.isCall) {
+      _handleCallNotificationAction(target);
+      return;
+    }
     _openConversation(target.conversationId);
+  }
+
+  void _handleCallNotificationAction(NotificationTapTarget target) {
+    final callId = target.callId;
+    if (callId == null || callId.isEmpty) return;
+
+    final invite = IncomingCallInvite(
+      callId: callId,
+      conversationId: target.conversationId,
+      callType: CallType.oneOnOne,
+      mediaType: CallMediaType.parse(target.mediaType),
+      roomName: 'call_$callId',
+      callerId: target.callerId ?? '',
+      callerName: target.callerName ?? 'Incoming call',
+      expiresAt: target.expiresAtMs != null
+          ? DateTime.fromMillisecondsSinceEpoch(target.expiresAtMs!, isUtc: true)
+          : null,
+    );
+
+    final controller = ref.read(callControllerProvider.notifier);
+    if (target.actionId == LocalNotificationService.actionCallDecline) {
+      unawaited(controller.rejectIncoming(callId: callId, reason: 'declined'));
+      return;
+    }
+    if (target.actionId == LocalNotificationService.actionCallAccept) {
+      unawaited(controller.acceptIncoming(inviteOverride: invite));
+      return;
+    }
+    unawaited(
+      controller.handleFcmCallEvent({
+        'type': 'call_invite',
+        'call_id': callId,
+        'conversation_id': target.conversationId,
+        'call_type': '1on1',
+        'media_type': target.mediaType ?? 'voice',
+        'caller_id': target.callerId ?? '',
+        'caller_name': target.callerName ?? 'Incoming call',
+        if (target.expiresAtMs != null) 'expires_at': '${target.expiresAtMs}',
+      }),
+    );
   }
 
   void _openConversation(String conversationId) {
@@ -429,6 +504,28 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
     final router = ref.watch(routerProvider);
     final accountId = ref.watch(accountScopeProvider)?.accountId ?? 'signed-out';
 
+    ref.listen<CallState>(callControllerProvider, (previous, next) {
+      final location = router.routeInformationProvider.value.uri.path;
+      if (next.status == CallStatus.ringing && location != '/call/incoming') {
+        router.push('/call/incoming');
+      } else if (next.isLiveSession &&
+          !next.isMinimized &&
+          location != '/call/active') {
+        if (location == '/call/incoming') {
+          router.pushReplacement('/call/active');
+        } else {
+          router.push('/call/active');
+        }
+      } else if (next.isIdle &&
+          (location == '/call/incoming' || location == '/call/active')) {
+        if (router.canPop()) {
+          router.pop();
+        } else {
+          router.go('/conversations');
+        }
+      }
+    });
+
     return KeyedSubtree(
       key: ValueKey<String>('app:$accountId'),
       child: MaterialApp.router(
@@ -437,6 +534,18 @@ class _CpChatAppState extends ConsumerState<CpChatApp> with WidgetsBindingObserv
         routerConfig: router,
         theme: AppTheme.light,
         darkTheme: AppTheme.dark,
+        builder: (context, child) {
+          return Column(
+            children: [
+              OngoingCallReturnBar(
+                onReturnToCall: () {
+                  ref.read(callControllerProvider.notifier).setMinimized(false);
+                },
+              ),
+              Expanded(child: child ?? const SizedBox.shrink()),
+            ],
+          );
+        },
       ),
     );
   }

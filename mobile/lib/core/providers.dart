@@ -35,6 +35,7 @@ import 'notifications/notification_policy.dart';
 import 'notifications/push_registration.dart';
 import 'storage/app_dirs.dart';
 import 'storage/token_store.dart';
+import '../features/calls/call_controller.dart';
 import '../features/chat/conversation_metadata.dart';
 
 int _nextScopeEpoch = 0;
@@ -463,9 +464,17 @@ class SessionLifecycle {
   void onAppLifecycleChanged(AppLifecycleState state) {
     if (!_running) return;
     if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      // Never sever the signaling WebSocket while a voice/video call is active
+      // (foreground service keeps the process alive while minimized or locked).
+      if (_ref.mounted && !_ref.read(callControllerProvider).isIdle) {
+        _bgDisconnectTimer?.cancel();
+        _bgDisconnectTimer = null;
+        return;
+      }
       _bgDisconnectTimer?.cancel();
       _bgDisconnectTimer = Timer(const Duration(seconds: 4), () {
         if (!_running) return;
+        if (_ref.mounted && !_ref.read(callControllerProvider).isIdle) return;
         final current = _ref.read(appLifecycleProvider);
         if (current != AppLifecycleState.paused &&
             current != AppLifecycleState.detached) {
@@ -527,6 +536,7 @@ class SessionLifecycle {
       if (!_running) return;
       if (socket.connection.value.isConnected) {
         unawaited(_ref.read(pushRegistrationProvider).ensureRegistered());
+        unawaited(_ref.read(callControllerProvider.notifier).refreshActiveCalls());
       }
     }
 
@@ -744,6 +754,16 @@ class SessionLifecycle {
     _activeSocket = null;
     _activeE2ee = null;
     _activePush = null;
+
+    // Ensure any live voice/video call is hung up and all tracks/FGS/wakelock
+    // are disposed immediately before tearing down the socket & DB on logout.
+    if (_ref.mounted && !_ref.read(callControllerProvider).isIdle) {
+      try {
+        await _ref.read(callControllerProvider.notifier).teardownForLogout();
+      } catch (error) {
+        debugPrint('Session teardown call cleanup failed: $error');
+      }
+    }
 
     if (socket != null) {
       try {
